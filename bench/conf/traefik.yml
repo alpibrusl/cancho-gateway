@@ -1,0 +1,10 @@
+# Traefik as a plain reverse proxy: one entry point, one router, one service, no API, no dashboard, no access log. GOMAXPROCS=1.
+entryPoints:
+  web:
+    address: ":@PORT@"
+providers:
+  file:
+    filename: "@DIR@/traefik-dynamic.yml"
+log:
+  level: ERROR
+# (no api, no dashboard)

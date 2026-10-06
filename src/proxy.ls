@@ -872,6 +872,7 @@ fn dial[&h, &n, &c](heap: &!h Heap, tab: conns.Table, net: &n Net(""), core: &!c
             st[q + 20] = 0;
             st[q + 22] = st[p + 18];
             borrow mut table as &!tw in {
+                let ignored = conns.nodelay(tw, slot);
                 if attach(tw, core, k, slot, now) == 0 {
                     if conns.watch(tw, core.poller, slot, token_of(slot), 2) != 0 {
                         close_slot(tw, core, slot);
@@ -1132,6 +1133,10 @@ fn accept_all[&h, &l, &c](heap: &!h Heap, conn: conns.Table, listener: &!l Liste
                         st[p + 21] = 0;
                         st[p + 22] = 0;
                         borrow mut table as &!ct in {
+                            // TCP_NODELAY: a request is forwarded in as many writes as it arrives in reads, and a small trailing write
+                            // behind a large one would otherwise wait for the peer's delayed acknowledgement (tens of milliseconds).
+                            // Best effort: a refusal leaves the connection working, only slower.
+                            let ignored = conns.nodelay(ct, slot);
                             if conns.nonblocking(ct, slot) != 0 || conns.watch(ct, core.poller, slot, token_of(slot), 1) != 0 {
                                 conns.close(ct, slot);
                                 st[p] = 0;

@@ -1,0 +1,11 @@
+# Caddy as a plain reverse proxy: no admin endpoint, no TLS, no access log (docs/bench.md). Run with GOMAXPROCS=1.
+{
+    admin off
+    auto_https off
+    log {
+        output discard
+    }
+}
+:@PORT@ {
+    reverse_proxy 127.0.0.1:@UP@
+}
