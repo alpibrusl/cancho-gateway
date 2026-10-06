@@ -21,3 +21,7 @@ allow = ["args", "io_write"]
 # A test tool: reads requests from argv, answers on standard output. No network, no files.
 [route_probe]
 allow = ["args", "io_write"]
+
+# A test tool: reads a response head from argv, answers on standard output. No network, no files.
+[response_probe]
+allow = ["args", "io_write"]

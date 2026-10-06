@@ -1,0 +1,46 @@
+{
+  "bounded": true,
+  "unbounded_by": [],
+  "effects": [
+    "args",
+    "io_write"
+  ],
+  "labels": [
+    {
+      "name": "args",
+      "argument": null,
+      "bounded": true
+    },
+    {
+      "name": "io_write",
+      "argument": null,
+      "bounded": true
+    }
+  ],
+  "foreign_symbols": [],
+  "pure": [
+    "body_mode",
+    "code",
+    "content_length",
+    "eq_lower",
+    "head_end",
+    "head_limit",
+    "hexval",
+    "interim",
+    "is_alpha",
+    "is_digit",
+    "is_lower",
+    "is_tchar",
+    "is_upper",
+    "lists",
+    "reusable",
+    "slots",
+    "status",
+    "tag",
+    "to_lower",
+    "version"
+  ],
+  "folded_operators": 24,
+  "folded_calls": 0,
+  "functions": 24
+}

@@ -1,6 +1,6 @@
 # The proxy core (task #5), first slice
 
-Status: **a working reverse proxy, with deliberate gaps.** One thread, one poller, memory sized at start. Built: accept, head
+Status: **a working reverse proxy, with deliberate gaps.** (Upstream keep-alive and the pool arrived in `docs/pool.md`; the first slice below opened one connection per request.) One thread, one poller, memory sized at start. Built: accept, head
 framing and routing (tasks #3, #4), a fresh upstream connection per request, request body forwarding (Content-Length and
 chunked), response relay, backpressure both ways, deadlines, refusals as `application/problem+json`. **Not built:** keep-alive
 on either side and the upstream pool (#6), the header policy beyond hop-by-hop stripping (#7), authentication (#8), rate limits

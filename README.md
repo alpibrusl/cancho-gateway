@@ -13,7 +13,7 @@ every input bounded with its own refusal, and measurements against the incumbent
 
 **Status: a working first slice, not a finished gateway.** It accepts, frames and routes requests, forwards them to a compiled-in
 upstream and relays the response, with deadlines, backpressure and problem+json refusals, all tested end to end
-(`docs/proxy.md`). It has **no keep-alive, no connection pool, no authentication, no rate limiting, no access log, no header
+(`docs/proxy.md`). It keeps upstream connections alive in a bounded pool (`docs/pool.md`). It has **no client-side keep-alive, no health checks, no authentication, no rate limiting, no access log, no header
 policy beyond hop-by-hop stripping**, and has not been benchmarked. The plan and its tasks are in the epic issue; the design is
 `docs/design.md`.
 
