@@ -11,8 +11,11 @@ parsing (`std.http`) is the defence against request smuggling.
 The model is [`lexsys-cache`](https://github.com/alpibrusl/lexsys-cache): one thread, one poller, memory sized at start,
 every input bounded with its own refusal, and measurements against the incumbent (nginx, HAProxy) fixed before the code.
 
-**Status: design stage. Nothing is built.** The plan and its tasks are in the epic issue. The first deliverable is
-`docs/design.md`: scope, the authority row, the gates, written before any code.
+**Status: a working first slice, not a finished gateway.** It accepts, frames and routes requests, forwards them to a compiled-in
+upstream and relays the response, with deadlines, backpressure and problem+json refusals, all tested end to end
+(`docs/proxy.md`). It has **no keep-alive, no connection pool, no authentication, no rate limiting, no access log, no header
+policy beyond hop-by-hop stripping**, and has not been benchmarked. The plan and its tasks are in the epic issue; the design is
+`docs/design.md`.
 
 ## Intended scope (v1)
 

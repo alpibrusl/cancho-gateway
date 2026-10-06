@@ -51,7 +51,7 @@ def valid_deployment(rng):
         with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
             f.write(text)
         try:
-            listen, ups, routes = generate.load(f.name)
+            listen, ups, routes, _ = generate.load(f.name)
             return f.name, ups, routes
         except generate.Refusal:
             os.unlink(f.name)

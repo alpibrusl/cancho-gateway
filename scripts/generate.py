@@ -24,10 +24,13 @@ MAX_ROUTES = 256
 MAX_PREFIX = 255
 MAX_HOST = 253
 MAX_BODY = 1 << 30
+# Milliseconds: the head must arrive, the upstream must connect, the upstream must start answering, the whole request must end.
+TIMEOUTS = {"header_timeout_ms": 10000, "connect_timeout_ms": 5000, "upstream_timeout_ms": 30000, "total_timeout_ms": 60000}
+TIMEOUT_RANGE = (100, 600000)
 DEFAULT_BODY = 1 << 20
 METHODS = ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
 KEYS = {
-    "": ["listen"],
+    "": ["listen", "header_timeout_ms", "connect_timeout_ms", "upstream_timeout_ms", "total_timeout_ms"],
     "upstream": ["name", "addr"],
     "route": ["name", "host", "path_prefix", "methods", "upstream", "max_body"],
 }
@@ -127,6 +130,14 @@ def load(path):
     listen = doc.get("listen")
     if not isinstance(listen, int) or isinstance(listen, bool) or not 1 <= listen <= 65535:
         refuse("config.listen", "listen must be a port in 1..65535", key="listen")
+    timeouts = {}
+    for key, default in TIMEOUTS.items():
+        v = doc.get(key, default)
+        if not isinstance(v, int) or isinstance(v, bool) or not TIMEOUT_RANGE[0] <= v <= TIMEOUT_RANGE[1]:
+            refuse("config.timeout", "%s must be an integer in %d..%d milliseconds" % ((key,) + TIMEOUT_RANGE), key=key)
+        timeouts[key] = v
+    if not timeouts["header_timeout_ms"] <= timeouts["total_timeout_ms"] or not timeouts["connect_timeout_ms"] <= timeouts["total_timeout_ms"]:
+        refuse("config.timeout", "total_timeout_ms must be at least the header and connect timeouts", key="total_timeout_ms")
     ups = doc.get("upstream", [])
     if not ups:
         raise Refusal("config.upstream", "at least one [[upstream]] is required", line=1)
@@ -184,14 +195,14 @@ def load(path):
                 refuse("config.route-conflict", "routes %d and %d answer the same host, path_prefix and method: a tie is a "
                        "configuration error" % (i, j), "route", j, "path_prefix",
                        "give them different prefixes or hosts, or disjoint methods")
-    return listen, [(u["name"], u["addr"]) for u in ups], routes
+    return listen, [(u["name"], u["addr"]) for u in ups], routes, timeouts
 
 
 def literal(text):
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t") + '"'
 
 
-def render_deploy(listen, ups):
+def render_deploy(listen, ups, timeouts):
     addrs = [a for _, a in ups]
     prefix = intended_prefix(addrs)
     lines = [
@@ -202,6 +213,12 @@ def render_deploy(listen, ups):
         "// this list in code before every connect and `authority.toml` states the report is `net_out(\"\")`.", "",
         "pub fn listen_port() -> [] int {", "    return %d;" % listen, "}", "",
         "pub fn upstream_count() -> [] int {", "    return %d;" % len(ups), "}", "",
+        "// Milliseconds: the head must arrive, the upstream must connect, the upstream must start answering, the whole request",
+        "// must end (docs/proxy.md section 3).",
+        "pub fn header_ms() -> [] int {", "    return %d;" % timeouts["header_timeout_ms"], "}", "",
+        "pub fn connect_ms() -> [] int {", "    return %d;" % timeouts["connect_timeout_ms"], "}", "",
+        "pub fn upstream_ms() -> [] int {", "    return %d;" % timeouts["upstream_timeout_ms"], "}", "",
+        "pub fn total_ms() -> [] int {", "    return %d;" % timeouts["total_timeout_ms"], "}", "",
         "// The longest common prefix of the addresses, cut at a delimiter: what `narrow` would be given once",
         "// lex-sys has separate listen and connect bounds. Empty means no shared prefix.",
         "pub fn intended_egress_prefix() -> [] &static [byte] {", "    return %s;" % literal(prefix), "}", "",
@@ -249,15 +266,16 @@ def main():
         print("usage: generate.py DEPLOYMENT.toml [--check|--explain|--out DIR]", file=sys.stderr)
         return 2
     try:
-        listen, ups, routes = load(args[0])
+        listen, ups, routes, timeouts = load(args[0])
     except Refusal as r:
         print(json.dumps({"file": args[0], "hint": r.hint, "key": r.key, "line": r.line, "message": str(r), "rule": r.rule},
                          sort_keys=True), file=sys.stderr)
         return 2
-    outputs = {"deploy.ls": render_deploy(listen, ups), "routes.ls": render_routes(routes)}
+    outputs = {"deploy.ls": render_deploy(listen, ups, timeouts), "routes.ls": render_routes(routes)}
     if "--explain" in flags:
         prefix = intended_prefix([a for _, a in ups])
         print("listen %d; %d upstream(s): %s" % (listen, len(ups), ", ".join(a for _, a in ups)))
+        print("timeouts (ms): " + ", ".join("%s %d" % (k.replace("_timeout_ms", ""), v) for k, v in timeouts.items()))
         print("intended egress prefix: %s" % (repr(prefix) if prefix else "none (no shared prefix)"))
         for n, r in enumerate(routes):
             print("route %d: %s %s -> %s (max body %d)" % (n, r["host"] or "*", r["prefix"], ups[r["upstream"]][0], r["max_body"]))

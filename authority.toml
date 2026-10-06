@@ -7,15 +7,12 @@
 #
 # A label with an argument is written as the compiler prints it: net_out("10.0.1.").
 #
-# Scaffold: only what the program does today. Each task adds the rows it needs, with the design section
-# that justifies them:
-#   #5        args, heap, net_in(""), net_out(""), conn_accept, conn_read, conn_write, poll, clock
-#             (unnarrowed: one bound serves listen and connect, design section 2.1)
-#   #10       io_write, err_write (already allowed below)
-# Never, for any task: ffi, fs_read, fs_write, file_*, dir_* (the gateway touches no files).
+# The gateway's row (docs/design.md section 3, section 2.1): the network both ways and unnarrowed (one bound serves listen and
+# connect, so the compiler cannot carry the upstream set: `gateway.egress` enforces it), the clock for deadlines, the heap for
+# the slabs sized at start, args for `--version`, standard output for it. Never: ffi, fs_read, fs_write, file_*, dir_*.
 
 [gateway]
-allow = ["io_write", "err_write"]
+allow = ["args", "clock", "conn_accept", "conn_read", "conn_write", "heap", "io_write", "err_write", "net_in(\"\")", "net_out(\"\")", "poll"]
 
 # A test tool: reads its input from argv, answers on standard output. No network, no files.
 [framing_probe]
