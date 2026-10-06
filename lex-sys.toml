@@ -17,6 +17,12 @@ sources = ["src/framing.ls", "src/chunked.ls", "src/framing_probe.ls"]
 std = true
 out = "build/framing_probe"
 
+[[bin]]
+name = "route_probe"
+sources = ["generated/routes.ls", "src/route.ls", "src/route_probe.ls"]
+std = true
+out = "build/route_probe"
+
 [[test]]
 name = "version"
 sources = ["src/version.ls", "tests/version_test.ls"]
