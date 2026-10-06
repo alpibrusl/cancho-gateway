@@ -33,6 +33,15 @@ pub fn total_ms() -> [] int {
     return 60000;
 }
 
+// How long an idle upstream connection is kept, and how many per upstream (0: no pooling; docs/pool.md).
+pub fn idle_ms() -> [] int {
+    return 5000;
+}
+
+pub fn pool_idle_max() -> [] int {
+    return 4;
+}
+
 // The longest common prefix of the addresses, cut at a delimiter: what `narrow` would be given once
 // lex-sys has separate listen and connect bounds. Empty means no shared prefix.
 pub fn intended_egress_prefix() -> [] &static [byte] {

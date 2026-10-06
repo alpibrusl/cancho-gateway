@@ -7,7 +7,7 @@ lex-sys = "0dfc81ca680c49c5c88ac7e53c103a037c7e9f02"   # the compiler these sour
 
 [[bin]]
 name = "gateway"
-sources = ["generated/deploy.ls", "generated/routes.ls", "src/out.ls", "src/problem.ls", "src/framing.ls", "src/chunked.ls", "src/route.ls", "src/forward.ls", "src/egress.ls", "src/proxy.ls", "src/version.ls", "src/gateway.ls"]
+sources = ["generated/deploy.ls", "generated/routes.ls", "src/out.ls", "src/problem.ls", "src/framing.ls", "src/chunked.ls", "src/route.ls", "src/response.ls", "src/forward.ls", "src/egress.ls", "src/proxy.ls", "src/version.ls", "src/gateway.ls"]
 std = true
 out = "build/gateway"
 
@@ -22,6 +22,12 @@ name = "route_probe"
 sources = ["generated/routes.ls", "src/route.ls", "src/route_probe.ls"]
 std = true
 out = "build/route_probe"
+
+[[bin]]
+name = "response_probe"
+sources = ["src/response.ls", "src/response_probe.ls"]
+std = true
+out = "build/response_probe"
 
 [[test]]
 name = "version"
@@ -40,5 +46,5 @@ std = true
 
 [[test]]
 name = "forward"
-sources = ["src/out.ls", "src/forward.ls", "tests/forward_test.ls"]
+sources = ["src/out.ls", "src/response.ls", "src/forward.ls", "tests/forward_test.ls"]
 std = true

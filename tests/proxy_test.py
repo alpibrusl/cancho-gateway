@@ -22,7 +22,7 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LEX = os.environ.get("LEX_SYS", "lex-sys")
-SOURCES = ["out", "problem", "framing", "chunked", "route", "forward", "egress", "proxy", "version", "gateway"]
+SOURCES = ["out", "problem", "framing", "chunked", "route", "response", "forward", "egress", "proxy", "version", "gateway"]
 
 
 def free_port():
@@ -165,14 +165,159 @@ class Upstream:
                 pass
 
 
+class KAUpstream:
+    """An upstream that keeps connections open and answers many requests on each; behaviour is chosen by the request path.
+    Records every connection (how many requests it served, whether it is still open, whether it was closed by the peer) and every
+    request head, so a test can say exactly how the gateway used its connections."""
+
+    def __init__(self, port):
+        self.port = port
+        self.lock = threading.Lock()
+        self.stop = False
+        self.next_id = 0
+        self.conns = {}          # id -> {"requests": n, "open": bool, "peer_closed": bool}
+        self.heads = []          # (conn id, head)
+        self.sock = socket.socket()
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("127.0.0.1", port))
+        self.sock.listen(200)
+        threading.Thread(target=self.accept, daemon=True).start()
+
+    def accept(self):
+        while not self.stop:
+            try:
+                c, _ = self.sock.accept()
+            except OSError:
+                return
+            with self.lock:
+                cid = self.next_id
+                self.next_id += 1
+                self.conns[cid] = {"requests": 0, "open": True, "peer_closed": False}
+            threading.Thread(target=self.serve, args=(cid, c), daemon=True).start()
+
+    def open_count(self):
+        with self.lock:
+            return sum(1 for v in self.conns.values() if v["open"])
+
+    def connections(self):
+        with self.lock:
+            return len(self.conns)
+
+    def requests_for(self, prefix):
+        with self.lock:
+            return [(cid, h) for cid, h in self.heads if h.split(b" ")[1].decode().startswith(prefix)]
+
+    def serve(self, cid, c):
+        buf = b""
+        try:
+            while True:
+                while b"\r\n\r\n" not in buf:
+                    d = c.recv(65536)
+                    if not d:
+                        with self.lock:
+                            self.conns[cid]["peer_closed"] = True
+                        return
+                    buf += d
+                head, _, buf = buf.partition(b"\r\n\r\n")
+                method, path = head.split(b" ")[0], head.split(b" ")[1].decode()
+                with self.lock:
+                    self.heads.append((cid, head))
+                    self.conns[cid]["requests"] += 1
+                    nth = self.conns[cid]["requests"]
+                if path.startswith("/ka/413"):
+                    c.sendall(b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\n\r\n")
+                    time.sleep(1.5)
+                    return
+                body, buf = self.take_body(c, head, buf)
+                ok = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+                if path.startswith("/ka/echo"):
+                    c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+                elif path.startswith("/ka/chunked"):
+                    c.sendall(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n")
+                elif path.startswith("/ka/204"):
+                    c.sendall(b"HTTP/1.1 204 No Content\r\n\r\n")
+                elif path.startswith("/ka/head"):
+                    if method == b"HEAD":
+                        c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n")
+                    else:
+                        c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n" + b"h" * 100)
+                elif path.startswith("/ka/interim"):
+                    c.sendall(b"HTTP/1.1 100 Continue\r\n\r\n" + ok)
+                elif path.startswith("/ka/http10"):
+                    c.sendall(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    return
+                elif path.startswith("/ka/close"):
+                    c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                    return
+                elif path.startswith("/ka/eof"):
+                    c.sendall(b"HTTP/1.1 200 OK\r\n\r\ntail")
+                    return
+                elif path.startswith("/ka/leftover"):
+                    c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nokEXTRA")
+                elif path.startswith("/ka/slow"):
+                    time.sleep(0.4)
+                    c.sendall(ok)
+                elif path.startswith("/ka/lying"):
+                    # Says nothing about closing, then closes: a pooled connection that has silently died.
+                    c.sendall(ok)
+                    time.sleep(0.05)
+                    return
+                elif path.startswith("/ka/die"):
+                    if nth > 1:
+                        return
+                    c.sendall(ok)
+                elif path.startswith("/ka/badlen"):
+                    c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\nok")
+                elif path.startswith("/ka/hop"):
+                    c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nKeep-Alive: timeout=5\r\nConnection: keep-alive, X-Secret\r\nX-Secret: 1\r\nX-Kept: 2\r\n\r\nok")
+                else:
+                    c.sendall(ok)
+        except OSError:
+            pass
+        finally:
+            with self.lock:
+                self.conns[cid]["open"] = False
+            try:
+                c.close()
+            except OSError:
+                pass
+
+    def take_body(self, c, head, buf):
+        m = re.search(rb"(?i)\r\ncontent-length: *(\d+)", head)
+        if m:
+            n = int(m.group(1))
+            while len(buf) < n:
+                d = c.recv(65536)
+                if not d:
+                    break
+                buf += d
+            return buf[:n], buf[n:]
+        if re.search(rb"(?i)\r\ntransfer-encoding: *chunked", head):
+            out = b""
+            while True:
+                while b"\r\n" not in buf:
+                    buf += c.recv(65536)
+                line, _, buf = buf.partition(b"\r\n")
+                size = int(line, 16)
+                while len(buf) < size + 2:
+                    buf += c.recv(65536)
+                out += buf[:size]
+                buf = buf[size + 2:]
+                if size == 0:
+                    return out, buf
+        return b"", buf
+
+
 class Gateway:
-    def __init__(self, tmp, port, up_port, dead_port):
+    def __init__(self, tmp, port, up_port, dead_port, ka_port, pool=4):
         deploy = pathlib.Path(tmp) / "deploy.toml"
         deploy.write_text("""listen = %d
 header_timeout_ms = 1000
 connect_timeout_ms = 1000
 upstream_timeout_ms = 1500
 total_timeout_ms = 4000
+idle_timeout_ms = 500
+pool_idle_max = %d
 
 [[upstream]]
 name = "up"
@@ -182,15 +327,24 @@ addr = "127.0.0.1:%d"
 name = "dead"
 addr = "127.0.0.1:%d"
 
+[[upstream]]
+name = "ka"
+addr = "127.0.0.1:%d"
+
 [[route]]
 path_prefix = "/dead"
 upstream = "dead"
 
 [[route]]
+path_prefix = "/ka"
+upstream = "ka"
+max_body = 1048576
+
+[[route]]
 path_prefix = "/"
 upstream = "up"
 max_body = 1048576
-""" % (port, up_port, dead_port))
+""" % (port, pool, up_port, dead_port, ka_port))
         subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(deploy), "--out", tmp], check=True)
         files = [os.path.join(tmp, "deploy.ls"), os.path.join(tmp, "routes.ls")] + [str(ROOT / "src" / (n + ".ls")) for n in SOURCES]
         built = subprocess.run([LEX, "build", "--std", *files, "-o", os.path.join(tmp, "gateway")], capture_output=True, text=True)
@@ -283,7 +437,7 @@ class T:
         n = len(up.heads)
         request(gw, b"GET /x HTTP/1.1\r\nHost: a.example\r\nConnection: keep-alive, X-Drop\r\nX-Drop: 1\r\nKeep-Alive: 5\r\nAccept: */*\r\n\r\n")
         head = up.heads[n].decode()
-        assert head == "GET /x HTTP/1.1\r\nHost: a.example\r\nAccept: */*\r\nConnection: close", head
+        assert head == "GET /x HTTP/1.1\r\nHost: a.example\r\nAccept: */*", head
 
     def one_upstream_connection_per_request(gw, up):
         before = up.connections
@@ -551,31 +705,231 @@ class T:
         assert gw.fds() == fds, ("file descriptors", fds, gw.fds())
         assert gw.rss_kb() - rss < 512, ("resident memory grew by kB", gw.rss_kb() - rss)
 
+    # ---- keep-alive upstream connections (task #6, docs/pool.md) ----
+
+    def keepalive_reuses_the_upstream_connection(gw, up):
+        quiesce(gw)
+        ka = gw.ka
+        before = ka.connections()
+        for _ in range(10):
+            status, _, body = split(request(gw, GET % b"/ka"))
+            assert (status, body) == (200, b"ok"), (status, body)
+        assert ka.connections() - before == 1, ("upstream connections for ten requests", ka.connections() - before)
+        assert [n for n in ka.conns.values()][-1]["requests"] == 10
+
+    def keepalive_carries_bodies_both_ways(gw, up):
+        quiesce(gw)
+        ka = gw.ka
+        before = ka.connections()
+        body = os.urandom(50000)
+        status, _, got = split(request(gw, b"POST /ka/echo HTTP/1.1\r\nHost: a\r\nContent-Length: %d\r\n\r\n" % len(body) + body, timeout=15))
+        assert status == 200 and got == body, (status, len(got))
+        parts = [os.urandom(random.randint(1, 3000)) for _ in range(8)]
+        raw = b"".join(b"%x\r\n" % len(p) + p + b"\r\n" for p in parts) + b"0\r\n\r\n"
+        status, _, got = split(request(gw, b"POST /ka/echo HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n" + raw, timeout=15))
+        assert status == 200 and got == b"".join(parts), (status, len(got))
+        assert split(request(gw, GET % b"/ka"))[0] == 200
+        assert ka.connections() - before == 1, ("the same connection should have served all three", ka.connections() - before)
+
+    def response_framings_leave_the_connection_clean(gw, up):
+        # After each kind of response a plain request must work on the same pooled connection.
+        quiesce(gw)
+        ka = gw.ka
+        before = ka.connections()
+        status, head, body = split(request(gw, GET % b"/ka/chunked"))
+        assert status == 200 and b"Transfer-Encoding: chunked" in head and body == b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n", (status, body)
+        assert split(request(gw, GET % b"/ka"))[0] == 200
+        status, head, body = split(request(gw, GET % b"/ka/204"))
+        assert status == 204 and body == b"", (status, body)
+        assert split(request(gw, GET % b"/ka"))[0] == 200
+        status, head, body = split(request(gw, b"HEAD /ka/head HTTP/1.1\r\nHost: a\r\n\r\n", timeout=3))
+        assert status == 200 and b"Content-Length: 100" in head and body == b"", (status, body)
+        assert split(request(gw, GET % b"/ka"))[0] == 200
+        response = request(gw, GET % b"/ka/interim")
+        assert response.startswith(b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n") and response.endswith(b"ok"), response
+        assert split(request(gw, GET % b"/ka"))[0] == 200
+        assert ka.connections() - before == 1, ("every response above should have left its connection reusable", ka.connections() - before)
+
+    def connections_that_must_not_be_reused_are_not(gw, up):
+        quiesce(gw)
+        ka = gw.ka
+        for path, want in [(b"/ka/http10", b"ok"), (b"/ka/close", b"ok"), (b"/ka/eof", b"tail")]:
+            before = ka.connections()
+            for _ in range(2):
+                status, _, body = split(request(gw, GET % path))
+                assert (status, body) == (200, want), (path, status, body)
+            assert ka.connections() - before == 2, (path, "was reused", ka.connections() - before)
+
+    def leftover_bytes_after_a_response_prevent_reuse(gw, up):
+        quiesce(gw)
+        ka = gw.ka
+        before = ka.connections()
+        status, _, body = split(request(gw, GET % b"/ka/leftover"))
+        assert (status, body) == (200, b"ok"), (status, body)
+        time.sleep(0.3)
+        status, _, body = split(request(gw, GET % b"/ka/leftover"))
+        assert (status, body) == (200, b"ok"), (status, body)
+        assert ka.connections() - before == 2, "a connection with unread bytes on it was reused"
+        assert all(v["peer_closed"] for k, v in list(ka.conns.items())[before:]), "the gateway should have closed them"
+
+    def hop_by_hop_headers_do_not_reach_the_client(gw, up):
+        status, head, body = split(request(gw, GET % b"/ka/hop"))
+        text = head.decode()
+        assert status == 200 and "X-Kept: 2" in text and "Connection: close" in text, text
+        assert "Keep-Alive" not in text and "X-Secret" not in text and "keep-alive" not in text, text
+
+    def upstream_framing_errors_are_502(gw, up):
+        assert refusal(request(gw, GET % b"/ka/badlen")) == (502, "response.two-lengths")
+
+    def a_dead_pooled_connection_is_retried_for_a_get(gw, up):
+        quiesce(gw)
+        ka = gw.ka
+        n0 = len(ka.requests_for("/ka/die"))
+        assert split(request(gw, GET % b"/ka/die"))[0] == 200
+        status, _, body = split(request(gw, GET % b"/ka/die"))
+        assert (status, body) == (200, b"ok"), (status, body)
+        seen = ka.requests_for("/ka/die")[n0:]
+        assert [c for c, _ in seen][0] == [c for c, _ in seen][1] and [c for c, _ in seen][2] != [c for c, _ in seen][0], ("connections", [c for c, _ in seen])
+
+    def a_dead_pooled_connection_is_not_retried_for_a_post(gw, up):
+        quiesce(gw)
+        ka = gw.ka
+        n0 = len(ka.requests_for("/ka/die"))
+        post = b"POST /ka/die HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\n\r\nabc"
+        assert split(request(gw, post))[0] == 200
+        assert refusal(request(gw, post)) == (502, "proxy.upstream-closed")
+        time.sleep(0.2)
+        assert len(ka.requests_for("/ka/die")) - n0 == 2, "the POST was sent again"
+
+    def a_hung_up_idle_connection_is_dropped_before_reuse(gw, up):
+        # The upstream closes a connection the gateway has pooled. The gateway sees the hang-up while the connection is idle, so
+        # even a POST (never retried) finds a good connection next time.
+        quiesce(gw)
+        post = b"POST /ka/lying HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\n\r\nabc"
+        for _ in range(4):
+            assert split(request(gw, post))[0] == 200
+            time.sleep(0.2)
+
+    def the_pool_is_bounded_and_idle_connections_expire(gw, up):
+        quiesce(gw)
+        ka = gw.ka
+        before = ka.connections()
+        threads = [threading.Thread(target=lambda: request(gw, GET % b"/ka/slow", timeout=10)) for _ in range(10)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        time.sleep(0.15)
+        assert ka.connections() - before == 10, ka.connections() - before
+        assert ka.open_count() == 4, ("the pool should keep four idle connections, not", ka.open_count())
+        time.sleep(0.8)
+        assert ka.open_count() == 0, ("idle connections should have expired", ka.open_count())
+
+    def an_early_response_does_not_make_its_connection_reusable(gw, up):
+        # The upstream answers 413 without reading the body, and keeps the connection open. The gateway has half a request on
+        # that connection, so it must not hand it to the next client (which would otherwise wait for an answer that never comes).
+        quiesce(gw)
+        ka = gw.ka
+        raw = b"POST /ka/413 HTTP/1.1\r\nHost: a\r\nContent-Length: 900000\r\n\r\n" + b"a" * 700000
+        assert split(request(gw, raw, timeout=10))[0] == 413
+        t0 = time.time()
+        status, _, body = split(request(gw, GET % b"/ka"))
+        assert status == 200 and time.time() - t0 < 1.0, (status, time.time() - t0)
+        first = ka.requests_for("/ka/413")[-1][0]
+        second = [cid for cid, h in ka.requests_for("/ka") if h.split(b" ")[1] == b"/ka"][-1]
+        assert first != second, "the connection that had an unfinished request on it was reused"
+
+    def an_early_response_reaches_a_client_that_is_still_sending(gw, up):
+        # The upstream answers before the client has finished its upload. Closing then would reset the connection under the
+        # client while it is still sending; the gateway lingers, so the upload completes and the answer is read.
+        quiesce(gw)
+        for _ in range(3):
+            s = socket.create_connection(("127.0.0.1", gw.port), timeout=10)
+            body = b"a" * 700000
+            s.sendall(b"POST /ka/413 HTTP/1.1\r\nHost: a\r\nContent-Length: %d\r\n\r\n" % len(body))
+            for i in range(0, len(body), 8192):
+                s.sendall(body[i:i + 8192])
+                time.sleep(0.001)
+            response = b""
+            while not complete(response):
+                d = s.recv(65536)
+                if not d:
+                    break
+                response += d
+            s.close()
+            assert split(response)[0] == 413, response[:100]
+
+    def keepalive_churn_leaks_nothing(gw, up):
+        quiesce(gw)
+
+        def burst(n):
+            for _ in range(n):
+                request(gw, GET % b"/ka")
+                request(gw, b"POST /ka/echo HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\n\r\nabc")
+                request(gw, b"GET /a/../x HTTP/1.1\r\nHost: a\r\n\r\n")
+
+        burst(200)
+        time.sleep(0.7)
+        fds, rss = gw.fds(), gw.rss_kb()
+        before = gw.ka.connections()
+        burst(800)
+        time.sleep(0.7)
+        assert gw.fds() == fds, ("file descriptors", fds, gw.fds())
+        assert gw.rss_kb() - rss < 512, ("resident memory grew by kB", gw.rss_kb() - rss)
+        assert gw.ka.connections() - before < 20, ("2,400 requests used this many upstream connections", gw.ka.connections() - before)
+
+    def nopool_every_request_opens_its_own_connection(gw, up):
+        before = gw.ka.connections()
+        for _ in range(5):
+            assert split(request(gw, GET % b"/ka"))[0] == 200
+        assert gw.ka.connections() - before == 5, gw.ka.connections() - before
+        assert all(b"Connection: close" in h for _, h in gw.ka.requests_for("/ka")[-5:]), "the upstream must be told to close"
+
+
+def quiesce(gw):
+    """Let every idle pooled connection expire, so a test starts with an empty pool."""
+    time.sleep(0.75)
+    for _ in range(40):
+        if gw.ka.open_count() == 0:
+            return
+        time.sleep(0.1)
+    raise AssertionError("idle connections did not expire")
+
 
 def main():
     names = sys.argv[1:] or [n for n in vars(T) if not n.startswith("_")]
     failures = 0
-    with tempfile.TemporaryDirectory() as tmp:
-        port, up_port, dead = free_port(), free_port(), free_port()
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as tmp0:
+        port, up_port, dead, ka_port = free_port(), free_port(), free_port(), free_port()
         up = Upstream(up_port)
-        gw = Gateway(tmp, port, up_port, dead)
+        ka = KAUpstream(ka_port)
+        gw = Gateway(tmp, port, up_port, dead, ka_port)
+        gw.ka = ka
+        gw0 = None
+        if any(n.startswith("nopool_") for n in names):
+            gw0 = Gateway(tmp0, free_port(), up_port, dead, ka_port, pool=0)
+            gw0.ka = ka
         try:
             for name in names:
                 t0 = time.time()
+                g = gw0 if name.startswith("nopool_") else gw
                 try:
-                    getattr(T, name)(gw, up)
-                    if not gw.alive():
+                    getattr(T, name)(g, up)
+                    if not g.alive():
                         raise AssertionError("the gateway died")
-                    print("ok    %-40s %.1fs" % (name, time.time() - t0))
+                    print("ok    %-52s %.1fs" % (name, time.time() - t0))
                 except (AssertionError, OSError) as e:
                     failures += 1
-                    print("FAIL  %-40s %s" % (name, e))
-                    if not gw.alive():
-                        print("      the gateway died: exit %s %s" % (gw.proc.returncode, gw.proc.stderr.read()[:200]))
+                    print("FAIL  %-52s %s" % (name, e))
+                    if not g.alive():
+                        print("      the gateway died: exit %s %s" % (g.proc.returncode, g.proc.stderr.read()[:200]))
                         break
         finally:
             gw.stop()
+            if gw0:
+                gw0.stop()
             up.stop = True
+            ka.stop = True
     print("%d tests, %d failures" % (len(names), failures))
     return 1 if failures else 0
 

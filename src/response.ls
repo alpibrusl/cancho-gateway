@@ -1,0 +1,336 @@
+edition 5;
+
+module gateway.response;
+
+import std.bytes;
+
+// An upstream's response head, parsed strictly (task #6, docs/pool.md). `std.http` parses requests only; this is its
+// counterpart for the one thing the gateway must read from an upstream before it can reuse the connection: where the response
+// ends. The same stance as `framing` for requests: one reading of the framing or a refusal, no tolerance.
+//
+//     status line   HTTP/1.1 SP 3DIGIT SP reason CRLF     (HTTP/1.0 also; the SP before the reason is required)
+//     headers       name ":" OWS value OWS CRLF           (no obs-fold, no bare CR or LF, no control byte in a value)
+//
+// `parse` answers the head's length (more than 0), `0` if it is not complete yet, or `0 - rule`. Every rule is a 502: the
+// upstream is the gateway's own, so a response it cannot read is the gateway's failure to answer.
+//
+// The table (`slots(n)` ints): 0 status, 1 version (10 or 11), 2 header count, 3 where the body starts, 4 Content-Length or
+// -1, 5 flags (1 chunked, 2 `Connection: close`, 4 `Connection: keep-alive`), 6 and 7 the reason's start and end, and from
+// 16, four ints a header: name start and end, value start and end.
+
+pub fn rule_count() -> [] int {
+    return 9;
+}
+
+pub fn tag(rule: int) -> [] &static [byte] {
+    if rule == 1 {
+        return "response.status-line";
+    }
+    if rule == 2 {
+        return "response.version";
+    }
+    if rule == 3 {
+        return "response.status";
+    }
+    if rule == 4 {
+        return "response.header";
+    }
+    if rule == 5 {
+        return "response.fold";
+    }
+    if rule == 6 {
+        return "response.length";
+    }
+    if rule == 7 {
+        return "response.two-lengths";
+    }
+    if rule == 8 {
+        return "response.transfer-encoding";
+    }
+    if rule == 9 {
+        return "response.head-too-large";
+    }
+    return "";
+}
+
+pub fn status(rule: int) -> [] int {
+    if rule >= 1 && rule <= 9 {
+        return 502;
+    }
+    return 0;
+}
+
+// The most a response head may be, in bytes.
+pub fn head_limit() -> [] int {
+    return 16384;
+}
+
+pub fn slots(max_headers: int) -> [] int {
+    return 16 + 4 * max_headers;
+}
+
+fn is_tchar(c: int) -> [] bool {
+    if bytes.is_alpha(c) || bytes.is_digit(c) {
+        return true;
+    }
+    return c == '!' || c == '#' || c == '$' || c == '%' || c == '&' || c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' || c == '|' || c == '~';
+}
+
+// Does `src[start..end]` equal `lit` (lowercase), ignoring ASCII case?
+fn eq_lower[&s, &l](src: &s [byte], start: int, end: int, lit: &l [byte]) -> [] bool {
+    if end - start != len(lit) {
+        return false;
+    }
+    var i = 0;
+    while i < len(lit) {
+        if bytes.to_lower(int_of(src[start + i])) != int_of(lit[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Where the blank line that ends the head starts (the `\r` of the final CRLF CRLF), or -1.
+fn head_end[&s](src: &s [byte], limit: int) -> [] int {
+    var i = 0;
+    while i + 3 < limit {
+        if int_of(src[i]) == '\r' && int_of(src[i + 1]) == '\n' && int_of(src[i + 2]) == '\r' && int_of(src[i + 3]) == '\n' {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+// Is `Connection`'s value `src[vs..ve]` listing `token`? Comma separated, blanks around each item.
+fn lists[&s, &l](src: &s [byte], vs: int, ve: int, token: &l [byte]) -> [] bool {
+    var start = vs;
+    var at = vs;
+    while at <= ve {
+        if at == ve || int_of(src[at]) == ',' {
+            var a = start;
+            var b = at;
+            while a < b && (int_of(src[a]) == ' ' || int_of(src[a]) == '\t') {
+                a = a + 1;
+            }
+            while b > a && (int_of(src[b - 1]) == ' ' || int_of(src[b - 1]) == '\t') {
+                b = b - 1;
+            }
+            if eq_lower(src, a, b, token) {
+                return true;
+            }
+            start = at + 1;
+        }
+        at = at + 1;
+    }
+    return false;
+}
+
+pub fn parse[&s, &t](src: &s [byte], table: &!t [int]) -> [] int {
+    let n = len(src);
+    var limit = n;
+    if limit > head_limit() {
+        limit = head_limit();
+    }
+    let blank = head_end(src, limit);
+    if blank < 0 {
+        if n >= head_limit() {
+            return 0 - 9;
+        }
+        return 0;
+    }
+    let lines_end = blank + 2;
+    let body_start = blank + 4;
+    let capacity = (len(table) - 16) / 4;
+    // Status line: HTTP/1.x SP DDD SP reason CRLF.
+    if lines_end < 13 {
+        return 0 - 1;
+    }
+    if !(int_of(src[0]) == 'H' && int_of(src[1]) == 'T' && int_of(src[2]) == 'T' && int_of(src[3]) == 'P' && int_of(src[4]) == '/') {
+        return 0 - 1;
+    }
+    if int_of(src[5]) != '1' || int_of(src[6]) != '.' || int_of(src[7]) != '0' && int_of(src[7]) != '1' {
+        if bytes.is_digit(int_of(src[5])) && int_of(src[6]) == '.' && bytes.is_digit(int_of(src[7])) {
+            return 0 - 2;
+        }
+        return 0 - 1;
+    }
+    if int_of(src[8]) != ' ' || !bytes.is_digit(int_of(src[9])) || !bytes.is_digit(int_of(src[10])) || !bytes.is_digit(int_of(src[11])) || int_of(src[12]) != ' ' {
+        return 0 - 1;
+    }
+    let code = (int_of(src[9]) - '0') * 100 + (int_of(src[10]) - '0') * 10 + int_of(src[11]) - '0';
+    if code < 100 || code == 101 {
+        return 0 - 3;
+    }
+    // The reason runs to the end of the line: visible bytes, spaces and tabs.
+    var line_end = 13;
+    while line_end < lines_end && int_of(src[line_end]) != '\r' {
+        let c = int_of(src[line_end]);
+        if c < 32 && c != '\t' || c == 127 {
+            return 0 - 1;
+        }
+        line_end = line_end + 1;
+    }
+    if line_end + 1 >= n || int_of(src[line_end]) != '\r' || int_of(src[line_end + 1]) != '\n' {
+        return 0 - 1;
+    }
+    table[0] = code;
+    table[1] = 10 + int_of(src[7]) - '0';
+    table[6] = 13;
+    table[7] = line_end;
+    var flags = 0;
+    var length = 0 - 1;
+    var lengths = 0;
+    var codings = 0;
+    var count = 0;
+    var at = line_end + 2;
+    while at < lines_end {
+        if int_of(src[at]) == ' ' || int_of(src[at]) == '\t' {
+            return 0 - 5;
+        }
+        let name_start = at;
+        while at < lines_end && is_tchar(int_of(src[at])) {
+            at = at + 1;
+        }
+        if at == name_start || at >= lines_end || int_of(src[at]) != ':' {
+            return 0 - 4;
+        }
+        let name_end = at;
+        at = at + 1;
+        while at < lines_end && (int_of(src[at]) == ' ' || int_of(src[at]) == '\t') {
+            at = at + 1;
+        }
+        let value_start = at;
+        while at < lines_end && int_of(src[at]) != '\r' {
+            let c = int_of(src[at]);
+            if c < 32 && c != '\t' || c == 127 {
+                return 0 - 4;
+            }
+            at = at + 1;
+        }
+        if at + 1 >= len(src) || int_of(src[at]) != '\r' || int_of(src[at + 1]) != '\n' {
+            return 0 - 4;
+        }
+        var value_end = at;
+        while value_end > value_start && (int_of(src[value_end - 1]) == ' ' || int_of(src[value_end - 1]) == '\t') {
+            value_end = value_end - 1;
+        }
+        if count >= capacity {
+            return 0 - 4;
+        }
+        table[16 + 4 * count] = name_start;
+        table[16 + 4 * count + 1] = name_end;
+        table[16 + 4 * count + 2] = value_start;
+        table[16 + 4 * count + 3] = value_end;
+        count = count + 1;
+        if eq_lower(src, name_start, name_end, "content-length") {
+            lengths = lengths + 1;
+            if value_end == value_start || value_end - value_start > 15 {
+                return 0 - 6;
+            }
+            var k = value_start;
+            var v = 0;
+            while k < value_end {
+                if !bytes.is_digit(int_of(src[k])) {
+                    return 0 - 6;
+                }
+                v = v * 10 + int_of(src[k]) - '0';
+                k = k + 1;
+            }
+            length = v;
+        } else if eq_lower(src, name_start, name_end, "transfer-encoding") {
+            codings = codings + 1;
+            if !eq_lower(src, value_start, value_end, "chunked") {
+                return 0 - 8;
+            }
+            flags = flags - flags % 2 + 1;
+        } else if eq_lower(src, name_start, name_end, "connection") {
+            if lists(src, value_start, value_end, "close") && flags / 2 % 2 == 0 {
+                flags = flags + 2;
+            }
+            if lists(src, value_start, value_end, "keep-alive") && flags / 4 % 2 == 0 {
+                flags = flags + 4;
+            }
+        }
+        at = at + 2;
+    }
+    if lengths > 1 {
+        return 0 - 6;
+    }
+    if codings > 1 {
+        return 0 - 8;
+    }
+    if lengths > 0 && codings > 0 {
+        return 0 - 7;
+    }
+    table[2] = count;
+    table[3] = body_start;
+    table[4] = length;
+    table[5] = flags;
+    return body_start;
+}
+
+pub fn code[&t](table: &t [int]) -> [] int {
+    return table[0];
+}
+
+pub fn version[&t](table: &t [int]) -> [] int {
+    return table[1];
+}
+
+pub fn header_count[&t](table: &t [int]) -> [] int {
+    return table[2];
+}
+
+pub fn content_length[&t](table: &t [int]) -> [] int {
+    return table[4];
+}
+
+pub fn is_chunked[&t](table: &t [int]) -> [] bool {
+    return table[5] % 2 == 1;
+}
+
+pub fn header_name[&s, &t](src: &s [byte], table: &t [int], i: int) -> [] &s [byte] {
+    return src[table[16 + 4 * i]..table[16 + 4 * i + 1]];
+}
+
+pub fn header_value[&s, &t](src: &s [byte], table: &t [int], i: int) -> [] &s [byte] {
+    return src[table[16 + 4 * i + 2]..table[16 + 4 * i + 3]];
+}
+
+// An interim response (100 to 199): the final one follows on the same connection.
+pub fn interim[&t](table: &t [int]) -> [] bool {
+    return table[0] >= 100 && table[0] < 200;
+}
+
+// How the body is framed: 0 none, 1 a Content-Length (`content_length`), 2 chunked, 3 until the connection closes. A response
+// to `HEAD`, a 1xx, 204 and 304 have no body whatever their headers say (RFC 9112 6.3).
+pub fn body_mode[&t](table: &t [int], head_request: bool) -> [] int {
+    let c = table[0];
+    if head_request || c >= 100 && c < 200 || c == 204 || c == 304 {
+        return 0;
+    }
+    if table[5] % 2 == 1 {
+        return 2;
+    }
+    if table[4] > 0 {
+        return 1;
+    }
+    if table[4] == 0 {
+        return 0;
+    }
+    return 3;
+}
+
+// May the connection carry another request once the body is done? HTTP/1.1 unless the upstream said `close`; HTTP/1.0 only if it
+// said `keep-alive`; never when the body runs until the connection closes.
+pub fn reusable[&t](table: &t [int], mode: int) -> [] bool {
+    if mode == 3 {
+        return false;
+    }
+    if table[1] == 11 {
+        return table[5] / 2 % 2 == 0;
+    }
+    return table[5] / 4 % 2 == 1 && table[5] / 2 % 2 == 0;
+}

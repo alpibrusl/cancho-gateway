@@ -25,12 +25,16 @@ MAX_PREFIX = 255
 MAX_HOST = 253
 MAX_BODY = 1 << 30
 # Milliseconds: the head must arrive, the upstream must connect, the upstream must start answering, the whole request must end.
-TIMEOUTS = {"header_timeout_ms": 10000, "connect_timeout_ms": 5000, "upstream_timeout_ms": 30000, "total_timeout_ms": 60000}
+TIMEOUTS = {"header_timeout_ms": 10000, "connect_timeout_ms": 5000, "upstream_timeout_ms": 30000, "total_timeout_ms": 60000,
+            "idle_timeout_ms": 5000}
+# Idle upstream connections kept per upstream; 0 turns pooling off (every request then opens and closes its own connection).
+POOL_IDLE_MAX = 4
+POOL_RANGE = (0, 64)
 TIMEOUT_RANGE = (100, 600000)
 DEFAULT_BODY = 1 << 20
 METHODS = ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
 KEYS = {
-    "": ["listen", "header_timeout_ms", "connect_timeout_ms", "upstream_timeout_ms", "total_timeout_ms"],
+    "": ["listen", "header_timeout_ms", "connect_timeout_ms", "upstream_timeout_ms", "total_timeout_ms", "idle_timeout_ms", "pool_idle_max"],
     "upstream": ["name", "addr"],
     "route": ["name", "host", "path_prefix", "methods", "upstream", "max_body"],
 }
@@ -136,6 +140,10 @@ def load(path):
         if not isinstance(v, int) or isinstance(v, bool) or not TIMEOUT_RANGE[0] <= v <= TIMEOUT_RANGE[1]:
             refuse("config.timeout", "%s must be an integer in %d..%d milliseconds" % ((key,) + TIMEOUT_RANGE), key=key)
         timeouts[key] = v
+    pool = doc.get("pool_idle_max", POOL_IDLE_MAX)
+    if not isinstance(pool, int) or isinstance(pool, bool) or not POOL_RANGE[0] <= pool <= POOL_RANGE[1]:
+        refuse("config.pool", "pool_idle_max must be an integer in %d..%d (0 turns pooling off)" % POOL_RANGE, key="pool_idle_max")
+    timeouts["pool_idle_max"] = pool
     if not timeouts["header_timeout_ms"] <= timeouts["total_timeout_ms"] or not timeouts["connect_timeout_ms"] <= timeouts["total_timeout_ms"]:
         refuse("config.timeout", "total_timeout_ms must be at least the header and connect timeouts", key="total_timeout_ms")
     ups = doc.get("upstream", [])
@@ -219,6 +227,9 @@ def render_deploy(listen, ups, timeouts):
         "pub fn connect_ms() -> [] int {", "    return %d;" % timeouts["connect_timeout_ms"], "}", "",
         "pub fn upstream_ms() -> [] int {", "    return %d;" % timeouts["upstream_timeout_ms"], "}", "",
         "pub fn total_ms() -> [] int {", "    return %d;" % timeouts["total_timeout_ms"], "}", "",
+        "// How long an idle upstream connection is kept, and how many per upstream (0: no pooling; docs/pool.md).",
+        "pub fn idle_ms() -> [] int {", "    return %d;" % timeouts["idle_timeout_ms"], "}", "",
+        "pub fn pool_idle_max() -> [] int {", "    return %d;" % timeouts["pool_idle_max"], "}", "",
         "// The longest common prefix of the addresses, cut at a delimiter: what `narrow` would be given once",
         "// lex-sys has separate listen and connect bounds. Empty means no shared prefix.",
         "pub fn intended_egress_prefix() -> [] &static [byte] {", "    return %s;" % literal(prefix), "}", "",
@@ -275,7 +286,8 @@ def main():
     if "--explain" in flags:
         prefix = intended_prefix([a for _, a in ups])
         print("listen %d; %d upstream(s): %s" % (listen, len(ups), ", ".join(a for _, a in ups)))
-        print("timeouts (ms): " + ", ".join("%s %d" % (k.replace("_timeout_ms", ""), v) for k, v in timeouts.items()))
+        print("timeouts (ms): " + ", ".join("%s %d" % (k.replace("_timeout_ms", ""), v) for k, v in timeouts.items() if k.endswith("_ms")) +
+              "; idle connections kept per upstream: %d" % timeouts["pool_idle_max"])
         print("intended egress prefix: %s" % (repr(prefix) if prefix else "none (no shared prefix)"))
         for n, r in enumerate(routes):
             print("route %d: %s %s -> %s (max body %d)" % (n, r["host"] or "*", r["prefix"], ups[r["upstream"]][0], r["max_body"]))
