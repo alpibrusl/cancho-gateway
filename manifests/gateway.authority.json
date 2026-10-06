@@ -1,0 +1,22 @@
+{
+  "bounded": true,
+  "unbounded_by": [],
+  "effects": [
+    "io_write"
+  ],
+  "labels": [
+    {
+      "name": "io_write",
+      "argument": null,
+      "bounded": true
+    }
+  ],
+  "foreign_symbols": [],
+  "pure": [
+    "name",
+    "number"
+  ],
+  "folded_operators": 0,
+  "folded_calls": 0,
+  "functions": 4
+}

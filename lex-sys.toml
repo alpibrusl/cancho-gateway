@@ -1,0 +1,17 @@
+[package]
+name = "lexsys-gateway"
+lex-sys = "0dfc81ca680c49c5c88ac7e53c103a037c7e9f02"   # the compiler these sources were written for; CI builds this commit
+
+# One program, one authority row (docs/design.md section 3). The deployment
+# generator (task #11) will add a generated module here per deployment.
+
+[[bin]]
+name = "gateway"
+sources = ["src/version.ls", "src/gateway.ls"]
+std = true
+out = "build/gateway"
+
+[[test]]
+name = "version"
+sources = ["src/version.ls", "tests/version_test.ls"]
+std = true
