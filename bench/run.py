@@ -315,6 +315,7 @@ def main():
     ap.add_argument("--proxies", default=",".join(ALL_PROXIES))
     ap.add_argument("--cells", default="C1,C1b,C2,C3,C4,C5,C6")
     ap.add_argument("--oha-rate", type=int, default=0, help="also run oha at this open-loop rate on C1 (requests/s)")
+    ap.add_argument("--resume", action="store_true", help="continue from RESULTS.json in --work: runs already recorded are not repeated")
     ap.add_argument("--bin", action="append", default=[], metavar="NAME=PATH")
     args = ap.parse_args()
     args.bins = dict(b.split("=", 1) for b in args.bin)
@@ -325,6 +326,9 @@ def main():
     results = {"commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip(),
                "runs": args.runs, "duration": args.duration, "warmup": args.warmup, "cells": {}, "memory": {}, "notworking": {}}
     out_json = args.work / "RESULTS.json"
+    if args.resume and out_json.exists():
+        results = json.loads(out_json.read_text())
+    done = lambda cell, name, rnd: any(r["run"] == rnd for r in results["cells"].get(cell, {}).get(name, []))
     upstream = None
     upstream_slow = None
 
@@ -346,7 +350,7 @@ def main():
             for cell in timed:
                 ensure_upstream(bool(CELLS[cell].get("slow")))
                 for name in rot:
-                    if name in results["notworking"]:
+                    if name in results["notworking"] or done(cell, name, rnd):
                         continue
                     proxy, bad = start_proxy(args, name, bool(CELLS[cell].get("slow")))
                     if not proxy:
@@ -371,7 +375,7 @@ def main():
         if "C6" in cells:
             ensure_upstream(False)
             for name in proxies:
-                if name not in results["notworking"]:
+                if name not in results["notworking"] and name not in results["memory"]:
                     results["memory"][name] = measure_memory(args, name)
                     print(f"[mem] {name} {results['memory'][name]}", flush=True)
     finally:
