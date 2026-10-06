@@ -1,0 +1,18 @@
+# The authority ceiling of the gateway (docs/design.md section 3; the model is lexsys-tools' tools.toml).
+#
+# This file is what a person writes and reviews. It is a *ceiling*, never the authority: the authority
+# is whatever `lex-sys authority` derives from the source (manifests/gateway.authority.json), and
+# scripts/authority.py --check fails when a derived label is not allowed here. Widening the gateway is
+# therefore an edit to this file: a reviewable diff. The derived set may be smaller, never larger.
+#
+# A label with an argument is written as the compiler prints it: net_out("10.0.1.").
+#
+# Scaffold: only what the program does today. Each task adds the rows it needs, with the design section
+# that justifies them:
+#   #5        args, heap, net_in(""), net_out(""), conn_accept, conn_read, conn_write, poll, clock
+#             (unnarrowed: one bound serves listen and connect, design section 2.1)
+#   #10       io_write, err_write (already allowed below)
+# Never, for any task: ffi, fs_read, fs_write, file_*, dir_* (the gateway touches no files).
+
+[gateway]
+allow = ["io_write", "err_write"]
