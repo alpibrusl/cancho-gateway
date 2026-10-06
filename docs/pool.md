@@ -1,9 +1,8 @@
 # Upstream keep-alive and the connection pool (task #6, first part)
 
 Status: **upstream connections are kept alive, pooled, bounded and expired; a dead pooled connection is detected and, for a safe
-request, retried once.** Not built: passive health (a circuit that opens after repeated failures), the optional active health
-check, and keep-alive on the **client** side (section 6). Everything here is measured by `tests/response/run.py` and
-`tests/proxy_test.py`.
+request, retried once.** Not built: the optional active health check, and keep-alive on the **client** side (section 6); passive
+health is in `docs/health.md`. Everything here is measured by `tests/response/run.py` and `tests/proxy_test.py`.
 
 ## 1. What changed
 
@@ -93,7 +92,7 @@ route prefix `/ka`: a prefix matches on a segment boundary (`docs/routes.md`), s
 
 - **No keep-alive on the client side.** The client's connection closes after every response (`Connection: close` is added to it), so the
   pool saves the gateway's connects to upstreams but not clients' connects to the gateway.
-- **No passive health, no active health check, no circuit.** A dead upstream costs a connect attempt (and a 502) per request.
+- **Health** is in `docs/health.md` (a passive circuit); there is still no active health check.
 - **The window between choosing a pooled connection and the upstream noticing it died** is closed only for the retryable requests above;
   a `POST` that hits it is a 502. The idle watch makes the window small; it is not measured.
 - A `Transfer-Encoding: chunked` response sent to an **HTTP/1.0 client** is passed as chunked, which a 1.0 client cannot read. Untested.

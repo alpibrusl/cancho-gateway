@@ -42,6 +42,15 @@ pub fn pool_idle_max() -> [] int {
     return 4;
 }
 
+// The passive circuit: consecutive failures to one upstream that open it (0: never), and for how long (docs/health.md).
+pub fn circuit_threshold() -> [] int {
+    return 5;
+}
+
+pub fn circuit_open_ms() -> [] int {
+    return 10000;
+}
+
 // The longest common prefix of the addresses, cut at a delimiter: what `narrow` would be given once
 // lex-sys has separate listen and connect bounds. Empty means no shared prefix.
 pub fn intended_egress_prefix() -> [] &static [byte] {

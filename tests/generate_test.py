@@ -45,6 +45,10 @@ REFUSALS = [
     ("config.pool", 2, 'listen = 80\npool_idle_max = 65\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
     ("config.pool", 2, 'listen = 80\npool_idle_max = -1\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
     ("config.pool", 2, 'listen = 80\npool_idle_max = "4"\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
+    ("config.circuit", 2, 'listen = 80\ncircuit_threshold = 1001\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
+    ("config.circuit", 2, 'listen = 80\ncircuit_threshold = -1\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
+    ("config.circuit", 2, 'listen = 80\ncircuit_open_ms = 50\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
+    ("config.circuit", 2, 'listen = 80\ncircuit_open_ms = "10s"\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
     ("config.timeout", 3, 'listen = 80\nheader_timeout_ms = 5000\ntotal_timeout_ms = 1000\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
     # --- routes, with the line they must name
     ("config.unknown-key", 7, UP + R + 'path_pref = "/"\n'),

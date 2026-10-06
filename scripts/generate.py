@@ -30,11 +30,15 @@ TIMEOUTS = {"header_timeout_ms": 10000, "connect_timeout_ms": 5000, "upstream_ti
 # Idle upstream connections kept per upstream; 0 turns pooling off (every request then opens and closes its own connection).
 POOL_IDLE_MAX = 4
 POOL_RANGE = (0, 64)
+# The passive circuit: this many consecutive failures to an upstream (0 turns the circuit off) stop requests to it for the open period.
+CIRCUIT_THRESHOLD = 5
+CIRCUIT_THRESHOLD_RANGE = (0, 1000)
+CIRCUIT_OPEN_MS = 10000
 TIMEOUT_RANGE = (100, 600000)
 DEFAULT_BODY = 1 << 20
 METHODS = ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
 KEYS = {
-    "": ["listen", "header_timeout_ms", "connect_timeout_ms", "upstream_timeout_ms", "total_timeout_ms", "idle_timeout_ms", "pool_idle_max"],
+    "": ["listen", "header_timeout_ms", "connect_timeout_ms", "upstream_timeout_ms", "total_timeout_ms", "idle_timeout_ms", "pool_idle_max", "circuit_threshold", "circuit_open_ms"],
     "upstream": ["name", "addr"],
     "route": ["name", "host", "path_prefix", "methods", "upstream", "max_body"],
 }
@@ -144,6 +148,14 @@ def load(path):
     if not isinstance(pool, int) or isinstance(pool, bool) or not POOL_RANGE[0] <= pool <= POOL_RANGE[1]:
         refuse("config.pool", "pool_idle_max must be an integer in %d..%d (0 turns pooling off)" % POOL_RANGE, key="pool_idle_max")
     timeouts["pool_idle_max"] = pool
+    threshold = doc.get("circuit_threshold", CIRCUIT_THRESHOLD)
+    if not isinstance(threshold, int) or isinstance(threshold, bool) or not CIRCUIT_THRESHOLD_RANGE[0] <= threshold <= CIRCUIT_THRESHOLD_RANGE[1]:
+        refuse("config.circuit", "circuit_threshold must be an integer in %d..%d (0 turns the circuit off)" % CIRCUIT_THRESHOLD_RANGE, key="circuit_threshold")
+    timeouts["circuit_threshold"] = threshold
+    open_ms = doc.get("circuit_open_ms", CIRCUIT_OPEN_MS)
+    if not isinstance(open_ms, int) or isinstance(open_ms, bool) or not TIMEOUT_RANGE[0] <= open_ms <= TIMEOUT_RANGE[1]:
+        refuse("config.circuit", "circuit_open_ms must be an integer in %d..%d milliseconds" % TIMEOUT_RANGE, key="circuit_open_ms")
+    timeouts["circuit_open_ms"] = open_ms
     if not timeouts["header_timeout_ms"] <= timeouts["total_timeout_ms"] or not timeouts["connect_timeout_ms"] <= timeouts["total_timeout_ms"]:
         refuse("config.timeout", "total_timeout_ms must be at least the header and connect timeouts", key="total_timeout_ms")
     ups = doc.get("upstream", [])
@@ -230,6 +242,9 @@ def render_deploy(listen, ups, timeouts):
         "// How long an idle upstream connection is kept, and how many per upstream (0: no pooling; docs/pool.md).",
         "pub fn idle_ms() -> [] int {", "    return %d;" % timeouts["idle_timeout_ms"], "}", "",
         "pub fn pool_idle_max() -> [] int {", "    return %d;" % timeouts["pool_idle_max"], "}", "",
+        "// The passive circuit: consecutive failures to one upstream that open it (0: never), and for how long (docs/health.md).",
+        "pub fn circuit_threshold() -> [] int {", "    return %d;" % timeouts["circuit_threshold"], "}", "",
+        "pub fn circuit_open_ms() -> [] int {", "    return %d;" % timeouts["circuit_open_ms"], "}", "",
         "// The longest common prefix of the addresses, cut at a delimiter: what `narrow` would be given once",
         "// lex-sys has separate listen and connect bounds. Empty means no shared prefix.",
         "pub fn intended_egress_prefix() -> [] &static [byte] {", "    return %s;" % literal(prefix), "}", "",
@@ -287,7 +302,7 @@ def main():
         prefix = intended_prefix([a for _, a in ups])
         print("listen %d; %d upstream(s): %s" % (listen, len(ups), ", ".join(a for _, a in ups)))
         print("timeouts (ms): " + ", ".join("%s %d" % (k.replace("_timeout_ms", ""), v) for k, v in timeouts.items() if k.endswith("_ms")) +
-              "; idle connections kept per upstream: %d" % timeouts["pool_idle_max"])
+              "; idle connections kept per upstream: %d; circuit: %d failures, open %d ms" % (timeouts["pool_idle_max"], timeouts["circuit_threshold"], timeouts["circuit_open_ms"]))
         print("intended egress prefix: %s" % (repr(prefix) if prefix else "none (no shared prefix)"))
         for n, r in enumerate(routes):
             print("route %d: %s %s -> %s (max body %d)" % (n, r["host"] or "*", r["prefix"], ups[r["upstream"]][0], r["max_body"]))

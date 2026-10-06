@@ -308,8 +308,105 @@ class KAUpstream:
         return b"", buf
 
 
+class FlapUpstream:
+    """An upstream the test can take down and bring back: `down()` closes the listening socket (and, by default, every open
+    connection), `up()` listens again on the same port. Keep-alive; behaviour by path: /flap/ok, /flap/slow (0.6 s),
+    /flap/stall (never answers), /flap/garbage (an answer that is not HTTP)."""
+
+    def __init__(self, port):
+        self.port = port
+        self.lock = threading.Lock()
+        self.accepted = 0
+        self.live = {}
+        self.sock = None
+        self.next_id = 0
+
+    def up(self):
+        if self.sock:
+            return
+        s = socket.socket()
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", self.port))
+        s.listen(100)
+        self.sock = s
+        threading.Thread(target=self.accept, args=(s,), daemon=True).start()
+
+    def down(self, kill=True):
+        if self.sock:
+            # A thread blocked in accept() keeps a closed listening socket alive: shut it down first so the port really refuses.
+            try:
+                self.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            self.sock.close()
+            self.sock = None
+        if kill:
+            with self.lock:
+                conns = list(self.live.values())
+            for c in conns:
+                try:
+                    c.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+    def stop(self):
+        self.down()
+
+    def open_count(self):
+        with self.lock:
+            return len(self.live)
+
+    def accept(self, s):
+        while True:
+            try:
+                c, _ = s.accept()
+            except OSError:
+                return
+            with self.lock:
+                self.accepted += 1
+                cid = self.next_id
+                self.next_id += 1
+                self.live[cid] = c
+            threading.Thread(target=self.serve, args=(cid, c), daemon=True).start()
+
+    def serve(self, cid, c):
+        buf = b""
+        try:
+            while True:
+                while b"\r\n\r\n" not in buf:
+                    d = c.recv(65536)
+                    if not d:
+                        return
+                    buf += d
+                head, _, buf = buf.partition(b"\r\n\r\n")
+                path = head.split(b" ")[1].decode()
+                if path.startswith("/flap/stall"):
+                    c.settimeout(8)
+                    while c.recv(4096):
+                        pass
+                    return
+                if path.startswith("/flap/garbage"):
+                    c.sendall(b"NOT HTTP AT ALL\r\n\r\n")
+                    c.settimeout(8)
+                    while c.recv(4096):
+                        pass
+                    return
+                if path.startswith("/flap/slow"):
+                    time.sleep(0.6)
+                c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        except OSError:
+            pass
+        finally:
+            with self.lock:
+                self.live.pop(cid, None)
+            try:
+                c.close()
+            except OSError:
+                pass
+
+
 class Gateway:
-    def __init__(self, tmp, port, up_port, dead_port, ka_port, pool=4):
+    def __init__(self, tmp, port, up_port, dead_port, ka_port, flap_port, pool=4, circuit=3):
         deploy = pathlib.Path(tmp) / "deploy.toml"
         deploy.write_text("""listen = %d
 header_timeout_ms = 1000
@@ -318,6 +415,8 @@ upstream_timeout_ms = 1500
 total_timeout_ms = 4000
 idle_timeout_ms = 500
 pool_idle_max = %d
+circuit_threshold = %d
+circuit_open_ms = 1000
 
 [[upstream]]
 name = "up"
@@ -331,6 +430,10 @@ addr = "127.0.0.1:%d"
 name = "ka"
 addr = "127.0.0.1:%d"
 
+[[upstream]]
+name = "flap"
+addr = "127.0.0.1:%d"
+
 [[route]]
 path_prefix = "/dead"
 upstream = "dead"
@@ -341,10 +444,14 @@ upstream = "ka"
 max_body = 1048576
 
 [[route]]
+path_prefix = "/flap"
+upstream = "flap"
+
+[[route]]
 path_prefix = "/"
 upstream = "up"
 max_body = 1048576
-""" % (port, pool, up_port, dead_port, ka_port))
+""" % (port, pool, circuit, up_port, dead_port, ka_port, flap_port))
         subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(deploy), "--out", tmp], check=True)
         files = [os.path.join(tmp, "deploy.ls"), os.path.join(tmp, "routes.ls")] + [str(ROOT / "src" / (n + ".ls")) for n in SOURCES]
         built = subprocess.run([LEX, "build", "--std", *files, "-o", os.path.join(tmp, "gateway")], capture_output=True, text=True)
@@ -885,6 +992,196 @@ class T:
         assert gw.ka.connections() - before == 5, gw.ka.connections() - before
         assert all(b"Connection: close" in h for _, h in gw.ka.requests_for("/ka")[-5:]), "the upstream must be told to close"
 
+    # ---- the passive circuit (task #6, docs/health.md): 3 consecutive failures open it for 1 s ----
+
+    def circuit_opens_after_consecutive_failures(gw, up):
+        heal(gw)
+        flap = gw.flap
+        flap.down()
+        time.sleep(0.15)
+        for _ in range(3):
+            assert refusal(request(gw, GET % b"/flap/ok")) == (502, "proxy.connect")
+        # Open: the fourth is refused without trying the upstream, even though it is back.
+        flap.up()
+        accepted = flap.accepted
+        t0 = time.time()
+        assert refusal(request(gw, GET % b"/flap/ok")) == (503, "proxy.circuit-open")
+        assert time.time() - t0 < 0.5
+        assert flap.accepted == accepted, "the open circuit still let a connection through"
+
+    def circuit_recovers_after_the_open_period(gw, up):
+        heal(gw)
+        flap = gw.flap
+        flap.down()
+        time.sleep(0.15)
+        for _ in range(3):
+            request(gw, GET % b"/flap/ok")
+        flap.up()
+        assert refusal(request(gw, GET % b"/flap/ok")) == (503, "proxy.circuit-open")
+        time.sleep(1.1)
+        for _ in range(4):
+            assert split(request(gw, GET % b"/flap/ok"))[0] == 200
+
+    def a_failed_trial_reopens_the_circuit(gw, up):
+        heal(gw)
+        flap = gw.flap
+        flap.down()
+        time.sleep(0.15)
+        for _ in range(3):
+            request(gw, GET % b"/flap/ok")
+        time.sleep(1.1)
+        assert refusal(request(gw, GET % b"/flap/ok")) == (502, "proxy.connect"), "the trial should have been tried"
+        assert refusal(request(gw, GET % b"/flap/ok")) == (503, "proxy.circuit-open"), "a failed trial should reopen the circuit"
+
+    def only_one_trial_goes_through_at_a_time(gw, up):
+        heal(gw)
+        flap = gw.flap
+        flap.down()
+        time.sleep(0.15)
+        for _ in range(3):
+            request(gw, GET % b"/flap/ok")
+        flap.up()
+        time.sleep(1.1)
+        accepted = flap.accepted
+        results = []
+        threads = [threading.Thread(target=lambda: results.append(refusal(request(gw, GET % b"/flap/slow"))[0] if True else 0)) for _ in range(5)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        assert sorted(results).count(503) == 4 and flap.accepted - accepted == 1, (sorted(results), flap.accepted - accepted)
+        assert split(request(gw, GET % b"/flap/ok"))[0] == 200, "the trial's success should have closed the circuit"
+
+    def a_trial_abandoned_by_its_client_is_handed_back(gw, up):
+        # The half-open trial is a request whose client leaves in the middle of its upload: the gateway drops the session and no
+        # success or failure is ever recorded for it. The circuit must offer the trial to the next request at once.
+        heal(gw)
+        flap = gw.flap
+        flap.down()
+        time.sleep(0.15)
+        for _ in range(3):
+            request(gw, GET % b"/flap/ok")
+        flap.up()
+        time.sleep(1.1)
+        s = socket.create_connection(("127.0.0.1", gw.port))
+        s.sendall(b"POST /flap/stall HTTP/1.1\r\nHost: a\r\nContent-Length: 100\r\n\r\n" + b"x" * 10)
+        time.sleep(0.2)
+        s.close()
+        time.sleep(0.2)
+        assert split(request(gw, GET % b"/flap/ok"))[0] == 200, "the abandoned trial was not handed back"
+
+    def a_trial_refused_locally_is_handed_back(gw, up):
+        # A request that the gateway itself refuses after the circuit admitted it (here, a Connection header naming the framing
+        # headers) must not use up the half-open trial, or anyone could keep an upstream shut out by sending bad requests.
+        heal(gw)
+        flap = gw.flap
+        flap.down()
+        time.sleep(0.15)
+        for _ in range(3):
+            request(gw, GET % b"/flap/ok")
+        flap.up()
+        time.sleep(1.1)
+        bad = b"GET /flap/ok HTTP/1.1\r\nHost: a\r\nConnection: Content-Length\r\n\r\n"
+        # The refused client keeps its connection open (the gateway lingers on it), so only the refusal itself can hand the trial back.
+        s = socket.create_connection(("127.0.0.1", gw.port), timeout=5)
+        s.sendall(bad)
+        response = b""
+        while not complete(response):
+            response += s.recv(65536)
+        assert refusal(response) == (400, "forward.connection-token"), response[:100]
+        assert split(request(gw, GET % b"/flap/ok"))[0] == 200, "the locally refused request used up the trial"
+        s.close()
+
+    def a_success_resets_the_count(gw, up):
+        heal(gw)
+        flap = gw.flap
+        flap.down()
+        time.sleep(0.15)
+        assert refusal(request(gw, GET % b"/flap/ok"))[0] == 502
+        assert refusal(request(gw, GET % b"/flap/ok"))[0] == 502
+        flap.up()
+        assert split(request(gw, GET % b"/flap/ok"))[0] == 200
+        flap.down()
+        time.sleep(0.15)
+        assert refusal(request(gw, GET % b"/flap/ok")) == (502, "proxy.connect")
+        assert refusal(request(gw, GET % b"/flap/ok")) == (502, "proxy.connect"), "two failures after a success must not open a circuit of three"
+
+    def other_upstreams_are_unaffected(gw, up):
+        heal(gw)
+        flap = gw.flap
+        flap.down()
+        time.sleep(0.15)
+        for _ in range(3):
+            request(gw, GET % b"/flap/ok")
+        assert refusal(request(gw, GET % b"/flap/ok")) == (503, "proxy.circuit-open")
+        assert split(request(gw, GET % b"/x"))[0] == 200
+        assert split(request(gw, GET % b"/ka"))[0] == 200
+
+    def stale_pooled_connections_do_not_trip_the_circuit(gw, up):
+        quiesce(gw)
+        for _ in range(12):
+            for _ in range(2):
+                status, _, body = split(request(gw, GET % b"/ka/die"))
+                assert status == 200, ("a pooled connection that went stale was counted as a failure", status, body)
+
+    def several_stale_connections_in_a_row_do_not_trip_the_circuit(gw, up):
+        # Four idle pooled connections that each die when used again: four requests in a row get a 502 with no success between
+        # them. They are pooled connections going stale, not an upstream failing, so none of them counts.
+        quiesce(gw)
+        threads = [threading.Thread(target=lambda: request(gw, GET % b"/ka/slow", timeout=10)) for _ in range(4)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        post = b"POST /ka/die HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\n\r\nabc"
+        for _ in range(4):
+            assert refusal(request(gw, post)) == (502, "proxy.upstream-closed")
+        assert split(request(gw, GET % b"/ka"))[0] == 200, "the circuit opened on stale pooled connections"
+
+    def opening_the_circuit_closes_the_idle_pooled_connections(gw, up):
+        heal(gw)
+        flap = gw.flap
+        time.sleep(0.75)
+        threads = [threading.Thread(target=lambda: request(gw, GET % b"/flap/slow", timeout=10)) for _ in range(4)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        time.sleep(0.05)
+        assert flap.open_count() == 4, flap.open_count()
+        # Three unreadable answers in a row: each takes one of the idle connections; the circuit opens; the fourth goes with it.
+        for _ in range(3):
+            assert refusal(request(gw, GET % b"/flap/garbage"))[0] == 502
+        time.sleep(0.1)
+        assert flap.open_count() == 0, ("idle connections to an upstream whose circuit is open should be closed", flap.open_count())
+        assert refusal(request(gw, GET % b"/flap/ok")) == (503, "proxy.circuit-open")
+
+    def an_unanswering_upstream_trips_the_circuit(gw, up):
+        heal(gw)
+        for _ in range(3):
+            assert refusal(request(gw, GET % b"/flap/stall", timeout=8)) == (504, "timeout.upstream")
+        assert refusal(request(gw, GET % b"/flap/ok")) == (503, "proxy.circuit-open")
+
+    def nopool_the_circuit_never_opens_when_its_threshold_is_zero(gw, up):
+        flap = gw.flap
+        flap.down()
+        time.sleep(0.15)
+        for _ in range(8):
+            assert refusal(request(gw, GET % b"/flap/ok")) == (502, "proxy.connect")
+        flap.up()
+        assert split(request(gw, GET % b"/flap/ok"))[0] == 200
+
+
+def heal(gw):
+    """Bring the flapping upstream back and wait until its circuit is closed again (it opens for a second at most)."""
+    gw.flap.up()
+    time.sleep(0.2)
+    for _ in range(40):
+        if split(request(gw, GET % b"/flap/ok"))[0] == 200:
+            return
+        time.sleep(0.1)
+    raise AssertionError("the circuit did not close")
+
 
 def quiesce(gw):
     """Let every idle pooled connection expire, so a test starts with an empty pool."""
@@ -900,15 +1197,18 @@ def main():
     names = sys.argv[1:] or [n for n in vars(T) if not n.startswith("_")]
     failures = 0
     with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as tmp0:
-        port, up_port, dead, ka_port = free_port(), free_port(), free_port(), free_port()
+        port, up_port, dead, ka_port, flap_port = free_port(), free_port(), free_port(), free_port(), free_port()
         up = Upstream(up_port)
         ka = KAUpstream(ka_port)
-        gw = Gateway(tmp, port, up_port, dead, ka_port)
+        flap = FlapUpstream(flap_port)
+        gw = Gateway(tmp, port, up_port, dead, ka_port, flap_port)
         gw.ka = ka
+        gw.flap = flap
         gw0 = None
         if any(n.startswith("nopool_") for n in names):
-            gw0 = Gateway(tmp0, free_port(), up_port, dead, ka_port, pool=0)
+            gw0 = Gateway(tmp0, free_port(), up_port, dead, ka_port, flap_port, pool=0, circuit=0)
             gw0.ka = ka
+            gw0.flap = flap
         try:
             for name in names:
                 t0 = time.time()
@@ -930,6 +1230,7 @@ def main():
                 gw0.stop()
             up.stop = True
             ka.stop = True
+            flap.stop()
     print("%d tests, %d failures" % (len(names), failures))
     return 1 if failures else 0
 

@@ -50,7 +50,7 @@ import gateway.route;
 //    18  client: 1 if the request was a HEAD.   upstream: body bytes still to come (Content-Length)
 //    19  upstream: 1 if the connection may carry another request once this response is done
 //    20  upstream: 1 if the connection came from the pool
-//    21  (unused)
+//    21  client: the expiry of the half-open trial it holds (0: none)
 //    22  upstream: 1 if the request it is answering was a HEAD
 //    23  (unused)
 
@@ -77,6 +77,15 @@ fn pool_max() -> [] int {
 
 fn idle_ms() -> [] int {
     return deploy.idle_ms();
+}
+
+// The passive circuit: this many consecutive failures to one upstream open it for `circuit_open_ms()`; 0 never opens it.
+fn circuit_threshold() -> [] int {
+    return deploy.circuit_threshold();
+}
+
+fn circuit_open_ms() -> [] int {
+    return deploy.circuit_open_ms();
 }
 
 // Milliseconds, from the deployment: the head must arrive, the upstream must connect and start answering, and the request must
@@ -120,16 +129,39 @@ res struct Core {
     table: Box[[int]],
     // One chunked-body state per slot.
     chunks: Box[[int]],
+    // Per upstream, four ints: consecutive failures, when the circuit is open until (0: closed), until when a half-open trial
+    // request is in flight (0: none), unused.
+    health: Box[[int]],
 }
 
 fn token_of(k: int) -> [] int {
     return k + 1;
 }
 
+// If client `k` was admitted as the half-open trial and the circuit has not yet heard its outcome, hand the trial back (its
+// request ended without a verdict: refused locally, or abandoned by its client). `st[24k+21]` is the trial's expiry as it was
+// issued; it only releases the trial if that is still the one outstanding.
+fn release_trial[&c](core: &!c Core, k: int) -> [] int {
+    let st = contents(core.state);
+    let p = stride() * k;
+    if st[p + 1] == 1 && st[p + 21] != 0 {
+        let h = contents(core.health);
+        if h[4 * st[p + 11] + 2] == st[p + 21] {
+            h[4 * st[p + 11] + 2] = 0;
+        }
+        st[p + 21] = 0;
+    }
+    return 0;
+}
+
 // Close slot `k` and its peer and forget both.
 fn drop_session[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [] int {
     let st = contents(core.state);
     let peer = st[stride() * k + 2];
+    release_trial(core, k);
+    if peer >= 0 {
+        release_trial(core, peer);
+    }
     conns.close(tab, k);
     st[stride() * k] = 0;
     if peer >= 0 && st[stride() * peer] == 1 {
@@ -249,6 +281,60 @@ fn evict_idle[&t, &c](tab: &!t conns.Table, core: &!c Core) -> [] int {
     return 1;
 }
 
+// May a request go to upstream `idx` now? 0: yes, the circuit is closed. 1: yes, as the single trial after the open period.
+// 2: no, the circuit is open, or a trial is already in flight.
+fn circuit_admit[&c](core: &!c Core, idx: int, now: int) -> [] int {
+    let h = contents(core.health);
+    let b = 4 * idx;
+    if circuit_threshold() == 0 || h[b + 1] == 0 {
+        return 0;
+    }
+    if now < h[b + 1] {
+        return 2;
+    }
+    // Half open: one request at a time, and a trial that never reports back does not hold the circuit shut for ever.
+    if h[b + 2] != 0 && now < h[b + 2] {
+        return 2;
+    }
+    h[b + 2] = now + connect_ms() + upstream_ms();
+    return 1;
+}
+
+// Upstream `idx` answered: the failures are forgotten and the circuit, if open, closes.
+fn health_ok[&c](core: &!c Core, idx: int) -> [] int {
+    let h = contents(core.health);
+    let b = 4 * idx;
+    h[b] = 0;
+    h[b + 1] = 0;
+    h[b + 2] = 0;
+    return 0;
+}
+
+// Upstream `idx` failed (it would not connect, did not answer in time, hung up without answering on a fresh connection, or said
+// something unreadable). Enough in a row opens the circuit, and its idle pooled connections go. The count is not reset when the
+// circuit opens, so a failed trial after the open period reopens it at once.
+fn health_fail[&t, &c](tab: &!t conns.Table, core: &!c Core, idx: int, now: int) -> [] int {
+    if circuit_threshold() == 0 {
+        return 0;
+    }
+    let h = contents(core.health);
+    let st = contents(core.state);
+    let b = 4 * idx;
+    h[b] = h[b] + 1;
+    if h[b] >= circuit_threshold() {
+        h[b + 1] = now + circuit_open_ms();
+        h[b + 2] = 0;
+        var k = 0;
+        while k < slot_limit() {
+            if st[stride() * k] == 1 && st[stride() * k + 1] == 3 && st[stride() * k + 11] == idx {
+                close_slot(tab, core, k);
+            }
+            k = k + 1;
+        }
+    }
+    return 0;
+}
+
 // Upstream `u` has hung up, failed, or been written to in vain. If it was a pooled connection that died before saying anything and
 // the request may be sent again (no body, idempotent) and has not been, it is sent again on a fresh connection; otherwise
 // the client is answered 502, or, if the response was under way, simply closed.
@@ -264,6 +350,10 @@ fn upstream_lost[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int)
     if st[p + 16] == 1 {
         drop_session(tab, core, client);
         return 0;
+    }
+    if st[p + 20] == 0 && st[p + 16] == 0 {
+        // A fresh connection that hung up before answering: the upstream's failing, not a pooled connection going stale.
+        health_fail(tab, core, st[p + 11], now);
     }
     if st[p + 4] == 0 && st[p + 20] == 1 && st[pc + 16] == 1 && st[pc + 17] == 0 {
         close_slot(tab, core, u);
@@ -332,6 +422,7 @@ fn refuse[&t, &c, &r](tab: &!t conns.Table, core: &!c Core, k: int, status: int,
     let st = contents(core.state);
     let pd = contents(core.pends);
     let p = stride() * k;
+    release_trial(core, k);
     if st[p + 13] == 1 {
         drop_session(tab, core, k);
         return 0;
@@ -408,6 +499,7 @@ fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int)
                 let view = bf[ub..ub + st[pu + 4]];
                 let r = response.parse(view, tb);
                 if r < 0 {
+                    health_fail(tab, core, st[pu + 11], now);
                     refuse(tab, core, client, response.status(0 - r), response.tag(0 - r), now);
                     return 0;
                 }
@@ -418,6 +510,7 @@ fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int)
                         st[pc + 5] = st[pc + 5] + r;
                         st[pc + 13] = 1;
                     } else {
+                        health_ok(core, st[pu + 11]);
                         let m = forward.rewrite_response(view[0..r], tb, pd[cb + st[pc + 5]..cb + pend_size()]);
                         if m < 0 {
                             drop_session(tab, core, client);
@@ -619,6 +712,16 @@ fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, now: int) ->
         st[p + 9] = 0;
         st[p + 10] = 1;
     }
+    // Last of the checks the gateway makes itself: a request refused above never uses up the circuit's one trial.
+    let admit = circuit_admit(core, route.upstream(sel), now);
+    if admit == 2 {
+        refuse(tab, core, k, 503, "proxy.circuit-open", now);
+        return 0;
+    }
+    st[p + 21] = 0;
+    if admit == 1 {
+        st[p + 21] = contents(core.health)[4 * route.upstream(sel) + 2];
+    }
     st[p + 11] = route.upstream(sel);
     st[p + 15] = r;
     // A request with no body and an idempotent method may be sent again, once, if a pooled connection turns out to be dead.
@@ -784,6 +887,7 @@ fn dial[&h, &n, &c](heap: &!h Heap, tab: conns.Table, net: &n Net(""), core: &!c
         }
         Dialed::Failed(e) => {
             borrow mut table as &!tw in {
+                health_fail(tw, core, idx, now);
                 refuse(tw, core, k, 502, "proxy.connect", now);
             }
         }
@@ -916,6 +1020,7 @@ fn step[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, readiness: int, no
     if st[p + 3] == 0 {
         let outcome = conns.connect_status(tab, k);
         if outcome != 0 {
+            health_fail(tab, core, st[p + 11], now);
             refuse(tab, core, client, 502, "proxy.connect", now);
             return 0;
         }
@@ -957,8 +1062,10 @@ fn sweep[&t, &c](tab: &!t conns.Table, core: &!c Core, now: int) -> [poll] int {
                 if st[p + 3] == 0 {
                     refuse(tab, core, k, 408, "timeout.header", now);
                 } else if st[p + 3] == 1 || st[p + 3] == 2 {
+                    health_fail(tab, core, st[p + 11], now);
                     refuse(tab, core, k, 504, "timeout.connect", now);
                 } else if st[p + 3] == 3 {
+                    health_fail(tab, core, st[p + 11], now);
                     refuse(tab, core, k, 504, "timeout.upstream", now);
                 } else {
                     drop_session(tab, core, k);
@@ -1022,6 +1129,7 @@ fn accept_all[&h, &l, &c](heap: &!h Heap, conn: conns.Table, listener: &!l Liste
                         st[p + 18] = 0;
                         st[p + 19] = 0;
                         st[p + 20] = 0;
+                        st[p + 21] = 0;
                         st[p + 22] = 0;
                         borrow mut table as &!ct in {
                             if conns.nonblocking(ct, slot) != 0 || conns.watch(ct, core.poller, slot, token_of(slot), 1) != 0 {
@@ -1052,7 +1160,7 @@ pub fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net("
                 poller_add_listener(pw, listener, 0);
             }
             let limit = slot_limit();
-            var core = Core { poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * limit, 0), bufs: box_slice(heap, limit * buf_size(), byte_of(0)), pends: box_slice(heap, limit * pend_size(), byte_of(0)), table: box_slice(heap, http.slots(64), 0), chunks: box_slice(heap, limit * chunked.state_len(), 0) };
+            var core = Core { poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * limit, 0), bufs: box_slice(heap, limit * buf_size(), byte_of(0)), pends: box_slice(heap, limit * pend_size(), byte_of(0)), table: box_slice(heap, http.slots(64), 0), chunks: box_slice(heap, limit * chunked.state_len(), 0), health: box_slice(heap, 4 * 256, 0) };
             var tab = conns.empty(heap, 64);
             while true {
                 var ready = 0 - 1;
@@ -1103,7 +1211,7 @@ pub fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net("
                 }
             }
             conns.drop(heap, tab);
-            let Core { poller, events, state, bufs, pends, table, chunks } = core;
+            let Core { poller, events, state, bufs, pends, table, chunks, health } = core;
             poller_close(poller);
             unbox_slice(heap, events);
             unbox_slice(heap, state);
@@ -1111,6 +1219,7 @@ pub fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net("
             unbox_slice(heap, pends);
             unbox_slice(heap, table);
             unbox_slice(heap, chunks);
+            unbox_slice(heap, health);
             return 0;
         }
         Polling::Failed(e) => {
