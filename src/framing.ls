@@ -13,7 +13,7 @@ import std.http;
 // `0 - rule` (refused). A refusal always closes the connection: after one, the stream's framing cannot be trusted.
 
 pub fn rule_count() -> [] int {
-    return 16;
+    return 21;
 }
 
 // The head the gateway accepts, in bytes: lower than `std.http.max_head()` (design section 4, `limit.head`).
@@ -70,6 +70,21 @@ pub fn tag(rule: int) -> [] &static [byte] {
     if rule == 16 {
         return "framing.line-ending";
     }
+    if rule == 17 {
+        return "framing.chunk-size";
+    }
+    if rule == 18 {
+        return "framing.chunk-extension";
+    }
+    if rule == 19 {
+        return "framing.chunk-framing";
+    }
+    if rule == 20 {
+        return "framing.trailers";
+    }
+    if rule == 21 {
+        return "limit.body";
+    }
     return "";
 }
 
@@ -83,7 +98,10 @@ pub fn status(rule: int) -> [] int {
     if rule == 14 || rule == 15 {
         return 431;
     }
-    if rule >= 1 && rule <= 16 {
+    if rule == 21 {
+        return 413;
+    }
+    if rule >= 1 && rule <= 20 {
         return 400;
     }
     return 0;

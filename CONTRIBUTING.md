@@ -11,7 +11,7 @@ All of these pass before anything is called done (CI runs them, `.github/workflo
     python3 tests/generate_test.py
     lex-sys build
     lex-sys test
-    python3 tests/smuggling/run.py --gateway    # also --prefixes and --fuzz 1500 (docs/framing.md)
+    python3 tests/smuggling/run.py --gateway    # also --prefixes, --fuzz 1500, --chunked (docs/framing.md)
     python3 scripts/lines.py                 # no source file over 2,000 lines; split by concern
     python3 scripts/authority.py --check     # the compiler's authority report, within authority.toml
 
