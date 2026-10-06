@@ -1,9 +1,11 @@
 # lexsys-gateway
 
 An HTTP/1.1 reverse proxy written in [lex-sys](https://github.com/alpibrusl/lex-sys): no `Ffi`, no `unsafe`, and a
-checkable authority report. **The gateway you can audit:** `lex-sys authority` names the exact upstream `host:port`s the
-program can reach (`net_out("host:port")`) and nothing else, so a parsing bug in the gateway cannot turn it into a way
-to reach arbitrary hosts. Strict, bounded request parsing (`std.http`) is the defence against request smuggling.
+checkable authority report. **The gateway you can audit:** `lex-sys authority` bounds where the program can connect
+(`net_out(...)`) and says it never touches files or foreign code, so a parsing bug cannot turn it into a way to reach
+arbitrary hosts. **The bound is exact for a single upstream and a shared prefix for several**: a lex-sys program has one
+`Net` and so one bound (measured, `docs/design.md` section 2; an earlier version of this README promised an exact set).
+Strict, bounded request parsing (`std.http`) is the defence against request smuggling.
 
 The model is [`lexsys-cache`](https://github.com/alpibrusl/lexsys-cache): one thread, one poller, memory sized at start,
 every input bounded with its own refusal, and measurements against the incumbent (nginx, HAProxy) fixed before the code.
