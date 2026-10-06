@@ -122,9 +122,10 @@ def request(method, path, body=None):
         c.close()
 
 
-def sanity():
-    """The three requests of section 4. Returns None when everything is right, else a reason."""
-    for method, path, body, want in [("GET", "/", None, 2), ("GET", "/big", None, 65536), ("POST", "/post", b"x" * 16384, 2)]:
+def sanity(slow=False):
+    """The three requests of section 4 (only GET / against the slow upstream of C5, which has no /big). Returns None when right, else a reason."""
+    checks = [("GET", "/", None, 2), ("GET", "/big", None, 65536), ("POST", "/post", b"x" * 16384, 2)]
+    for method, path, body, want in checks[:1] if slow else checks:
         deadline, last = time.time() + 15, None
         while time.time() < deadline:
             try:
@@ -251,13 +252,13 @@ def run_oha(args, rate, duration, proxy, upstream):
                                                            up_cpu=(ut1 - ut0) / TICKS / wall, load_cpu=None)
 
 
-def start_proxy(args, name):
+def start_proxy(args, name, slow=False):
     argv, env = proxy_cmd(args, name)
     proxy = Proc(argv, PROXY_CORE, env, args.work / f"{name}.log")
     if not wait_port(PORT):
         proxy.stop()
         return None, f"{name} did not listen on port {PORT} within 20 s (see {name}.log)"
-    bad = sanity()
+    bad = sanity(slow)
     if bad:
         proxy.stop()
         return None, bad
@@ -347,7 +348,7 @@ def main():
                 for name in rot:
                     if name in results["notworking"]:
                         continue
-                    proxy, bad = start_proxy(args, name)
+                    proxy, bad = start_proxy(args, name, bool(CELLS[cell].get("slow")))
                     if not proxy:
                         results["notworking"][name] = bad
                         print(f"[{name}] not working in this setup: {bad}", flush=True)
