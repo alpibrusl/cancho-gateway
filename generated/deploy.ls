@@ -15,6 +15,24 @@ pub fn upstream_count() -> [] int {
     return 2;
 }
 
+// Milliseconds: the head must arrive, the upstream must connect, the upstream must start answering, the whole request
+// must end (docs/proxy.md section 3).
+pub fn header_ms() -> [] int {
+    return 10000;
+}
+
+pub fn connect_ms() -> [] int {
+    return 5000;
+}
+
+pub fn upstream_ms() -> [] int {
+    return 30000;
+}
+
+pub fn total_ms() -> [] int {
+    return 60000;
+}
+
 // The longest common prefix of the addresses, cut at a delimiter: what `narrow` would be given once
 // lex-sys has separate listen and connect bounds. Empty means no shared prefix.
 pub fn intended_egress_prefix() -> [] &static [byte] {

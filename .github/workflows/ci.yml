@@ -67,6 +67,10 @@ jobs:
           python3 tests/route_test.py 12 400
           python3 tests/route_test.py --fixed
 
+      - name: The proxy core against real sockets and an upstream that misbehaves
+        working-directory: gateway
+        run: python3 tests/proxy_test.py
+
       - name: Tests
         working-directory: gateway
         run: lex-sys test
