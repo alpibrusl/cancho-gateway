@@ -1,7 +1,7 @@
 # Request framing (task #3): what `std.http` already refuses, and what the gateway adds
 
-Status: **request-head framing built and measured; chunked-body framing, the nginx differential and the llhttp/nginx
-corpora are not done** (section 6). Every number here is reproduced by `tests/smuggling/run.py` against the pinned compiler.
+Status: **request-head framing (sections 1-5) and chunked-body framing (section 7) built and measured; the nginx
+differential and the llhttp/nginx corpora are not done** (section 6). Every number here is reproduced by `tests/smuggling/run.py` against the pinned compiler.
 
 ## 1. Method
 
@@ -58,6 +58,11 @@ tells them apart (400 `framing.two-lengths` vs 501 `framing.transfer-encoding`).
 | `limit.headers` | 431 | |
 | `limit.head` | 431 | over 16,384 bytes, complete or not |
 | `framing.line-ending` | 400 | a bare LF |
+| `framing.chunk-size` | 400 | missing, non-hex, signed, spaced, more than 8 hex digits |
+| `framing.chunk-extension` | 400 | any `;` after a chunk size |
+| `framing.chunk-framing` | 400 | the CRLF after a size or after data is not there |
+| `framing.trailers` | 400 | anything but CRLF after the last chunk |
+| `limit.body` | 413 | the declared total would exceed the route's limit |
 
 Every refusal closes the connection. Deliberately stricter than the RFC where it permits tolerance: identical duplicate
 `Content-Length`, bare LF, a leading empty line (`framing.method`).
@@ -80,8 +85,29 @@ here; `limit.head` triggers at 16 KiB, well under it.
 
 ## 6. Not done
 
-- **Chunked bodies:** bounded chunk-size parsing, no overflow, no extension abuse, relay (the second half of #3).
-- **The differential run against nginx and one more parser.** nginx was not run here.
-- **The llhttp and nginx corpora**, and any case beyond the 60.
+- **The differential run against nginx and one more parser.** nginx was not run here, for heads or bodies.
+- **The llhttp and nginx corpora**, and any case beyond the 60 head cases and 39 chunked cases.
+- **The relay itself** (#5): `chunked.advance` frames and counts; copying the bytes to an upstream is the proxy core's job.
 - Status for `framing.version` on `HTTP/1.0` with `Transfer-Encoding` (RFC 9112 6.1: a 1.0 request must not carry it) is
   not decided: today it is treated like 1.1.
+
+## 7. Chunked bodies (`src/chunked.ls`)
+
+Sans-io and incremental: `advance(src, state)` consumes what has arrived and answers the bytes consumed, or a refusal. The
+state is a five-int slice, so a body split at any byte decodes the same. It stops at the end of the message: the bytes after it
+belong to the next request (`next-request-not-consumed`).
+
+**Stricter than the RFC on purpose**, each a known smuggling lever: chunk extensions are refused (RFC 9112 7.1.1 lets a
+recipient ignore them), no whitespace around the size, **trailer fields are refused** (RFC 9112 7.1.2 lets a recipient discard
+them), and a size of more than eight hex digits is refused. The declared total is checked against the route's limit at the size
+line, so a declared 4 GiB chunk is refused before any data is read (`huge-declared-size`).
+
+**Measured** (`python3 tests/smuggling/run.py --chunked`, 2026-10-06): 39 cases, each delivered whole and split into pieces of
+1, 2, 3, 5 and 7 bytes (234 runs), the answer expected and identical for every split; 1,500 seeded mutations of the corpus,
+delivered whole and in pieces of 1 and 3: **0 traps, no delivery disagrees with another.**
+
+**Mutants, each shown killed:** extensions ignored (3 cases); size digits unbounded (2 cases, and the unbounded version
+**traps** on a 17-digit size: checked integer overflow, which is why the bound exists); body limit not checked (3 cases); trailers
+accepted (2 cases). **One mutant survived the first corpus**: removing the CR check after chunk data. Every existing case with a
+wrong byte there was also caught by the next check (LF), so the mutant was equivalent on them. `wrong-byte-then-lf-after-data`
+(`5\r\nhelloX\n...`) was added, and kills it.

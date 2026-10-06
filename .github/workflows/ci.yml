@@ -58,6 +58,7 @@ jobs:
         run: |
           python3 tests/smuggling/run.py --gateway
           python3 tests/smuggling/run.py --prefixes
+          python3 tests/smuggling/run.py --chunked
           python3 tests/smuggling/run.py --fuzz 1500
 
       - name: Tests

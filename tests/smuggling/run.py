@@ -2,6 +2,7 @@
 """Run the smuggling corpus through build/framing_probe (std.http.parse alone) and report the gaps.
 
     python3 tests/smuggling/run.py            # std.http alone: every case, exit 1 on any disagreement
+    python3 tests/smuggling/run.py --chunked  # chunked bodies: corpus under six deliveries, then 1,500 fuzzed bodies
     python3 tests/smuggling/run.py --prefixes # every proper prefix of each case, delivered split at any byte
     python3 tests/smuggling/run.py --fuzz N   # N mutated heads: no trap, accepted heads self-contained
     python3 tests/smuggling/run.py --gateway  # gateway.framing.judge: must agree on every case, with the status
@@ -18,6 +19,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from corpus import CASES  # noqa: E402
+from chunked_corpus import CASES as CHUNKED  # noqa: E402
 
 CODES = {1: "incomplete", 2: "request_line", 3: "method", 4: "target", 5: "version", 6: "header", 7: "too_many",
          8: "length", 9: "fold", 10: "too_large", 11: "encoding", 12: "host"}
@@ -112,7 +114,73 @@ def fuzz(count):
     return bad
 
 
+def chunk_probe(body, max_body, piece):
+    out = subprocess.run([str(ROOT / "build" / "framing_probe"), "1", body.hex(), "chunked:%d:%d" % (max_body, piece)],
+                         capture_output=True, text=True, timeout=10)
+    if out.returncode not in (0, 1):
+        return "TRAP exit %d" % out.returncode
+    return out.stdout.strip()
+
+
+def chunked_cases():
+    """The chunked corpus, delivered whole and then split into pieces of 1, 2, 3, 5 and 7 bytes: the answer must be the
+    expected one and identical for every split."""
+    bad = checked = 0
+    for cid, body, max_body, outcome, want, counted, source in CHUNKED:
+        answers = {}
+        for piece in (0, 1, 2, 3, 5, 7):
+            answers[piece] = chunk_probe(body, max_body, piece)
+            checked += 1
+        if outcome == "refuse":
+            expect = "refuse %s" % want
+            ok = all(a.startswith(expect) for a in answers.values())
+        else:
+            expect = "%s %d %d" % (outcome, want, counted)
+            ok = all(a == expect for a in answers.values())
+        if not ok:
+            bad += 1
+            print("FAIL %-28s want %-34s got %s" % (cid, expect, answers))
+    print("%d chunked cases x 6 deliveries = %d runs, %d failures" % (len(CHUNKED), checked, bad))
+    return bad
+
+
+def chunked_fuzz(count):
+    """Mutated chunked bodies, delivered whole and split: nothing traps, and every delivery agrees."""
+    rng = random.Random(5)
+    seeds = [c[1] for c in CHUNKED if len(c[1]) <= 200] + [b"3\r\nabc\r\n0\r\n\r\n", b"1\r\nx\r\n1\r\ny\r\n0\r\n\r\n"]
+    bad = done = 0
+    for _ in range(count):
+        data = bytearray(rng.choice(seeds))
+        for _ in range(rng.randint(1, 3)):
+            op = rng.randrange(4)
+            at = rng.randrange(len(data) + 1)
+            if op == 0 and data:
+                data[min(at, len(data) - 1)] = rng.choice(b"0123456789abcdefABCDEF;\r\n \t-x" + bytes([rng.randrange(256)]))
+            elif op == 1:
+                data.insert(at, rng.choice(b"0123456789abcdef;\r\n \t" + bytes([rng.randrange(256)])))
+            elif op == 2 and data:
+                del data[min(at, len(data) - 1)]
+            else:
+                del data[at:]
+        whole = chunk_probe(bytes(data), 64, 0)
+        if whole.startswith("TRAP") or whole.split()[:1] not in (["done"], ["more"], ["refuse"]):
+            print("FAIL trap or broken answer %r for %r" % (whole, bytes(data)))
+            bad += 1
+            continue
+        done += whole.startswith("done")
+        for piece in (1, 3):
+            got = chunk_probe(bytes(data), 64, piece)
+            if got != whole:
+                print("FAIL split delivery differs for %r: whole %r, pieces of %d %r" % (bytes(data), whole, piece, got))
+                bad += 1
+                break
+    print("%d fuzzed chunked bodies, %d complete, %d failures" % (count, done, bad))
+    return bad
+
+
 def main():
+    if "--chunked" in sys.argv[1:]:
+        return 1 if (chunked_cases() + chunked_fuzz(1500)) else 0
     if "--prefixes" in sys.argv[1:]:
         return 1 if prefixes() else 0
     if "--fuzz" in sys.argv[1:]:

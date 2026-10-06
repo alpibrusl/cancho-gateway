@@ -13,7 +13,7 @@ out = "build/gateway"
 
 [[bin]]
 name = "framing_probe"
-sources = ["src/framing.ls", "src/framing_probe.ls"]
+sources = ["src/framing.ls", "src/chunked.ls", "src/framing_probe.ls"]
 std = true
 out = "build/framing_probe"
 
