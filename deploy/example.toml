@@ -10,3 +10,24 @@ addr = "10.0.1.5:9000"
 [[upstream]]
 name = "web"
 addr = "10.0.1.6:9000"
+
+# Routes (docs/routes.md). The host selects the route set first (routes with that host, else routes with no host); inside
+# it the longest path_prefix wins; a tie is an error.
+
+[[route]]
+name = "api"
+host = "api.example.com"
+path_prefix = "/"
+upstream = "api"
+
+[[route]]
+name = "web-static"
+path_prefix = "/static"
+methods = ["GET", "HEAD"]
+upstream = "web"
+max_body = 0
+
+[[route]]
+name = "web"
+path_prefix = "/"
+upstream = "web"

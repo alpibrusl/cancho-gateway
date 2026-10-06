@@ -61,6 +61,12 @@ jobs:
           python3 tests/smuggling/run.py --chunked
           python3 tests/smuggling/run.py --fuzz 1500
 
+      - name: Route selection against the reference, over generated tables
+        working-directory: gateway
+        run: |
+          python3 tests/route_test.py 12 400
+          python3 tests/route_test.py --fixed
+
       - name: Tests
         working-directory: gateway
         run: lex-sys test
