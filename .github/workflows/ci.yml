@@ -53,6 +53,13 @@ jobs:
         working-directory: gateway
         run: lex-sys build
 
+      - name: Request framing against the smuggling corpus, split delivery and mutated heads
+        working-directory: gateway
+        run: |
+          python3 tests/smuggling/run.py --gateway
+          python3 tests/smuggling/run.py --prefixes
+          python3 tests/smuggling/run.py --fuzz 1500
+
       - name: Tests
         working-directory: gateway
         run: lex-sys test

@@ -11,6 +11,12 @@ sources = ["generated/deploy.ls", "src/egress.ls", "src/version.ls", "src/gatewa
 std = true
 out = "build/gateway"
 
+[[bin]]
+name = "framing_probe"
+sources = ["src/framing.ls", "src/framing_probe.ls"]
+std = true
+out = "build/framing_probe"
+
 [[test]]
 name = "version"
 sources = ["src/version.ls", "tests/version_test.ls"]
