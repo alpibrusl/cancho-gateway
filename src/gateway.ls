@@ -1,6 +1,8 @@
 edition 5;
 
 import gateway.version;
+import gateway.deploy;
+import gateway.egress;
 
 // Scaffold (task #2): prints its name and version and exits. The authority row is the smallest one
 // (`io_write`); every effect added by a later task widens `authority.toml`, a reviewable diff.

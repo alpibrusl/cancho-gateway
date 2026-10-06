@@ -1,0 +1,12 @@
+# A deployment: what the generator (scripts/generate.py) compiles into the binary (docs/design.md section 2).
+# The route table (task #4) will refer to these upstreams by name; this file only fixes the set.
+
+listen = 8080
+
+[[upstream]]
+name = "api"
+addr = "10.0.1.5:9000"
+
+[[upstream]]
+name = "web"
+addr = "10.0.1.6:9000"

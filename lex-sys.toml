@@ -7,11 +7,16 @@ lex-sys = "0dfc81ca680c49c5c88ac7e53c103a037c7e9f02"   # the compiler these sour
 
 [[bin]]
 name = "gateway"
-sources = ["src/version.ls", "src/gateway.ls"]
+sources = ["generated/deploy.ls", "src/egress.ls", "src/version.ls", "src/gateway.ls"]
 std = true
 out = "build/gateway"
 
 [[test]]
 name = "version"
 sources = ["src/version.ls", "tests/version_test.ls"]
+std = true
+
+[[test]]
+name = "egress"
+sources = ["generated/deploy.ls", "src/egress.ls", "tests/egress_test.ls"]
 std = true

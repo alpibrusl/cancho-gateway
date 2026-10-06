@@ -9,8 +9,8 @@
 #
 # Scaffold: only what the program does today. Each task adds the rows it needs, with the design section
 # that justifies them:
-#   #5 / #11  args, heap, net_in("<port>"), net_out("<P>") (the generated prefix of design section 2),
-#             conn_accept, conn_read, conn_write, poll, clock
+#   #5        args, heap, net_in(""), net_out(""), conn_accept, conn_read, conn_write, poll, clock
+#             (unnarrowed: one bound serves listen and connect, design section 2.1)
 #   #10       io_write, err_write (already allowed below)
 # Never, for any task: ffi, fs_read, fs_write, file_*, dir_* (the gateway touches no files).
 

@@ -6,7 +6,9 @@ Read `docs/design.md` first: it fixes scope, the authority row and the gates bef
 
 All of these pass before anything is called done (CI runs them, `.github/workflows/ci.yml`):
 
-    lex-sys fmt --check src tests
+    lex-sys fmt --check src tests generated
+    python3 scripts/generate.py deploy/example.toml --check   # generated/deploy.ls is current
+    python3 tests/generate_test.py
     lex-sys build
     lex-sys test
     python3 scripts/lines.py                 # no source file over 2,000 lines; split by concern

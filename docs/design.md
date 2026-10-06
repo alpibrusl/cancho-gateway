@@ -7,7 +7,9 @@ place.
 ## 1. The claim, and what it has to survive
 
 The README's headline was: *`lex-sys authority` names the exact upstream `host:port`s the program can reach.* Section 2
-measures it and **it does not hold as written for more than one upstream**. The corrected claim is in section 3.
+measures it and **it does not hold, for any number of upstreams**, in a program that also listens: the first version of
+this section (one prefix for several upstreams) was itself wrong and is corrected in 2.1. The claim that survives is in
+section 3.
 
 ## 2. How the upstream set becomes a literal (measured)
 
@@ -21,6 +23,8 @@ measures it and **it does not hold as written for more than one upstream**. The 
 | same, host taken from `argv` | row unchanged; connect to the literal host succeeds, **to any other host the process dies with SIGILL (exit 132)**, `localhost` included (the check compares names, before resolving) |
 | `narrow(net, "127.0.0.")` | row `net_out("127.0.0.")`; the bound is a **plain prefix** (`net.md`'s "narrowing by prefix"): `127.0.0.2` passes the check (and fails normally, exit 2), `10.0.0.1` traps |
 | two `narrow` calls | refused at compile time: `net` is consumed by the first |
+| `narrow(net, "9001")`, then `tcp_listen` on 9001 **and** `tcp_connect` | row `net_in("9001")` **and** `net_out("9001")`: the one string labels both; the listen passes, the connect to `127.0.0.1` **traps** |
+| `narrow(net, "127.0.0.")`, then `tcp_listen` on 9001 | row `net_in("127.0.0.")`; the listen **traps** |
 
 Consequences, each of which shapes the design:
 
@@ -34,36 +38,42 @@ Consequences, each of which shapes the design:
 3. A prefix has no boundary rule: `10.0.0.1:80` also admits `10.0.0.1:8080` and `10.0.0.12:80`. The generator must
    emit a prefix that cannot over-admit (see decision).
 
-### Options
+### 2.1 Correction: one bound serves both directions, so a proxy cannot narrow either
 
-| | (a) generator, one binary per deployment | (b) `net_out("")`, list enforced in code | (c) hybrid |
+The last two probe rows decide it. `Net` carries one string and uses it for both checks: `tcp_listen` requires it to
+equal the port, `tcp_connect` requires it to be a prefix of the host. A program that listens **and** connects (a proxy,
+by definition) has no string that passes both, so narrowing either direction makes the other trap. **A proxy's honest
+report is `net_in("")` and `net_out("")`**: any port, any host. The earlier "longest common prefix" decision is withdrawn
+as a *proof*; the prefix computation is kept as metadata (below).
+
+### Options, revised
+
+| | (a) compiled-in set, enforced in code | (b) the same, plus a split of the proxy into a listen-only and a connect-only program | (c) ask lex-sys for separate bounds |
 |---|---|---|---|
-| report | the deployment's literal | any host | same as (a) for the compiled-in prefix |
-| run-time table | none needed for the bound | whole | selects among hosts under the prefix |
-| what an auditor learns from the report | the bound; exact only when one upstream or one shared prefix | nothing about egress | as (a) |
-| cost | a build per deployment | none | a build when the prefix changes |
+| report | `net_in("")`, `net_out("")` | each program narrowed, but they must pass bytes between them, which needs a socket or an fd, i.e. another `Net` use | `net_in("8080")`, `net_out("10.0.1.")` |
+| what proves the upstream set | our check and the tests/mutants on it, **not the compiler** | the compiler, for each half | the compiler |
+| cost | none | a design of its own; probably reintroduces unnarrowed `net` in one half | a lex-sys change (`narrow` per direction, or `Net.split`) |
 
 ### Decision
 
-**(a), generated, with the literal defined as the longest common prefix of the deployment's `host:port` strings, cut at
-a delimiter so it cannot over-admit.** Concretely the generator emits `narrow(net, P)` where `P` is the longest common
-prefix of the upstream strings truncated back to the last `.` or `:`; a single upstream is `host:port` in full (exact), and
-the generator **refuses** a table whose common prefix is empty (it would be `net_out("")`, option (b) by another name)
-unless the operator passes `--allow-any-egress`, which is printed in the report. Run-time config selects among upstreams
-that already satisfy `P`; it cannot widen `P`.
+**(a) for v1, and (c) recorded as the lex-sys request that would restore the headline.** The upstream set is a deployment
+file compiled in by `scripts/generate.py` (task #11): `generated/deploy.ls` holds the listen port and the allowed
+`host:port`s. `gateway.egress.allowed` checks an upstream by **exact equality** before every connect (never by prefix, so
+`10.0.1.5:9000` does not admit `10.0.1.50:9000`), which is also what keeps the compiler's trap unreachable. The generator
+still computes `intended_egress_prefix` (longest common prefix cut at a delimiter, empty if none) and prints it, so the day
+lex-sys has separate bounds the literal is already derived and tested.
 
-What the report may therefore say, and what the README now says: *for a single-upstream deployment, the exact
-`host:port`; for several, the shared prefix, which the generator prints with the list of upstreams it admits.* The
-headline is conditional on the deployment and is stated per deployment, not as a property of the program.
+What is proved, and by what: the compiler proves **no files, no ffi, bounded, only network and clock** (the ceiling gate,
+`authority.toml`). The tests prove the upstream set (`tests/egress_test.ls`, the generator's tests, and the mutants listed in
+section 9). Nothing proves the set *to the compiler*, and the README says so.
 
-Rejected: (b) loses the claim entirely; (c) adds a run-time table that the report cannot see, with no more proof than (a).
-**Open:** whether a second process per upstream (a front process with no egress, workers with one literal each) is worth
-its cost to get exact sets for unrelated upstreams. Not in v1; recorded in #16.
+Rejected: narrowing in v1 (traps). (b) is recorded in #16 as the open way to get a compiler-proved set without a
+lex-sys change; it is not obviously possible.
 
 ## 3. Authority row (v1)
 
-`args`, `heap`, `net_in("<port>")` (the listener port is also a generated literal, as in `lexsys-cache`),
-`net_out("<P>")` from section 2, `conn_accept`, `conn_read`, `conn_write`, `poll`, `clock`, `io_write` (log to stdout,
+`args`, `heap`, `net_in("")` (as in `lexsys-cache`; the listen port is a generated constant, not a bound),
+`net_out("")` (section 2.1: the compiler cannot carry the set), `conn_accept`, `conn_read`, `conn_write`, `poll`, `clock`, `io_write` (log to stdout,
 stderr only for startup refusals), **no `fs_*`, no `ffi`**. CI fails if a derived label is outside the committed ceiling
 file (task #11) and if `fs`/`ffi` ever appear.
 
@@ -140,9 +150,14 @@ Each must be able to fail, with a mutant shown failing it.
    delivery decodes identically; 1,000+ fuzzed heads reach no panic.
 2. **Differential vs nginx** (#12 owns the harness; #3 and #7 supply cases): same scenario, compare what the client and
    the upstream observe; deliberate divergences asserted so the list cannot go stale.
-3. **Authority ceiling** (#11): a new upstream outside `P` or any `fs`/`ffi` fails CI.
-4. **Bound check before connect** (#11): a mutant removing the gateway's own prefix check must be killed by observing a
-   refusal, not a SIGILL.
+3. **Authority ceiling** (#11): any label outside `authority.toml`, or any `fs`/`ffi`, fails CI. Because the compiler
+   cannot see the upstream set (2.1), "adding an upstream changes the report" is **not** a gate we can have; it is replaced
+   by: the deployment file and `generated/deploy.ls` must agree (`generate.py --check`), so an upstream cannot be added
+   without a regenerated, reviewed diff.
+4. **Egress check before connect** (#11): `tests/egress_test.ls` and the generator's tests. Mutants, each shown killed
+   (2026-10-06): `starts_with` instead of equality in `egress.allowed` (killed by the over-admit test); no delimiter cut in
+   the prefix (killed by 3 prefix cases); an upstream added to the deployment file without regenerating (killed by
+   `--check`).
 5. **Memory flat** (#5, #13): RSS after warm-up vs. after N=1,000,000 requests of churn within a stated tolerance (set
    from the first measurement, then fixed); every bound tested at its edge.
 6. **Fuzz** (#13): random byte streams split at random points into the whole connection state machine, with a fixed
@@ -160,7 +175,7 @@ gateway is listed. The criterion for "not meaningfully slower" is set after the 
 
 ## 11. Order of work (corrected)
 
-#1 → #2 (scaffold; its ceiling depends on §2-3) → #11 (generator and report; §2's decision lands here) → #3 → #4 (config
+#1 → #2 (scaffold; its ceiling depends on §2-3) → #11 (generator and ceiling gate; built, §2.1) → #3 → #4 (config
 parser, consuming the generator's table format) → #5 → #7 → #6 → #8 → #9 → #10 → #12/#13 (grow throughout) → #18 → #14 →
 #15 → #16. The epic had #11 "early" and #4 before it; both depend on #11's table format.
 
@@ -177,6 +192,8 @@ checked (outside this session's repository scope).
 ## 13. lex-sys gaps found so far
 
 - One `Net` per program, one prefix bound: no exact multi-upstream report (section 2).
+- One bound string serves `tcp_listen` (equality with the port) and `tcp_connect` (prefix of the host): a program doing
+  both cannot narrow either. **Request:** separate bounds per direction (`narrow` per direction, or `Net.split`).
 - A bound violation traps (SIGILL), with no refusal result to branch on.
 - `narrow`'s prefix has no boundary rule.
 - `agent-toolbox.md` §3 header says D1 to D11 while D12-D18 exist.

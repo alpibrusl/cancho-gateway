@@ -5,7 +5,7 @@ set -u
 L=${1:?path to the lex-sys compiler}
 here=$(cd "$(dirname "$0")" && pwd)
 out=$(mktemp -d)
-for f in unnarrowed narrowed_literal narrowed_argv_host narrowed_prefix two_narrows; do
+for f in unnarrowed narrowed_literal narrowed_argv_host narrowed_prefix two_narrows listen_and_connect listen_under_host_prefix; do
   echo "== authority: $f"; "$L" authority "$here/$f.ls" 2>&1 | sed -n 1,4p
 done
 for f in narrowed_argv_host narrowed_prefix; do
@@ -18,4 +18,8 @@ s=socket.socket();s.setsockopt(1,2,1);s.bind(('127.0.0.1',9001));s.listen(5);tim
     "$out/$f" "$host" 2>/dev/null; echo "run: $f $host -> exit $?"
     wait
   done
+done
+for f in listen_and_connect listen_under_host_prefix; do
+  "$L" build "$here/$f.ls" -o "$out/$f" >/dev/null 2>&1 || { echo "build failed: $f"; continue; }
+  "$out/$f" 2>/dev/null; echo "run: $f -> exit $?"
 done
