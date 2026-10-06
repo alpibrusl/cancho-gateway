@@ -557,6 +557,18 @@ class T:
         status, _, got = split(request(gw, b"POST /echo HTTP/1.1\r\nHost: a\r\nContent-Length: %d\r\n\r\n" % len(body) + body, timeout=15))
         assert status == 200 and hashlib.sha256(got).digest() == hashlib.sha256(body).digest(), (status, len(got))
 
+    def small_trailing_write_is_not_delayed(gw, up):
+        # Found by the benchmark (docs/bench.md): a 16 KiB body arrives as a 16,384-byte read and a 96-byte read, and without
+        # TCP_NODELAY the second, small write waited for the peer's delayed acknowledgement, about 40 ms, on every other request.
+        body = b"x" * 16384
+        slow = 0
+        for _ in range(40):
+            t0 = time.time()
+            status, _, got = split(request(gw, b"POST /ka/echo HTTP/1.1\r\nHost: a\r\nContent-Length: %d\r\n\r\n" % len(body) + body))
+            assert status == 200 and got == body, (status, len(got))
+            slow += time.time() - t0 > 0.03
+        assert slow <= 3, "%d of 40 requests took more than 30 ms" % slow
+
     def chunked_body_echo(gw, up):
         parts = [os.urandom(random.randint(1, 20000)) for _ in range(12)]
         raw = b"".join(b"%x\r\n" % len(p) + p + b"\r\n" for p in parts) + b"0\r\n\r\n"
