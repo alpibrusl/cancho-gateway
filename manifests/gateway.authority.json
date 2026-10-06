@@ -71,6 +71,10 @@
     "blob",
     "body_mode",
     "buf_size",
+    "circuit_open_ms",
+    "circuit_open_ms",
+    "circuit_threshold",
+    "circuit_threshold",
     "classify",
     "connect_ms",
     "connect_ms",
@@ -207,7 +211,7 @@
     "value_of",
     "well_formed_version"
   ],
-  "folded_operators": 69,
+  "folded_operators": 70,
   "folded_calls": 0,
-  "functions": 191
+  "functions": 199
 }
