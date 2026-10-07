@@ -1,4 +1,4 @@
-# lexsys-gateway: design (task #1)
+# cancho-gateway: design (task #1)
 
 Status: **design; nothing built.** Written before any code. Measured claims are marked *measured* and point at the
 probe that reproduces them; everything else is a decision or an open item. A claim here found false is corrected in
@@ -6,14 +6,14 @@ place.
 
 ## 1. The claim, and what it has to survive
 
-The README's headline was: *`lex-sys authority` names the exact upstream `host:port`s the program can reach.* Section 2
+The README's headline was: *`cancho authority` names the exact upstream `host:port`s the program can reach.* Section 2
 measures it and **it does not hold, for any number of upstreams**, in a program that also listens: the first version of
 this section (one prefix for several upstreams) was itself wrong and is corrected in 2.1. The claim that survives is in
 section 3.
 
 ## 2. How the upstream set becomes a literal (measured)
 
-`probes/upstream-literal/run.sh <lex-sys>` reproduces every line below (compiler built from lex-sys `main` of
+`probes/upstream-literal/run.sh <cancho>` reproduces every line below (compiler built from cancho `main` of
 2026-10-06).
 
 | probe | result |
@@ -48,31 +48,31 @@ as a *proof*; the prefix computation is kept as metadata (below).
 
 ### Options, revised
 
-| | (a) compiled-in set, enforced in code | (b) the same, plus a split of the proxy into a listen-only and a connect-only program | (c) ask lex-sys for separate bounds |
+| | (a) compiled-in set, enforced in code | (b) the same, plus a split of the proxy into a listen-only and a connect-only program | (c) ask cancho for separate bounds |
 |---|---|---|---|
 | report | `net_in("")`, `net_out("")` | each program narrowed, but they must pass bytes between them, which needs a socket or an fd, i.e. another `Net` use | `net_in("8080")`, `net_out("10.0.1.")` |
 | what proves the upstream set | our check and the tests/mutants on it, **not the compiler** | the compiler, for each half | the compiler |
-| cost | none | a design of its own; probably reintroduces unnarrowed `net` in one half | a lex-sys change (`narrow` per direction, or `Net.split`) |
+| cost | none | a design of its own; probably reintroduces unnarrowed `net` in one half | a cancho change (`narrow` per direction, or `Net.split`) |
 
 ### Decision
 
-**(a) for v1, and (c) recorded as the lex-sys request that would restore the headline.** The upstream set is a deployment
-file compiled in by `scripts/generate.py` (task #11): `generated/deploy.ls` holds the listen port and the allowed
+**(a) for v1, and (c) recorded as the cancho request that would restore the headline.** The upstream set is a deployment
+file compiled in by `scripts/generate.py` (task #11): `generated/deploy.cho` holds the listen port and the allowed
 `host:port`s. `gateway.egress.allowed` checks an upstream by **exact equality** before every connect (never by prefix, so
 `10.0.1.5:9000` does not admit `10.0.1.50:9000`), which is also what keeps the compiler's trap unreachable. The generator
 still computes `intended_egress_prefix` (longest common prefix cut at a delimiter, empty if none) and prints it, so the day
-lex-sys has separate bounds the literal is already derived and tested.
+cancho has separate bounds the literal is already derived and tested.
 
 What is proved, and by what: the compiler proves **no files, no ffi, bounded, only network and clock** (the ceiling gate,
-`authority.toml`). The tests prove the upstream set (`tests/egress_test.ls`, the generator's tests, and the mutants listed in
+`authority.toml`). The tests prove the upstream set (`tests/egress_test.cho`, the generator's tests, and the mutants listed in
 section 9). Nothing proves the set *to the compiler*, and the README says so.
 
 Rejected: narrowing in v1 (traps). (b) is recorded in #16 as the open way to get a compiler-proved set without a
-lex-sys change; it is not obviously possible.
+cancho change; it is not obviously possible.
 
 ## 3. Authority row (v1)
 
-`args`, `heap`, `net_in("")` (as in `lexsys-cache`; the listen port is a generated constant, not a bound),
+`args`, `heap`, `net_in("")` (as in `cancho-cache`; the listen port is a generated constant, not a bound),
 `net_out("")` (section 2.1: the compiler cannot carry the set), `conn_accept`, `conn_read`, `conn_write`, `poll`, `clock`, `io_write` (log to stdout,
 stderr only for startup refusals), **no `fs_*`, no `ffi`**. CI fails if a derived label is outside the committed ceiling
 file (task #11) and if `fs`/`ffi` ever appear.
@@ -80,12 +80,14 @@ file (task #11) and if `fs`/`ffi` ever appear.
 - **Secrets without files:** keys arrive in `argv`/environment at start. `args` is the effect; the open question is whether
   the environment is reachable without a new effect. **To settle in #8's first commit** by probe; if not, keys come in
   `argv` only (visible in `ps`, a documented limitation) or on a stdin read at start (`io_read`, a new row to ceiling).
-- **Randomness for request ids:** to settle by probe in #7 (std facility vs. a clock-seeded generator, which would be
-  predictable and must be called that).
+- **Randomness for request ids:** settled by probe in #7 (`docs/headers.md` section 1): the pinned compiler has no random-bytes
+  facility (entropy is read from `/dev/urandom` through a file capability, which the gateway deliberately lacks), so ids are a start
+  stamp, the listen port and a counter: unique, **predictable**, correlation ids and not secrets. The same probe found no peer
+  address on an accepted connection (`conn_peer` is not built), so the gateway cannot write `X-Forwarded-For` or `Forwarded: for=`.
 
 ## 4. Memory model: every bound has a rule
 
-Everything is sized at start from the config; nothing is allocated afterwards (the `lexsys-cache` model).
+Everything is sized at start from the config; nothing is allocated afterwards (the `cancho-cache` model).
 
 | bound | default | refusal (rule tag) | status |
 |---|---|---|---|
@@ -125,7 +127,7 @@ connection. Nothing else, ever.
 Recorded one by one in #16. TLS, HTTP/2/gRPC, caching, response rewriting, dynamic discovery, clustering. Dynamic
 discovery additionally contradicts section 2 (a mutable set cannot be bounded by a compile-time literal).
 
-## 8. Agent-friendly operation (task #18): what carries over from lexsys-tools
+## 8. Agent-friendly operation (task #18): what carries over from cancho-tools
 
 Applies unchanged: `introspect` and `skill` from one table (D11), errors as `{code, rule, message, hint, repair, detail}`
 with stable rule tags (D5, D6), schema-checked outputs, deterministic JSON, `check`/`explain`/`diff` as the no-state
@@ -152,9 +154,9 @@ Each must be able to fail, with a mutant shown failing it.
    the upstream observe; deliberate divergences asserted so the list cannot go stale.
 3. **Authority ceiling** (#11): any label outside `authority.toml`, or any `fs`/`ffi`, fails CI. Because the compiler
    cannot see the upstream set (2.1), "adding an upstream changes the report" is **not** a gate we can have; it is replaced
-   by: the deployment file and `generated/deploy.ls` must agree (`generate.py --check`), so an upstream cannot be added
+   by: the deployment file and `generated/deploy.cho` must agree (`generate.py --check`), so an upstream cannot be added
    without a regenerated, reviewed diff.
-4. **Egress check before connect** (#11): `tests/egress_test.ls` and the generator's tests. Mutants, each shown killed
+4. **Egress check before connect** (#11): `tests/egress_test.cho` and the generator's tests. Mutants, each shown killed
    (2026-10-06): `starts_with` instead of equality in `egress.allowed` (killed by the over-admit test); no delimiter cut in
    the prefix (killed by 3 prefix cases); an upstream added to the deployment file without regenerating (killed by
    `--check`).
@@ -181,15 +183,15 @@ parser, consuming the generator's table format) → #5 → #7 → #6 → #8 → 
 
 ## 12. Cross-references checked against the sources (2026-10-06)
 
-All of lex-sys `docs/{http,listen,native-sockets,tls-nonblocking,websocket-spike,http-server,atomics,agent-toolbox}.md` and
-`packages/http-server/` exist. `websocket-spike.md` §10 is "What lex-sys lacks to write the equivalent service" (the
+All of cancho `docs/{http,listen,native-sockets,tls-nonblocking,websocket-spike,http-server,atomics,agent-toolbox}.md` and
+`packages/http-server/` exist. `websocket-spike.md` §10 is "What cancho lacks to write the equivalent service" (the
 catalogue #15 cites). `agent-toolbox.md` has decisions **D1 to D18** (§3's own text still says "D1 to D11"; D17 is real).
-lexsys-cache has `docs/design.md` and `src/session.ls`; lexsys-tools has `server/mcp.ls`, `scripts/manifest.py`,
-`docs/mcp.md`. **Not found:** `docs/agent-bench.md` in lexsys-tools `main` (cited by that repo's own `docs/mcp.md` §10 and a
-test, so it may live on a branch). #18's benchmark task should cite `docs/mcp.md` until it is found. lexsys-tools#28 was not
+cancho-cache has `docs/design.md` and `src/session.cho`; cancho-tools has `server/mcp.cho`, `scripts/manifest.py`,
+`docs/mcp.md`. **Not found:** `docs/agent-bench.md` in cancho-tools `main` (cited by that repo's own `docs/mcp.md` §10 and a
+test, so it may live on a branch). #18's benchmark task should cite `docs/mcp.md` until it is found. cancho-tools#28 was not
 checked (outside this session's repository scope).
 
-## 13. lex-sys gaps found so far
+## 13. cancho gaps found so far
 
 - One `Net` per program, one prefix bound: no exact multi-upstream report (section 2).
 - One bound string serves `tcp_listen` (equality with the port) and `tcp_connect` (prefix of the host): a program doing

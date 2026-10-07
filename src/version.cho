@@ -6,7 +6,7 @@ module gateway.version;
 // `introspect` (task #18) and the access log (task #10) all read it from here.
 
 pub fn name() -> [] &static [byte] {
-    return "lexsys-gateway";
+    return "cancho-gateway";
 }
 
 pub fn number() -> [] &static [byte] {

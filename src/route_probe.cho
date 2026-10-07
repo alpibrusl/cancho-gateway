@@ -101,6 +101,8 @@ fn main(world: World) -> [] int {
                                 write_int(i, route.upstream(answer));
                                 write_all(i, " ");
                                 write_int(i, route.max_body(answer));
+                                write_all(i, " ");
+                                write_int(i, route.trust_forwarded(answer));
                             } else {
                                 write_all(i, "refuse ");
                                 write_all(i, route.tag(0 - answer));

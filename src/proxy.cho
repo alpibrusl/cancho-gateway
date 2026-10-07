@@ -52,7 +52,8 @@ import gateway.route;
 //    20  upstream: 1 if the connection came from the pool
 //    21  client: the expiry of the half-open trial it holds (0: none)
 //    22  upstream: 1 if the request it is answering was a HEAD
-//    23  (unused)
+//    23  client: 2 * the request's id sequence number + 1 if its route trusts the forwarding headers (docs/headers.md); the head
+//        is rewritten again for a retry, and the same number gives it the same X-Request-Id
 
 fn slot_limit() -> [] int {
     return 256;
@@ -113,7 +114,7 @@ fn flush_ms() -> [] int {
 // After a refusal has been written the connection is kept open until the client has been silent this long (and for at most three
 // seconds), its input read and thrown away: closing a socket with
 // unread request bytes in it sends a reset, which can destroy the response before the client has read it (RFC 9112 9.6).
-// lex-sys has no half-close, so the gateway lingers instead.
+// cancho has no half-close, so the gateway lingers instead.
 fn linger_ms() -> [] int {
     return 500;
 }
@@ -132,6 +133,8 @@ res struct Core {
     // Per upstream, four ints: consecutive failures, when the circuit is open until (0: closed), until when a half-open trial
     // request is in flight (0: none), unused.
     health: Box[[int]],
+    // Two ints: the clock at start, and the number of requests given an id so far (docs/headers.md section 3).
+    ids: Box[[int]],
 }
 
 fn token_of(k: int) -> [] int {
@@ -725,6 +728,10 @@ fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, now: int) ->
     }
     st[p + 11] = route.upstream(sel);
     st[p + 15] = r;
+    // The request's id, kept so that a retry carries the same one, and whether its route trusts the forwarding headers.
+    let ids = contents(core.ids);
+    ids[1] = ids[1] + 1;
+    st[p + 23] = 2 * ids[1] + route.trust_forwarded(sel);
     // A request with no body and an idempotent method may be sent again, once, if a pooled connection turns out to be dead.
     let method = http.method(view, tb);
     st[p + 16] = 0;
@@ -758,7 +765,8 @@ fn attach[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, slot: int, now: 
     if http.parse(view, tb) < 0 {
         failed = 1;
     } else {
-        let m = forward.rewrite(view, tb, pd[slot * pend_size()..slot * pend_size() + pend_size()], pool_max() > 0);
+        let ids = contents(core.ids);
+        let m = forward.rewrite(view, tb, pd[slot * pend_size()..slot * pend_size() + pend_size()], pool_max() > 0, st[p + 23] % 2 == 1, ids[0], deploy.listen_port(), st[p + 23] / 2);
         if m < 0 {
             failed = 0 - m + 1;
         } else {
@@ -1166,8 +1174,11 @@ pub fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net("
                 poller_add_listener(pw, listener, 0);
             }
             let limit = slot_limit();
-            var core = Core { poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * limit, 0), bufs: box_slice(heap, limit * buf_size(), byte_of(0)), pends: box_slice(heap, limit * pend_size(), byte_of(0)), table: box_slice(heap, http.slots(64), 0), chunks: box_slice(heap, limit * chunked.state_len(), 0), health: box_slice(heap, 4 * 256, 0) };
+            var core = Core { poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * limit, 0), bufs: box_slice(heap, limit * buf_size(), byte_of(0)), pends: box_slice(heap, limit * pend_size(), byte_of(0)), table: box_slice(heap, http.slots(64), 0), chunks: box_slice(heap, limit * chunked.state_len(), 0), health: box_slice(heap, 4 * 256, 0), ids: box_slice(heap, 2, 0) };
             var tab = conns.empty(heap, 64);
+            borrow mut core as &!cw in {
+                contents(cw.ids)[0] = clock_ms(clock);
+            }
             while true {
                 var ready = 0 - 1;
                 borrow mut core as &!cw in {
@@ -1217,7 +1228,7 @@ pub fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net("
                 }
             }
             conns.drop(heap, tab);
-            let Core { poller, events, state, bufs, pends, table, chunks, health } = core;
+            let Core { poller, events, state, bufs, pends, table, chunks, health, ids } = core;
             poller_close(poller);
             unbox_slice(heap, events);
             unbox_slice(heap, state);
@@ -1226,6 +1237,7 @@ pub fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net("
             unbox_slice(heap, table);
             unbox_slice(heap, chunks);
             unbox_slice(heap, health);
+            unbox_slice(heap, ids);
             return 0;
         }
         Polling::Failed(e) => {

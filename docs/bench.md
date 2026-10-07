@@ -1,5 +1,9 @@
 # Benchmark against the top open-source proxies (task #14)
 
+> **Names.** Everything below was written and measured while the project was `lexsys-gateway`, built with `lex-sys`. The harness now calls the gateway `cancho`
+> (and its baseline `cancho-base`) and the compiler `cancho`; `bench/results/*.json` keep the old keys (`lexsys`, `lexsys-base`) and the sections below keep the old names,
+> because they say what was measured. `--baseline-rev` can only build a revision from after the rename: an older one needs the old compiler.
+
 Status: **protocol fixed in this commit, before any number was measured.** Results are added in a later commit, under section 8,
 without changing sections 1 to 7; if a result shows the protocol was wrong, the protocol is corrected in place and says so.
 
@@ -79,7 +83,7 @@ proposed after the results and marked as such.
 
 ## 7. Reproducing
 
-`python3 bench/run.py --help`. It needs the tools above on `PATH` (or `--bin NAME=PATH`), builds the gateway with `lex-sys` (`LEX_SYS`), writes
+`python3 bench/run.py --help`. It needs the tools above on `PATH` (or `--bin NAME=PATH`), builds the gateway with `cancho` (`CANCHO`; before the rename of 2026-10-07, `lex-sys` and `LEX_SYS`), writes
 the configs from `bench/conf/` into a scratch directory, and writes `results.json` and a markdown table.
 
 

@@ -68,6 +68,8 @@ REFUSALS = [
     ("config.route", 8, UP + R + 'path_prefix = "/"\nmethods = []\n'),
     ("config.route", 8, UP + R + 'path_prefix = "/"\nmethods = ["GET", "GET"]\n'),
     ("config.route", 8, UP + R + 'path_prefix = "/"\nmax_body = -1\n'),
+    ("config.route", 8, UP + R + 'path_prefix = "/"\ntrust_forwarded = "yes"\n'),
+    ("config.route", 8, UP + R + 'path_prefix = "/"\ntrust_forwarded = 1\n'),
     ("config.route", 8, UP + R + 'path_prefix = "/"\nmax_body = 1073741825\n'),
     ("config.route-upstream", 7, UP + '[[route]]\npath_prefix = "/"\nupstream = "b"\n'),
     ("config.route-conflict", 10, UP + R + 'path_prefix = "/x"\n' + R + 'path_prefix = "/x"\n'),

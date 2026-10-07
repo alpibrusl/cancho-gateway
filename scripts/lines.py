@@ -6,7 +6,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CEILING = 2000
-SUFFIXES = {".ls", ".py", ".sh", ".toml", ".yml"}
+SUFFIXES = {".cho", ".py", ".sh", ".toml", ".yml"}
 SKIP = {".git", "build"}
 
 

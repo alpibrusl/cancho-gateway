@@ -1,7 +1,7 @@
-"""The reference route selector (docs/routes.md), written from the specification and not from src/route.ls.
+"""The reference route selector (docs/routes.md), written from the specification and not from src/route.cho.
 
 `select(routes, host, method, path)` answers ("route", index) or ("refuse", tag, status). `routes` are the dicts that
-scripts/generate.py's `load` returns (host None for any, prefix, mask, upstream, max_body).
+scripts/generate.py's `load` returns (host None for any, prefix, mask, upstream, max_body, trust).
 """
 
 import re
@@ -51,5 +51,5 @@ def select(routes, host, method, path):
     allowed = [(i, r) for i, r in on_path if bit and r["mask"] & bit]
     if allowed:
         i, r = max(allowed, key=lambda t: (len(t[1]["prefix"]), -t[0]))
-        return ("route", i, r["upstream"], r["max_body"])
+        return ("route", i, r["upstream"], r["max_body"], r["trust"])
     return ("refuse", "route.method", 405) if on_path else ("refuse", "route.none", 404)

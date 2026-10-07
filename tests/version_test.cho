@@ -5,7 +5,7 @@ import gateway.version;
 
 fn test_the_name_is_the_repository_name() -> [] int {
     test.assert_eq(len(version.name()), 14);
-    test.assert_eq(int_of(version.name()[0]), 108);
+    test.assert_eq(int_of(version.name()[0]), 99);
     return 0;
 }
 

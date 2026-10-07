@@ -6,7 +6,7 @@ differential and the llhttp/nginx corpora are not done** (section 6). Every numb
 ## 1. Method
 
 `tests/smuggling/corpus.py` holds 60 cases, each with the request bytes, what the gateway must do (`accept`, `refuse` with a
-status, or `more` for an incomplete head) and the source that makes it a case. `src/framing_probe.ls` is a small program
+status, or `more` for an incomplete head) and the source that makes it a case. `src/framing_probe.cho` is a small program
 (authority `args`, `io_write`; gated like the gateway) that takes the request as hex and answers one line, either through
 `std.http.parse` alone (the default) or through `gateway.framing.judge` (`gateway`). The corpus ran against `std.http`
 **first**, before any framing code was written; the gaps below are what it found.
@@ -91,7 +91,7 @@ here; `limit.head` triggers at 16 KiB, well under it.
 - Status for `framing.version` on `HTTP/1.0` with `Transfer-Encoding` (RFC 9112 6.1: a 1.0 request must not carry it) is
   not decided: today it is treated like 1.1.
 
-## 7. Chunked bodies (`src/chunked.ls`)
+## 7. Chunked bodies (`src/chunked.cho`)
 
 Sans-io and incremental: `advance(src, state)` consumes what has arrived and answers the bytes consumed, or a refusal. The
 state is a five-int slice, so a body split at any byte decodes the same. It stops at the end of the message: the bytes after it

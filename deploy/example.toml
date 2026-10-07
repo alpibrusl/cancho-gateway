@@ -19,6 +19,8 @@ name = "api"
 host = "api.example.com"
 path_prefix = "/"
 upstream = "api"
+# A TLS-terminating front (Caddy, nginx) sits before this route and sets the forwarding headers: believe them (docs/headers.md section 2).
+trust_forwarded = true
 
 [[route]]
 name = "web-static"

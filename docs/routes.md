@@ -28,6 +28,7 @@ path_prefix = "/static"    # required
 methods = ["GET", "HEAD"]  # optional: GET HEAD POST PUT DELETE PATCH OPTIONS; omitted = all
 upstream = "web"           # required: a declared upstream
 max_body = 0               # optional: 0..1073741824, default 1048576
+trust_forwarded = false    # optional, default false: believe the forwarding headers of the party in front (docs/headers.md)
 ```
 
 `path_prefix` starts with `/`, has no trailing `/` (except `"/"` alone), no `//`, no `.` or `..` segment, no `%`, no
@@ -69,7 +70,7 @@ key); a misspelt key carries `did you mean 'path_prefix'?`.
 
 - `python3 tests/generate_test.py`: **34 refusal cases**, each checked for its rule **and the line it names**, 3 accepted
   deployments (the legal near-ties above), 7 prefix cases, the hint, and byte-stability.
-- `python3 tests/route_test.py`: a **differential** of `src/route.ls` against `tests/route_ref.py` over 12 seeded random
+- `python3 tests/route_test.py`: a **differential** of `src/route.cho` against `tests/route_ref.py` over 12 seeded random
   deployments and 400 requests each: **4,800 requests (1,279 routed, 3,521 refused), 0 disagreements.**
   `--fixed`: 18 fixed cases against `deploy/example.toml` with literal expectations.
 - **Mutants, each killed by the differential:** shortest prefix wins; no segment boundary; the host never selects a set;
@@ -80,7 +81,7 @@ key); a misspelt key carries `did you mean 'path_prefix'?`.
 
 ## 6. What this does not establish
 
-- **The reference was written by the same author from the same specification** as `src/route.ls`, so a misreading of the
+- **The reference was written by the same author from the same specification** as `src/route.cho`, so a misreading of the
   specification would be in both. The fixed cases and the semantics above are the independent check a reviewer can make.
 - The first draw of requests was 97% refusals and exercised selection little; the generator now draws 60% clean requests
   (27% of the final 4,800 are routed).

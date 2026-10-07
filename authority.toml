@@ -1,7 +1,7 @@
-# The authority ceiling of the gateway (docs/design.md section 3; the model is lexsys-tools' tools.toml).
+# The authority ceiling of the gateway (docs/design.md section 3; the model is cancho-tools' tools.toml).
 #
 # This file is what a person writes and reviews. It is a *ceiling*, never the authority: the authority
-# is whatever `lex-sys authority` derives from the source (manifests/gateway.authority.json), and
+# is whatever `cancho authority` derives from the source (manifests/gateway.authority.json), and
 # scripts/authority.py --check fails when a derived label is not allowed here. Widening the gateway is
 # therefore an edit to this file: a reviewable diff. The derived set may be smaller, never larger.
 #

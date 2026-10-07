@@ -21,7 +21,7 @@ import threading
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-LEX = os.environ.get("LEX_SYS", "lex-sys")
+LEX = os.environ.get("CANCHO", "cancho")
 SOURCES = ["out", "problem", "framing", "chunked", "route", "response", "forward", "egress", "proxy", "version", "gateway"]
 
 
@@ -262,6 +262,12 @@ class KAUpstream:
                     c.sendall(ok)
                     time.sleep(0.05)
                     return
+                elif path.startswith("/ka/dieslow"):
+                    # Like /ka/die, but the dead connection takes its time, so that other requests are routed meanwhile.
+                    if nth > 1:
+                        time.sleep(0.4)
+                        return
+                    c.sendall(ok)
                 elif path.startswith("/ka/die"):
                     if nth > 1:
                         return
@@ -448,12 +454,17 @@ path_prefix = "/flap"
 upstream = "flap"
 
 [[route]]
+path_prefix = "/trusted"
+upstream = "up"
+trust_forwarded = true
+
+[[route]]
 path_prefix = "/"
 upstream = "up"
 max_body = 1048576
 """ % (port, pool, circuit, up_port, dead_port, ka_port, flap_port))
         subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(deploy), "--out", tmp], check=True)
-        files = [os.path.join(tmp, "deploy.ls"), os.path.join(tmp, "routes.ls")] + [str(ROOT / "src" / (n + ".ls")) for n in SOURCES]
+        files = [os.path.join(tmp, "deploy.cho"), os.path.join(tmp, "routes.cho")] + [str(ROOT / "src" / (n + ".cho")) for n in SOURCES]
         built = subprocess.run([LEX, "build", "--std", *files, "-o", os.path.join(tmp, "gateway")], capture_output=True, text=True)
         if built.returncode != 0:
             raise SystemExit("build failed: " + built.stderr[:400])
@@ -509,6 +520,15 @@ def request(gw, raw, read=True, timeout=6, trickle=0.0, pause=0.0):
     return out
 
 
+def heads_of(head):
+    """A recorded request head as {lowercase name: [values]}."""
+    out = {}
+    for line in head.decode("latin-1").split("\r\n")[1:]:
+        name, _, value = line.partition(":")
+        out.setdefault(name.lower(), []).append(value.strip())
+    return out
+
+
 def complete(response):
     """What a real client does: stop at the end of a Content-Length body instead of waiting for the connection to close."""
     head, sep, body = response.partition(b"\r\n\r\n")
@@ -544,7 +564,80 @@ class T:
         n = len(up.heads)
         request(gw, b"GET /x HTTP/1.1\r\nHost: a.example\r\nConnection: keep-alive, X-Drop\r\nX-Drop: 1\r\nKeep-Alive: 5\r\nAccept: */*\r\n\r\n")
         head = up.heads[n].decode()
-        assert head == "GET /x HTTP/1.1\r\nHost: a.example\r\nAccept: */*", head
+        lines = head.split("\r\n")
+        assert lines[:3] == ["GET /x HTTP/1.1", "Host: a.example", "Accept: */*"], head
+        assert lines[3:5] == ["Via: 1.1 cancho-gateway", "X-Forwarded-Host: a.example"] and lines[5] == "X-Forwarded-Proto: http", head
+        assert re.fullmatch(r"X-Request-Id: [0-9a-f]+-[0-9a-f]+-[0-9a-f]{8,}", lines[6]) and len(lines) == 7, head
+
+    def forwarding_claims_are_not_believed_on_a_default_route(gw, up):
+        n = len(up.heads)
+        request(gw, b"GET /x HTTP/1.1\r\nHost: h.example\r\nForwarded: for=6.6.6.6\r\nX-Forwarded-For: 6.6.6.6\r\nx-forwarded-host: evil\r\n"
+                    b"X-Forwarded-Proto: https\r\nX-Forwarded-Port: 443\r\nX-Real-IP: 6.6.6.6\r\nX-Request-Id: client-chosen\r\n\r\n")
+        h = heads_of(up.heads[n])
+        assert h.get("x-forwarded-for") is None and h.get("forwarded") is None and h.get("x-real-ip") is None and h.get("x-forwarded-port") is None, h
+        assert h["x-forwarded-host"] == ["h.example"] and h["x-forwarded-proto"] == ["http"], h
+        assert len(h["x-request-id"]) == 1 and h["x-request-id"][0] != "client-chosen", h
+
+    def forwarding_claims_pass_through_a_trusted_route(gw, up):
+        n = len(up.heads)
+        request(gw, b"GET /trusted/x HTTP/1.1\r\nHost: h.example\r\nForwarded: for=1.2.3.4\r\nX-Forwarded-For: 1.2.3.4\r\nX-Forwarded-Host: front.example\r\n"
+                    b"X-Forwarded-Proto: https\r\nX-Real-IP: 1.2.3.4\r\nX-Request-Id: edge-42\r\n\r\n")
+        h = heads_of(up.heads[n])
+        assert h["forwarded"] == ["for=1.2.3.4"] and h["x-forwarded-for"] == ["1.2.3.4"] and h["x-real-ip"] == ["1.2.3.4"], h
+        assert h["x-forwarded-host"] == ["front.example"] and h["x-forwarded-proto"] == ["https"], h
+        assert h["x-request-id"] == ["edge-42"], h
+        assert h["via"] == ["1.1 cancho-gateway"], h
+
+    def a_trusted_route_replaces_a_bad_request_id(gw, up):
+        for bad in (b"a,b", b"a b", b"x" * 65, b"", b"a/b"):
+            n = len(up.heads)
+            request(gw, b"GET /trusted/x HTTP/1.1\r\nHost: h\r\nX-Request-Id: " + bad + b"\r\n\r\n")
+            ids = heads_of(up.heads[n])["x-request-id"]
+            assert len(ids) == 1 and re.fullmatch(r"[0-9a-f]+-[0-9a-f]+-[0-9a-f]{8,}", ids[0]), (bad, ids)
+        n = len(up.heads)
+        request(gw, b"GET /trusted/x HTTP/1.1\r\nHost: h\r\nX-Request-Id: one\r\nX-Request-Id: two\r\n\r\n")
+        ids = heads_of(up.heads[n])["x-request-id"]
+        assert len(ids) == 1 and ids[0] not in ("one", "two"), ids
+
+    def request_ids_are_unique_and_count_up(gw, up):
+        n = len(up.heads)
+        for _ in range(5):
+            request(gw, GET % b"/x")
+        ids = [heads_of(h)["x-request-id"][0] for h in up.heads[n:]]
+        assert len(set(ids)) == 5, ids
+        stamps = {i.rsplit("-", 1)[0] for i in ids}
+        seqs = [int(i.rsplit("-", 1)[1], 16) for i in ids]
+        assert len(stamps) == 1 and seqs == sorted(seqs) and seqs[-1] - seqs[0] == 4, (stamps, seqs)
+        port = ids[0].split("-")[1]
+        assert int(port, 16) == gw.port, (port, gw.port)
+
+    def the_response_gets_a_via(gw, up):
+        raw = request(gw, GET % b"/x")
+        head = raw.split(b"\r\n\r\n")[0].decode()
+        assert head.count("Via: 1.1 cancho-gateway") == 1, head
+
+    def crafted_header_values_add_no_header_the_gateway_did_not_write(gw, up):
+        # Whatever the client sends, every head the upstream sees has no stray control byte and carries only the client's own header names
+        # plus the four the gateway writes. Refused requests never reach it at all.
+        # (A CRLF inside a value is the client writing another header line, not an injection: the head's own syntax allows it.)
+        crafted = [b"a\nX-Injected: 1", b"a\rX-Injected: 1", b"a\x00b", b"a\x7fb", b"a, b", b"a\"b", b"%0d%0aX-Injected: 1", b"\xc3\xa9"]
+        sent = 0
+        for value in crafted:
+            for name in (b"X-Request-Id", b"X-Forwarded-For", b"Via", b"X-Custom", b"Host"):
+                for path in (b"/x", b"/trusted/x"):
+                    n = len(up.heads)
+                    raw = b"GET " + path + b" HTTP/1.1\r\nHost: a\r\n" + (b"" if name == b"Host" else name + b": " + value + b"\r\n") + b"\r\n"
+                    if name == b"Host":
+                        raw = b"GET " + path + b" HTTP/1.1\r\nHost: " + value + b"\r\n\r\n"
+                    request(gw, raw)
+                    for head in up.heads[n:]:
+                        sent += 1
+                        # Values pass as received, so obs-text (0x80 and up) may appear; no control byte may, and CR and LF only as CRLF.
+                        assert all(c >= 32 and c != 127 or c in (13, 10) for c in head) and b"\r" not in head.replace(b"\r\n", b"") and b"\n" not in head.replace(b"\r\n", b""), head
+                        names = {l.split(b":")[0].lower() for l in head.split(b"\r\n")[1:]}
+                        assert names <= {b"host", b"via", b"x-forwarded-host", b"x-forwarded-proto", b"x-request-id", b"x-forwarded-for", b"x-custom", b"connection"}, (raw, head)
+                        assert b"x-injected" not in head.lower().replace(b"%0d%0ax-injected", b""), (raw, head)
+        assert sent > 0
 
     def one_upstream_connection_per_request(gw, up):
         before = up.connections
@@ -909,6 +1002,30 @@ class T:
         assert (status, body) == (200, b"ok"), (status, body)
         seen = ka.requests_for("/ka/die")[n0:]
         assert [c for c, _ in seen][0] == [c for c, _ in seen][1] and [c for c, _ in seen][2] != [c for c, _ in seen][0], ("connections", [c for c, _ in seen])
+        ids = [heads_of(h)["x-request-id"][0] for _, h in seen]
+        assert ids[1] == ids[2] and ids[0] != ids[1], ("the request sent again keeps its id, a new request has a new one", ids)
+
+    def a_retried_request_keeps_its_id_while_others_are_routed(gw, up):
+        # The id is fixed when the request is routed: a request that is sent again 0.4 s later, after two others were given ids, still
+        # carries its own (a counter read at the retry would give it a later one).
+        quiesce(gw)
+        ka = gw.ka
+        n0 = len(ka.requests_for("/ka/dieslow"))
+        assert split(request(gw, GET % b"/ka/dieslow"))[0] == 200
+        result = {}
+        t = threading.Thread(target=lambda: result.update(r=split(request(gw, GET % b"/ka/dieslow", timeout=10))))
+        t.start()
+        time.sleep(0.15)
+        n1 = len(up.heads)
+        request(gw, GET % b"/x")
+        request(gw, GET % b"/x")
+        t.join()
+        assert result["r"][0] == 200, result
+        seen = ka.requests_for("/ka/dieslow")[n0:]
+        ids = [heads_of(h)["x-request-id"][0] for _, h in seen]
+        assert len(ids) == 3 and ids[1] == ids[2] and ids[0] != ids[1], ids
+        others = [heads_of(h)["x-request-id"][0] for h in up.heads[n1:]]
+        assert len(others) == 2 and ids[1] not in others, (ids, others)
 
     def a_dead_pooled_connection_is_not_retried_for_a_post(gw, up):
         quiesce(gw)

@@ -1,0 +1,50 @@
+[package]
+name = "cancho-gateway"
+cancho = "a4572ea3b506e4bcec1c4be43deda1043c11ba9f"   # the compiler these sources were written for; CI builds this commit
+
+# One program, one authority row (docs/design.md section 3). The deployment
+# generator (task #11) will add a generated module here per deployment.
+
+[[bin]]
+name = "gateway"
+sources = ["generated/deploy.cho", "generated/routes.cho", "src/out.cho", "src/problem.cho", "src/framing.cho", "src/chunked.cho", "src/route.cho", "src/response.cho", "src/forward.cho", "src/egress.cho", "src/proxy.cho", "src/version.cho", "src/gateway.cho"]
+std = true
+out = "build/gateway"
+
+[[bin]]
+name = "framing_probe"
+sources = ["src/framing.cho", "src/chunked.cho", "src/framing_probe.cho"]
+std = true
+out = "build/framing_probe"
+
+[[bin]]
+name = "route_probe"
+sources = ["generated/routes.cho", "src/route.cho", "src/route_probe.cho"]
+std = true
+out = "build/route_probe"
+
+[[bin]]
+name = "response_probe"
+sources = ["src/response.cho", "src/response_probe.cho"]
+std = true
+out = "build/response_probe"
+
+[[test]]
+name = "version"
+sources = ["src/version.cho", "tests/version_test.cho"]
+std = true
+
+[[test]]
+name = "egress"
+sources = ["generated/deploy.cho", "src/egress.cho", "tests/egress_test.cho"]
+std = true
+
+[[test]]
+name = "problem"
+sources = ["src/out.cho", "src/problem.cho", "tests/problem_test.cho"]
+std = true
+
+[[test]]
+name = "forward"
+sources = ["src/out.cho", "src/response.cho", "src/forward.cho", "tests/forward_test.cho"]
+std = true

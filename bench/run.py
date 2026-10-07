@@ -2,10 +2,10 @@
 """The benchmark harness (task #14, docs/bench.md). The protocol there is fixed; this file only carries it out.
 
     python3 bench/run.py --work /tmp/bench --runs 5            # every proxy, every cell
-    python3 bench/run.py --proxies nginx,lexsys --cells C1 --runs 1 --duration 3 --warmup 1   # a quick check
+    python3 bench/run.py --proxies nginx,cancho --cells C1 --runs 1 --duration 3 --warmup 1   # a quick check
     python3 bench/run.py --oha-rate 3000 ...                   # also the open-loop oha cross-check on C1, at 3000 requests/s
 
-Needs on PATH (or --bin NAME=PATH): nginx haproxy envoy caddy traefik wrk oha slow_upstream lex-sys taskset.
+Needs on PATH (or --bin NAME=PATH): nginx haproxy envoy caddy traefik wrk oha slow_upstream cancho taskset.
 Writes RESULTS.json and RESULTS.md into --work. One proxy at a time is started afresh for each run and stopped after it.
 """
 
@@ -28,7 +28,7 @@ CONF = ROOT / "bench" / "conf"
 PORT, UP = 18080, 19090
 PROXY_CORE, UP_CORE, LOAD_CORES = "0", "1", "2,3"
 TICKS = os.sysconf("SC_CLK_TCK")
-ALL_PROXIES = ["lexsys", "nginx", "haproxy", "envoy", "caddy", "traefik", "kong"]
+ALL_PROXIES = ["cancho", "nginx", "haproxy", "envoy", "caddy", "traefik", "kong"]
 CELLS = {
     "C1": dict(path="/", conns=64, extra=[], want=2),
     "C1b": dict(path="/", conns=8, extra=[], want=2),
@@ -163,7 +163,7 @@ def prepare(args):
             text = text.replace(k, v)
         (work / src.name).write_text(text)
     # The gateway: this repository, copied, with a deployment of one route to the one upstream. With --baseline-rev, the same
-    # from that revision as well (proxy "lexsys-base"), so that a change to the gateway is measured against its own earlier build
+    # from that revision as well (proxy "cancho-base"), so that a change to the gateway is measured against its own earlier build
     # in the same interleaved rounds, not against numbers from another time of day.
     build_gateway(args, ROOT, work / "gw", from_rev=None)
     if args.baseline_rev:
@@ -182,26 +182,26 @@ def build_gateway(args, root, dest, from_rev):
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
     if from_rev:
-        tar = subprocess.run(["git", "archive", from_rev, "src", "scripts", "generated", "lex-sys.toml", "authority.toml"], cwd=root,
+        tar = subprocess.run(["git", "archive", from_rev, "src", "scripts", "generated", "cancho.toml", "authority.toml"], cwd=root,
                              check=True, capture_output=True).stdout
         subprocess.run(["tar", "-x", "-C", str(dest)], input=tar, check=True)
     else:
         for d in ["src", "scripts", "generated"]:
             shutil.copytree(root / d, dest / d)
-        for f in ["lex-sys.toml", "authority.toml"]:
+        for f in ["cancho.toml", "authority.toml"]:
             shutil.copy(root / f, dest / f)
     (dest / "deploy.toml").write_text(
         f'listen = {PORT}\npool_idle_max = 64\n\n[[upstream]]\nname = "u"\naddr = "127.0.0.1:{UP}"\n\n'
         '[[route]]\nname = "all"\npath_prefix = "/"\nupstream = "u"\n')
     subprocess.run([sys.executable, str(dest / "scripts" / "generate.py"), str(dest / "deploy.toml")], check=True, cwd=dest)
-    subprocess.run([which(args, "lex-sys"), "build"], check=True, cwd=dest)
+    subprocess.run([which(args, "cancho"), "build"], check=True, cwd=dest)
 
 
 def proxy_cmd(args, name):
     w = args.work
-    if name == "lexsys":
+    if name == "cancho":
         return [str(w / "gw" / "build" / "gateway")], {}
-    if name == "lexsys-base":
+    if name == "cancho-base":
         return [str(w / "gw-base" / "build" / "gateway")], {}
     if name == "kong":
         shutil.rmtree(args.kong_root / "tmp" / "kong-prefix", ignore_errors=True)
@@ -345,7 +345,7 @@ def flags(cell, wrk, load):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--work", type=pathlib.Path, default=pathlib.Path("/tmp/lexsys-bench"))
+    ap.add_argument("--work", type=pathlib.Path, default=pathlib.Path("/tmp/cancho-bench"))
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--duration", type=int, default=10)
     ap.add_argument("--warmup", type=int, default=3)
@@ -353,14 +353,14 @@ def main():
     ap.add_argument("--cells", default="C1,C1b,C2,C3,C4,C5,C6")
     ap.add_argument("--oha-rate", type=int, default=0, help="also run oha at this open-loop rate on C1 (requests/s)")
     ap.add_argument("--resume", action="store_true", help="continue from RESULTS.json in --work: runs already recorded are not repeated")
-    ap.add_argument("--baseline-rev", help="also build and measure this git revision of the gateway, as the proxy lexsys-base")
+    ap.add_argument("--baseline-rev", help="also build and measure this git revision of the gateway, as the proxy cancho-base")
     ap.add_argument("--kong-root", type=pathlib.Path, help="an extracted Kong image (chroot), with /dev and /proc bind-mounted into it")
     ap.add_argument("--bin", action="append", default=[], metavar="NAME=PATH")
     args = ap.parse_args()
     args.bins = dict(b.split("=", 1) for b in args.bin)
     args.work = args.work.resolve()
-    if args.baseline_rev and "lexsys-base" not in args.proxies:
-        args.proxies += ",lexsys-base"
+    if args.baseline_rev and "cancho-base" not in args.proxies:
+        args.proxies += ",cancho-base"
     proxies = args.proxies.split(",")
     cells = args.cells.split(",")
     prepare(args)

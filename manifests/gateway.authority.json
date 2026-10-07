@@ -82,6 +82,7 @@
     "content_length",
     "content_length",
     "count_named",
+    "count_named",
     "digits",
     "digits_value",
     "eq_lower",
@@ -106,6 +107,7 @@
     "find_header",
     "first_line_end",
     "flush_ms",
+    "forwarding",
     "get$int",
     "head_end",
     "head_end",
@@ -120,6 +122,7 @@
     "hexval",
     "hop_by_hop",
     "host_name",
+    "id_valid",
     "idle_count",
     "idle_ms",
     "idle_ms",
@@ -203,6 +206,7 @@
     "total_ms",
     "total_ms",
     "trim",
+    "trust_forwarded",
     "upstream",
     "upstream_addr",
     "upstream_count",
@@ -211,7 +215,7 @@
     "value_of",
     "well_formed_version"
   ],
-  "folded_operators": 70,
+  "folded_operators": 71,
   "folded_calls": 0,
-  "functions": 200
+  "functions": 205
 }

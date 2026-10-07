@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test of route selection: src/route.ls against tests/route_ref.py over generated tables and requests.
+"""Differential test of route selection: src/route.cho against tests/route_ref.py over generated tables and requests.
 
     python3 tests/route_test.py [TABLES] [REQUESTS]    # defaults: 12 tables, 400 requests each
 
@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 import generate  # noqa: E402
 import route_ref  # noqa: E402
 
-LEX = os.environ.get("LEX_SYS", "lex-sys")
+LEX = os.environ.get("CANCHO", "cancho")
 METHODS = generate.METHODS
 SEGMENTS = ["a", "api", "static", "v1", "x", "a.b", "..", ".", "api2"]
 
@@ -40,7 +40,8 @@ def random_deployment(rng):
             lines += ['host = "%s"' % host]
         if rng.random() < 0.5:
             lines += ["methods = [%s]" % ", ".join('"%s"' % m for m in rng.sample(METHODS, rng.randint(1, 4)))]
-        lines += ["max_body = %d" % rng.choice([0, 10, 1000, 1 << 20, 1 << 30]), ""]
+        lines += ["max_body = %d" % rng.choice([0, 10, 1000, 1 << 20, 1 << 30])]
+        lines += ["trust_forwarded = %s" % rng.choice(["true", "false"]), ""]
     return "\n".join(lines)
 
 
@@ -91,20 +92,20 @@ def probe(binary, batch):
 
 def expected(routes, h, m, p):
     ans = route_ref.select(routes, h, m, p)
-    return "route %d %d %d" % (ans[1], ans[2], ans[3]) if ans[0] == "route" else "refuse %s %d" % (ans[1], ans[2])
+    return "route %d %d %d %d" % (ans[1], ans[2], ans[3], ans[4]) if ans[0] == "route" else "refuse %s %d" % (ans[1], ans[2])
 
 
 # Fixed cases against deploy/example.toml, with literal expectations (not derived from the reference): the host picks the
 # route set, the longest prefix wins on a segment boundary, a method the best prefix does not allow falls to a shorter one.
 FIXED = [
-    ("api.example.com", "GET", "/x", "route 0 0 1048576"),
-    ("API.Example.COM:8443", "DELETE", "/anything", "route 0 0 1048576"),
-    ("api.example.com", "GET", "/static/a", "route 0 0 1048576"),
-    ("other.example", "GET", "/static/a", "route 1 1 0"),
-    ("other.example", "HEAD", "/static", "route 1 1 0"),
-    ("other.example", "POST", "/static/a", "route 2 1 1048576"),
-    ("other.example", "GET", "/staticx", "route 2 1 1048576"),
-    ("other.example", "GET", "/", "route 2 1 1048576"),
+    ("api.example.com", "GET", "/x", "route 0 0 1048576 1"),
+    ("API.Example.COM:8443", "DELETE", "/anything", "route 0 0 1048576 1"),
+    ("api.example.com", "GET", "/static/a", "route 0 0 1048576 1"),
+    ("other.example", "GET", "/static/a", "route 1 1 0 0"),
+    ("other.example", "HEAD", "/static", "route 1 1 0 0"),
+    ("other.example", "POST", "/static/a", "route 2 1 1048576 0"),
+    ("other.example", "GET", "/staticx", "route 2 1 1048576 0"),
+    ("other.example", "GET", "/", "route 2 1 1048576 0"),
     ("other.example", "FETCH", "/", "refuse route.method 405"),
     ("other.example", "GET", "/a/../b", "refuse route.path 400"),
     ("other.example", "GET", "/a/%2e%2E/b", "refuse route.path 400"),
@@ -143,8 +144,8 @@ def main():
         with tempfile.TemporaryDirectory() as tmp:
             subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), deploy, "--out", tmp], check=True)
             binary = os.path.join(tmp, "probe")
-            built = subprocess.run([LEX, "build", "--std", os.path.join(tmp, "routes.ls"), str(ROOT / "src" / "route.ls"),
-                                    str(ROOT / "src" / "route_probe.ls"), "-o", binary], capture_output=True, text=True)
+            built = subprocess.run([LEX, "build", "--std", os.path.join(tmp, "routes.cho"), str(ROOT / "src" / "route.cho"),
+                                    str(ROOT / "src" / "route_probe.cho"), "-o", binary], capture_output=True, text=True)
             if built.returncode != 0:
                 raise SystemExit("build failed: " + built.stderr[:300])
             batch = requests(rng, routes, per)
