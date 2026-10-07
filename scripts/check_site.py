@@ -13,6 +13,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
+RELEASE = "https://github.com/alpibrusl/cancho-gateway/releases/latest/download/"
 REPO = re.compile(r"^https://github\.com/alpibrusl/cancho-gateway/(?:blob|tree)/main/?(.*)$")
 
 
@@ -41,6 +42,8 @@ def main():
     bad = []
     for name, page in pages.items():
         for link in page.links:
+            if link.startswith(RELEASE) and link[len(RELEASE):] not in (ROOT / "scripts" / "release.sh").read_text():
+                bad.append("%s: %s (release.sh builds no asset of that name)" % (name, link))
             if link.startswith(("http://", "https://", "mailto:")):
                 m = REPO.match(link.split("#")[0])
                 if m and not (ROOT / m.group(1)).exists():
