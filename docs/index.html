@@ -341,7 +341,7 @@ build/gateway</code></pre>
   <h2>Alpha: we are trying to break it before you deploy it</h2>
   <p class="note" style="margin:.2rem 0 .6rem">Alpha means the interfaces may change and nothing here is certified for production.</p>
   <ul>
-    <li><strong>Not built yet:</strong> authentication, rate limiting, a metrics and health endpoint, WebSocket (the OCPP case), and <strong>TLS in the gateway</strong>. cancho now has a TLS 1.3 server, so the old reason (it needed foreign code) is gone; using it here is planned, and it would add file reads to the report below.</li>
+    <li><strong>Not built yet:</strong> authentication, rate limiting, WebSocket (the OCPP case), and <strong>TLS in the gateway</strong>. cancho now has a TLS 1.3 server, so the old reason (it needed foreign code) is gone; using it here is planned, and it would add file reads to the report below.</li>
     <li><strong>Slower than HAProxy</strong> on most cells, and than nginx on a POST body; no client-side keep-alive, which is most of the gap.</li>
     <li>About 127 concurrent sessions, one core, no hot reload; a changed route is a new binary.</li>
     <li>No client address: the compiler gives none, so there is no <code>X-Forwarded-For</code> of the gateway&rsquo;s own and no client in the log.</li>

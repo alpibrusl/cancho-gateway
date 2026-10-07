@@ -384,19 +384,43 @@ upstream = "orders"</code></pre>
 </section>
 
 <section id="audit">
-  <h2>6. An audit trail and a capability report</h2>
-  <p class="sub">When someone asks &ldquo;what happened to request X&rdquo; or &ldquo;what can this process touch&rdquo;, there is an answer for each.</p>
-<p class="step"><span>1</span>Every example above printed one JSON line per request in terminal 2. Keep them: redirect the gateway&rsquo;s output to a file, or to journald, and ask it a question later:</p>
-  <pre class="code" tabindex="0"><code>scripts/try.sh deploy/examples/door.toml &gt; access.log
-# ... send some requests, then:
-grep '"status":4' access.log | head -3                       # what was refused
-grep '&lt;an id from a response&gt;' access.log                    # one request, by the id the client was given</code></pre>
-<p class="step"><span>2</span>Ask the compiler what the program may do (the gateway&rsquo;s report is committed and CI checks it):</p>
+  <h2>6. An audit trail, health and metrics</h2>
+  <p class="sub">When someone asks &ldquo;what happened to request X&rdquo;, &ldquo;is it healthy&rdquo; or &ldquo;what can this process touch&rdquo;, there is an answer for each. Health and metrics are on a second port, <code>admin_listen</code> in the deployment (example 2&rsquo;s file has it, on 9090).</p>
+<p class="step"><span>1</span>Keep the access log: redirect the gateway&rsquo;s output to a file (or to journald), send some requests, then ask it questions:</p>
+  <pre class="code" tabindex="0"><code>scripts/try.sh deploy/examples/door.toml &gt; access.log     # terminal 2; terminal 1 runs the upstream, as in example 2
+
+# terminal 3
+curl -s localhost:8080/index.html &gt;/dev/null; curl -s -X POST localhost:8080/static/a &gt;/dev/null
+grep '"status":4' access.log                        # what was refused
+grep '&lt;an id from a response&gt;' access.log           # one request, by the id the client was given</code></pre>
+  <pre class="out" tabindex="0"><code>{"t":1791402183873,"id":"848cc-1f90-00000002","method":"POST","path":"/static/a","route":"","upstream":"","status":405,"rule":"route.method","outcome":"refused","ms":0,...}</code></pre>
+<p class="step"><span>2</span>Is it alive, and is it ready to take traffic? <code>/readyz</code> says why not, as data:</p>
+  <pre class="code" tabindex="0"><code>curl -si localhost:9090/healthz
+curl -si localhost:9090/readyz</code></pre>
+  <pre class="out" tabindex="0"><code>HTTP/1.1 200 OK
+Content-Type: application/json
+...
+{"alive":true}
+
+HTTP/1.1 200 OK
+...
+{"ready":true}
+
+# with an upstream's circuit open (example 5):
+HTTP/1.1 503 Service Unavailable
+{"ready":false,"why":["upstream orders: circuit open"]}</code></pre>
+<p class="step"><span>3</span>Counters by route, status class and rule, and latency histograms, as JSON or as Prometheus text:</p>
+  <pre class="code" tabindex="0"><code>curl -s localhost:9090/metrics | python3 -m json.tool | head -30
+curl -s 'localhost:9090/metrics?format=prometheus' | grep -E 'requests_total|refusals_total'</code></pre>
+  <pre class="out" tabindex="0"><code>cancho_gateway_requests_total{route="web",class="2xx"} 1
+cancho_gateway_requests_total{route="web",class="4xx"} 0
+cancho_gateway_refusals_total{rule="route.method"} 1</code></pre>
+<p class="step"><span>4</span>Ask the compiler what the program may do (the gateway&rsquo;s report is committed and CI checks it):</p>
   <pre class="code" tabindex="0"><code>python3 scripts/authority.py --check        # derives it with the compiler, fails if it differs from the recorded one
 cat manifests/gateway.authority.json              # the recorded report</code></pre>
   <pre class="out" tabindex="0"><code>gateway  args, clock, conn_accept, conn_read, conn_write, heap,
          io_write, net_in(""), net_out(""), poll        # no files, no foreign calls</code></pre>
-  <p class="note">The id is also in the response header and in a refusal&rsquo;s body. The log goes to stdout, so journald, a file or a collector can take it; if that reader stops, so does the gateway (see the alpha notes). The network bound is not narrowed (one bound covers listening and connecting), so the upstream set is enforced in code and tested.</p>
+  <p class="note">The id is also in the response header and in a refusal&rsquo;s body. The log goes to stdout, so journald, a file or a collector can take it; if that reader stops, so does the gateway (see the alpha notes). <strong>The admin port listens on every interface</strong> (the compiler offers no loopback-only bind): it shows route and upstream names and counters, no request data, but firewall it. The network bound is not narrowed (one bound covers listening and connecting), so the upstream set is enforced in code and tested.</p>
 </section>
 
 <aside class="status" id="not-yet">
@@ -404,7 +428,7 @@ cat manifests/gateway.authority.json              # the recorded report</code></
   <ul>
     <li><strong>Authentication</strong> and <strong>rate limiting</strong>: planned, not built. Do the check at the TLS front for now.</li>
     <li><strong>TLS</strong> in the gateway itself: not built. cancho has a TLS 1.3 server now (<code>packages/tls</code>), so nothing in the language blocks it; wiring it in is planned and would let the gateway read one certificate directory, which its report does not allow today. <strong>WebSocket</strong> (for example OCPP between chargers and a back office): planned, not built.</li>
-    <li><strong>Metrics and health endpoints</strong>: the access log exists; counters and an admin listener do not.</li>
+    <li><strong>The admin port</strong> (metrics, health) binds every interface and has no authentication: firewall it. No alerting, no tracing.</li>
     <li><strong>Client addresses</strong> in logs and headers: the compiler does not provide one yet.</li>
     <li><strong>Changing a route</strong> means a new binary; there is no hot reload.</li>
   </ul>
