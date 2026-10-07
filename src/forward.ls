@@ -125,10 +125,51 @@ fn copy_headers[&s, &t, &o](src: &s [byte], table: &t [int], count: int, out: &!
     return k;
 }
 
+// The headers a client could use to tell the upstream who it is, where it came from, or what scheme it spoke: not believed unless
+// the route trusts the party in front of the gateway (docs/headers.md section 2).
+fn forwarding[&n](name: &n [byte]) -> [] bool {
+    return is(name, "forwarded") || is(name, "x-forwarded-for") || is(name, "x-forwarded-host") || is(name, "x-forwarded-proto") || is(name, "x-forwarded-port") || is(name, "x-real-ip");
+}
+
+// A request id the gateway will pass on: 1 to 64 bytes of [A-Za-z0-9._-]. The restriction is what keeps a delimiter, a quote or a
+// comma out of the logs the id will be written to (#10) even when the party that sent it is trusted and wrong.
+fn id_valid[&v](value: &v [byte]) -> [] bool {
+    if len(value) < 1 || len(value) > 64 {
+        return false;
+    }
+    var i = 0;
+    while i < len(value) {
+        let c = int_of(value[i]);
+        if !(bytes.is_alpha(c) || bytes.is_digit(c) || c == '.' || c == '_' || c == '-') {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// How many of the first `count` headers have the lowercase name `lower`.
+fn count_named[&s, &t, &l](src: &s [byte], table: &t [int], count: int, lower: &l [byte]) -> [] int {
+    var n = 0;
+    var i = 0;
+    while i < count {
+        if is(name_of(src, table, i), lower) {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
 // Write the request head into `out` from offset 0; answers its length, or `0 - rule`. `src` and `table` are a request
 // `std.http.parse` accepted. The request line is rebuilt as HTTP/1.1 whatever the client spoke, so the upstream may keep the
 // connection open; `keep_alive` false adds `Connection: close` for an upstream that must not.
-pub fn rewrite[&s, &t, &o](src: &s [byte], table: &t [int], out: &!o [byte], keep_alive: bool) -> [] int {
+//
+// The header policy (docs/headers.md section 2): hop-by-hop headers and those a `Connection` header names are removed; unless
+// `trust` (the route trusts the party in front) the client's `Forwarded`, `X-Forwarded-*` and `X-Real-IP` are removed and
+// `X-Forwarded-Host` (the Host as received) and `X-Forwarded-Proto: http` are added; `Via` is appended; `X-Request-Id` is kept
+// only if `trust` and the client sent exactly one with a valid value, else a generated one, `<stamp>-<port>-<seq>` in hex, is added.
+pub fn rewrite[&s, &t, &o](src: &s [byte], table: &t [int], out: &!o [byte], keep_alive: bool, trust: bool, id_stamp: int, id_port: int, id_seq: int) -> [] int {
     let count = http.header_count(table);
     if connection_lists(src, table, count, "content-length") || connection_lists(src, table, count, "transfer-encoding") || connection_lists(src, table, count, "host") {
         return 0 - 1;
@@ -137,7 +178,44 @@ pub fn rewrite[&s, &t, &o](src: &s [byte], table: &t [int], out: &!o [byte], kee
     k = out.put(out, k, " ");
     k = out.put(out, k, http.target(src, table));
     k = out.put(out, k, " HTTP/1.1\r\n");
-    k = copy_headers(src, table, count, out, k);
+    let ids = count_named(src, table, count, "x-request-id");
+    var kept_id = false;
+    var i = 0;
+    while i < count {
+        let name = name_of(src, table, i);
+        var copy = !hop_by_hop(name) && !named_by_connection(src, table, count, i);
+        if copy && !trust && forwarding(name) {
+            copy = false;
+        }
+        if copy && is(name, "x-request-id") {
+            copy = trust && ids == 1 && id_valid(value_of(src, table, i));
+            if copy {
+                kept_id = true;
+            }
+        }
+        if copy {
+            k = out.put(out, k, name);
+            k = out.put(out, k, ": ");
+            k = out.put(out, k, value_of(src, table, i));
+            k = out.put(out, k, "\r\n");
+        }
+        i = i + 1;
+    }
+    k = out.put(out, k, "Via: 1.1 lexsys-gateway\r\n");
+    if !trust {
+        k = out.put(out, k, "X-Forwarded-Host: ");
+        k = out.put(out, k, http.header(src, table, "host"));
+        k = out.put(out, k, "\r\nX-Forwarded-Proto: http\r\n");
+    }
+    if !kept_id {
+        k = out.put(out, k, "X-Request-Id: ");
+        k = out.put_hex(out, k, id_stamp, 1);
+        k = out.put(out, k, "-");
+        k = out.put_hex(out, k, id_port, 1);
+        k = out.put(out, k, "-");
+        k = out.put_hex(out, k, id_seq, 8);
+        k = out.put(out, k, "\r\n");
+    }
     if !keep_alive {
         k = out.put(out, k, "Connection: close\r\n");
     }
@@ -154,7 +232,7 @@ pub fn rewrite[&s, &t, &o](src: &s [byte], table: &t [int], out: &!o [byte], kee
 pub fn rewrite_response[&s, &t, &o](src: &s [byte], table: &t [int], out: &!o [byte]) -> [] int {
     var k = out.put(out, 0, src[0..first_line_end(src)]);
     k = copy_headers(src, table, table[2], out, k);
-    k = out.put(out, k, "Connection: close\r\n\r\n");
+    k = out.put(out, k, "Via: 1.1 lexsys-gateway\r\nConnection: close\r\n\r\n");
     if k < 0 {
         return 0 - 1;
     }

@@ -75,6 +75,13 @@ jobs:
         working-directory: gateway
         run: python3 tests/proxy_test.py
 
+      - name: The header policy against nginx (the table in the test says where they differ on purpose, and why)
+        working-directory: gateway
+        run: |
+          sudo apt-get install -y nginx
+          sudo systemctl stop nginx || true
+          NGINX=/usr/sbin/nginx python3 tests/headers/differential.py
+
       - name: Tests
         working-directory: gateway
         run: lex-sys test

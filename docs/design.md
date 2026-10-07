@@ -80,8 +80,10 @@ file (task #11) and if `fs`/`ffi` ever appear.
 - **Secrets without files:** keys arrive in `argv`/environment at start. `args` is the effect; the open question is whether
   the environment is reachable without a new effect. **To settle in #8's first commit** by probe; if not, keys come in
   `argv` only (visible in `ps`, a documented limitation) or on a stdin read at start (`io_read`, a new row to ceiling).
-- **Randomness for request ids:** to settle by probe in #7 (std facility vs. a clock-seeded generator, which would be
-  predictable and must be called that).
+- **Randomness for request ids:** settled by probe in #7 (`docs/headers.md` section 1): the pinned compiler has no random-bytes
+  facility (entropy is read from `/dev/urandom` through a file capability, which the gateway deliberately lacks), so ids are a start
+  stamp, the listen port and a counter: unique, **predictable**, correlation ids and not secrets. The same probe found no peer
+  address on an accepted connection (`conn_peer` is not built), so the gateway cannot write `X-Forwarded-For` or `Forwarded: for=`.
 
 ## 4. Memory model: every bound has a rule
 

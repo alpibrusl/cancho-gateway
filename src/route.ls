@@ -234,6 +234,13 @@ pub fn max_body(index: int) -> [] int {
     return number(bytes.field(blob[at..line_end(blob, at)], 9, 5));
 }
 
+// 1 if route `index` trusts the forwarding headers of the party in front of the gateway (docs/headers.md section 2), else 0.
+pub fn trust_forwarded(index: int) -> [] int {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return number(bytes.field(blob[at..line_end(blob, at)], 9, 6));
+}
+
 pub fn select[&h, &m, &p](host: &h [byte], method: &m [byte], path: &p [byte]) -> [] int {
     let name = host_name(host);
     if len(name) == 0 {

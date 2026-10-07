@@ -41,9 +41,10 @@
     "status",
     "tag",
     "to_lower",
+    "trust_forwarded",
     "upstream"
   ],
   "folded_operators": 9,
   "folded_calls": 0,
-  "functions": 27
+  "functions": 28
 }

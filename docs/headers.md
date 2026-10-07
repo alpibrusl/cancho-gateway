@@ -80,25 +80,54 @@ quote or a comma into a log line later (#10).
 ## 5. What it costs
 
 Four headers add about 130 bytes to a head, plus the Host header's length again for `X-Forwarded-Host`. The head limit (16 KiB) and the
-upstream queue (32 KiB) leave room; a head that still does not fit is refused as before (`forward.head-room`, 431). Measured with the benchmark
-harness, not assumed: the second run's C1 is the baseline.
+upstream queue (32 KiB) leave room; a head that still does not fit is refused as before (`forward.head-room`, 431). **Measured** with the benchmark
+harness against the build just before this change (5 interleaved rounds, one core): C1 `lexsys` ÷ before 1.05 (0.89 to 1.07 over the rounds), C4 1.03
+(0.95 to 1.09): **no cost that the noise does not hide**, and no gain either; a ratio above 1 here is the machine, not the headers.
 
 ## 6. Gates, fixed before the code
 
 1. **Table-driven unit tests** (`tests/forward_test.ls`): every row of the table in section 2, for both settings of the flag, byte for byte.
 2. **End-to-end** (`tests/proxy_test.py`), through a real gateway to a recording upstream: a client that claims `X-Forwarded-For`,
    `Forwarded`, `X-Real-IP`, `X-Forwarded-Host/Proto/Port` and `X-Request-Id` is not believed on a default route, and is passed on a trusted one; the same
-   request sent again on a fresh connection carries the same id; two requests carry different ids; the id matches the format of section 3; every
-   byte of every header the upstream saw is printable ASCII and no header the client did not send appears except the four.
+   request sent again on a fresh connection carries the same id; two requests carry different ids; the id matches the format of section 3; no header the client did
+   not send appears except the four, and no control byte reaches the upstream other than CRLF as the delimiter. (First written as "every byte printable ASCII"; corrected
+   in the test's first run: a value may carry obs-text, 0x80 and up, which RFC 9110 allows and the gateway passes as received, as nginx does.)
 3. **Injection corpus**: crafted values (CR/LF and NUL in every header position and in the target, `%0d%0a` in the path and query, a
    `Host` with commas, quotes and spaces, an `X-Request-Id` of 65 bytes, with a comma, a space, a quote, a NUL, empty, duplicated) against both settings: none
    adds a header line the upstream did not get from the gateway's own code (counted by parsing the upstream's recording).
-4. **Differential against nginx** (`tests/headers/differential.py`): a table of cases sent to nginx and to the gateway in front of the same recording
-   upstream, the two views compared header by header after removing what each is *supposed* to add. Where they must agree, they must (order, case,
-   duplicates, values, a header with an empty value). Where they differ, the case is in an `EXPECTED` table with the reason (the RFC clause), and a
-   difference not in the table fails. The cases nginx handles differently on purpose (it does not remove `Keep-Alive`, `TE`, `Upgrade`, `Trailer` or
-   a header named by `Connection`; the gateway does, RFC 9110 7.6.1) are the table's content, not its failures.
+4. **Differential against nginx** (`tests/headers/differential.py`): a table of cases sent to nginx 1.24 and to the gateway in front of the same recording
+   upstream, on a default route and on a trusted one, the two views compared header by header after removing what the gateway is *supposed* to add
+   (unless the case sent a header of that name). Where they must agree, they must (order, case, duplicates, values, an empty value, a long value, obs-text, the
+   request line with a query and escapes). Where they differ, the case is in an `EXPECTED` table with the reason, and a difference not in the table fails, and so
+   does a listed one that has stopped differing (the table cannot go stale). **Corrected in place after the first run:** the design assumed nginx forwards
+   `Keep-Alive`, `TE` and `Upgrade` and drops an empty-valued header. Measured: nginx 1.24 removes the first three and forwards an empty value, exactly as the
+   gateway does; the real differences are `Proxy-Authorization`, `Trailer`, `Proxy-Connection` and a header named by `Connection` (nginx forwards them, the
+   gateway removes them), the gateway's own `Via`, and the untrusted-route policy.
 5. **Mutants** of the new code, all killed or explained: the trust flag ignored (each direction), an inbound forwarding header not removed,
    `Via` not added or added twice, the id not stable across a retry, the id validity check loosened (65 bytes, a delimiter, an empty value, a
    duplicate accepted), `X-Forwarded-Host` taken from the request target instead of `Host`.
 6. The authority report must not change (no new effect); the 2,000-line gate; `route_ref.py`'s differential over generated tables now includes the new column.
+
+## 7. What was built and what checked it
+
+- **The deployment key** `trust_forwarded` (per route, default `false`): the generator refuses a non-boolean (`config.route`), the table has a sixth
+  column, `route.trust_forwarded(index)` reads it, and the reference differential (`tests/route_ref.py`) compares it over 4,800 generated requests
+  and the 18 fixed cases (`deploy/example.toml` trusts the `api` route, as a deployment behind a TLS-terminating front would).
+- **`forward.rewrite`** applies the table of section 2; `forward.rewrite_response` appends `Via`. The request id is numbered when the request is routed
+  (state slot 23 holds `2 * sequence + trust`), so a retry carries the same id; `out.put_hex` formats it.
+- **Unit tests** (`tests/forward_test.ls`, 16): every row of the table for both settings, the id's format at its extremes, the nine invalid-id cases, the
+  64-byte boundary, an id named by `Connection`, `Via` after the client's.
+- **End to end** (`tests/proxy_test.py`, 61 tests with the 7 new): claims not believed on a default route and passed on a trusted one, bad ids replaced, ids
+  unique and counting up, the port in the id, `Via` in the response, a crafted-values corpus (nine values in five header positions on both routes), and the
+  retry keeping its id while other requests are routed (a 0.4 s dead pooled connection).
+- **Differential against nginx 1.24** (`tests/headers/differential.py`, in CI): 114 comparisons, 36 differences, every one listed with its reason. Its first run
+  found four of the design's assumptions about nginx false (section 6, gate 4); the table was corrected to the measurement.
+- **Mutants:** 29 of the new code (the trust flag ignored each way, each forwarding header left in, `Via` missing or doubled, `X-Forwarded-Host` from the target,
+  each id-validity rule loosened, the id not stable across a retry, the flag lost or always set, the sequence not advancing, the port left out, the route
+  table's column ignored, a wrong hex digit, the response's `Via` missing): **all killed**; one (the retry reading the counter instead of the session's number) survived the
+  first end-to-end tests, because with one request at a time the two are equal, and is killed by the 0.4 s test above.
+- The authority report did not change except for the pure-function list and counts (no new effect); the 2,000-line gate holds.
+
+**Not done, and why:** no `X-Forwarded-For` or `Forwarded: for=` of the gateway's own (no peer address: section 1); no request id in the response or in
+`problem+json` (needs a per-session id string; done with the access log, #10, and #18); the credential rule for #8 is recorded, and tested when #8 has a
+credential to strip.

@@ -45,6 +45,44 @@ pub fn put_int[&o](out: &!o [byte], at: int, v: int) -> [] int {
     return k;
 }
 
+// A non-negative number in lowercase hexadecimal, with at least `min` digits (zero-padded on the left).
+pub fn put_hex[&o](out: &!o [byte], at: int, v: int, min: int) -> [] int {
+    if v < 0 {
+        return 0 - 1;
+    }
+    var n = 1;
+    var rest = v / 16;
+    while rest > 0 {
+        n = n + 1;
+        rest = rest / 16;
+    }
+    var width = n;
+    if min > width {
+        width = min;
+    }
+    var k = at;
+    var i = width - 1;
+    while i >= 0 {
+        var d = 0;
+        if i < n {
+            var shifted = v;
+            var j = 0;
+            while j < i {
+                shifted = shifted / 16;
+                j = j + 1;
+            }
+            d = shifted % 16;
+        }
+        var c = '0' + d;
+        if d >= 10 {
+            c = 'a' + d - 10;
+        }
+        k = put_byte(out, k, c);
+        i = i - 1;
+    }
+    return k;
+}
+
 // The decimal digits `v` takes.
 pub fn digits(v: int) -> [] int {
     var n = 1;

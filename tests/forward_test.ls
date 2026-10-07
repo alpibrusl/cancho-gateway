@@ -6,16 +6,28 @@ import std.test;
 import gateway.forward;
 import gateway.response;
 
+// Rewrite `req` (stamp 26, port 8080, sequence 42, so the generated id is `1a-1f90-0000002a`) and say whether the result is `want`.
+fn rewrites_to(req: &static [byte], keep: bool, trust: bool, want: &static [byte]) -> [] bool {
+    var ok = false;
+    region a {
+        let table = alloc_slice[a](http.slots(32), 0);
+        let out = alloc_slice[a](2048, byte_of(0));
+        if http.parse(req, table) > 0 {
+            let n = forward.rewrite(req, table, out, keep, trust, 26, 8080, 42);
+            ok = n == len(want) && bytes.equal(out[0..n], want);
+        }
+    }
+    return ok;
+}
+
 fn test_hop_by_hop_headers_are_dropped_and_connection_close_added() -> [] int {
     region a {
         let table = alloc_slice[a](http.slots(16), 0);
         let out = alloc_slice[a](1024, byte_of(0));
         let req = "GET /x?y=1 HTTP/1.1\r\nHost: a.example\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\nAccept: */*\r\nTE: trailers\r\nUpgrade: websocket\r\nX-Keep: 1\r\n\r\n";
         test.assert(http.parse(req, table) > 0);
-        let n = forward.rewrite(req, table, out, false);
-        let want = "GET /x?y=1 HTTP/1.1\r\nHost: a.example\r\nAccept: */*\r\nX-Keep: 1\r\nConnection: close\r\n\r\n";
-        test.assert_eq(n, len(want));
-        test.assert(bytes.equal(out[0..n], want));
+        test.assert(rewrites_to(req, false, false, "GET /x?y=1 HTTP/1.1\r\nHost: a.example\r\nAccept: */*\r\nX-Keep: 1\r\nVia: 1.1 lexsys-gateway\r\nX-Forwarded-Host: a.example\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: close\r\n\r\n"));
+        test.assert(len(out) > 0 && len(table) > 0);
     }
     return 0;
 }
@@ -26,10 +38,8 @@ fn test_headers_named_by_connection_are_dropped() -> [] int {
         let out = alloc_slice[a](1024, byte_of(0));
         let req = "GET / HTTP/1.1\r\nHost: a\r\nConnection: close, X-Secret ,x-other\r\nX-Secret: 1\r\nX-Other: 2\r\nX-Kept: 3\r\n\r\n";
         test.assert(http.parse(req, table) > 0);
-        let n = forward.rewrite(req, table, out, false);
-        let want = "GET / HTTP/1.1\r\nHost: a\r\nX-Kept: 3\r\nConnection: close\r\n\r\n";
-        test.assert_eq(n, len(want));
-        test.assert(bytes.equal(out[0..n], want));
+        test.assert(rewrites_to(req, false, false, "GET / HTTP/1.1\r\nHost: a\r\nX-Kept: 3\r\nVia: 1.1 lexsys-gateway\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: close\r\n\r\n"));
+        test.assert(len(out) > 0 && len(table) > 0);
     }
     return 0;
 }
@@ -39,11 +49,11 @@ fn test_a_connection_header_may_not_name_the_framing_headers() -> [] int {
         let table = alloc_slice[a](http.slots(16), 0);
         let out = alloc_slice[a](1024, byte_of(0));
         test.assert(http.parse("POST / HTTP/1.1\r\nHost: a\r\nConnection: Content-Length\r\nContent-Length: 0\r\n\r\n", table) > 0);
-        test.assert_eq(forward.rewrite("POST / HTTP/1.1\r\nHost: a\r\nConnection: Content-Length\r\nContent-Length: 0\r\n\r\n", table, out, false), 0 - 1);
+        test.assert_eq(forward.rewrite("POST / HTTP/1.1\r\nHost: a\r\nConnection: Content-Length\r\nContent-Length: 0\r\n\r\n", table, out, false, false, 1, 1, 1), 0 - 1);
         test.assert(http.parse("POST / HTTP/1.1\r\nHost: a\r\nConnection: close, transfer-encoding\r\nTransfer-Encoding: chunked\r\n\r\n", table) > 0);
-        test.assert_eq(forward.rewrite("POST / HTTP/1.1\r\nHost: a\r\nConnection: close, transfer-encoding\r\nTransfer-Encoding: chunked\r\n\r\n", table, out, false), 0 - 1);
+        test.assert_eq(forward.rewrite("POST / HTTP/1.1\r\nHost: a\r\nConnection: close, transfer-encoding\r\nTransfer-Encoding: chunked\r\n\r\n", table, out, false, false, 1, 1, 1), 0 - 1);
         test.assert(http.parse("GET / HTTP/1.1\r\nHost: a\r\nConnection: HOST\r\n\r\n", table) > 0);
-        test.assert_eq(forward.rewrite("GET / HTTP/1.1\r\nHost: a\r\nConnection: HOST\r\n\r\n", table, out, false), 0 - 1);
+        test.assert_eq(forward.rewrite("GET / HTTP/1.1\r\nHost: a\r\nConnection: HOST\r\n\r\n", table, out, false, false, 1, 1, 1), 0 - 1);
     }
     return 0;
 }
@@ -55,11 +65,8 @@ fn test_framing_headers_pass_through() -> [] int {
         let req = "POST /u HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\n\r\nhello";
         let head = len(req) - 5;
         test.assert(http.parse(req, table) > 0);
-        let n = forward.rewrite(req, table, out, false);
-        let want = "POST /u HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nConnection: close\r\n\r\n";
-        test.assert_eq(n, len(want));
-        test.assert(bytes.equal(out[0..n], want));
-        test.assert(head > 0);
+        test.assert(rewrites_to(req[0..head], false, false, "POST /u HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nVia: 1.1 lexsys-gateway\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: close\r\n\r\n"));
+        test.assert(len(out) > 0 && len(table) > 0);
     }
     return 0;
 }
@@ -70,7 +77,7 @@ fn test_a_head_that_does_not_fit_is_refused() -> [] int {
         let out = alloc_slice[a](30, byte_of(0));
         let req = "GET / HTTP/1.1\r\nHost: a.example\r\n\r\n";
         test.assert(http.parse(req, table) > 0);
-        test.assert_eq(forward.rewrite(req, table, out, false), 0 - 2);
+        test.assert_eq(forward.rewrite(req, table, out, false, false, 1, 1, 1), 0 - 2);
     }
     return 0;
 }
@@ -81,10 +88,8 @@ fn test_the_request_line_becomes_http_1_1_and_keep_alive_adds_no_header() -> [] 
         let out = alloc_slice[a](1024, byte_of(0));
         let req = "GET /old HTTP/1.0\r\nHost: a\r\nConnection: keep-alive\r\n\r\n";
         test.assert(http.parse(req, table) > 0);
-        let n = forward.rewrite(req, table, out, true);
-        let want = "GET /old HTTP/1.1\r\nHost: a\r\n\r\n";
-        test.assert_eq(n, len(want));
-        test.assert(bytes.equal(out[0..n], want));
+        test.assert(rewrites_to(req, true, false, "GET /old HTTP/1.1\r\nHost: a\r\nVia: 1.1 lexsys-gateway\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\n\r\n"));
+        test.assert(len(out) > 0 && len(table) > 0);
     }
     return 0;
 }
@@ -97,7 +102,7 @@ fn test_the_response_head_loses_hop_by_hop_headers_and_closes() -> [] int {
         let head = response.parse(resp, table);
         test.assert(head > 0);
         let n = forward.rewrite_response(resp[0..head], table, out);
-        let want = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Kept: 2\r\nConnection: close\r\n\r\n";
+        let want = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Kept: 2\r\nVia: 1.1 lexsys-gateway\r\nConnection: close\r\n\r\n";
         test.assert_eq(n, len(want));
         test.assert(bytes.equal(out[0..n], want));
     }
@@ -111,6 +116,85 @@ fn test_a_response_head_that_does_not_fit_is_refused() -> [] int {
         let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
         test.assert(response.parse(resp, table) > 0);
         test.assert_eq(forward.rewrite_response(resp, table, out), 0 - 1);
+    }
+    return 0;
+}
+
+// --- the header policy (docs/headers.md section 2): every row of the table, for both settings of the flag ---
+
+fn test_an_untrusted_route_removes_what_a_client_claims_about_forwarding() -> [] int {
+    let req = "GET / HTTP/1.1\r\nHost: h.example\r\nForwarded: for=6.6.6.6\r\nX-Forwarded-For: 6.6.6.6\r\nX-Forwarded-Host: evil\r\nX-Forwarded-Proto: https\r\nX-Forwarded-Port: 443\r\nX-Real-IP: 6.6.6.6\r\nX-Request-Id: client-chosen\r\nAccept: */*\r\n\r\n";
+    test.assert(rewrites_to(req, true, false, "GET / HTTP/1.1\r\nHost: h.example\r\nAccept: */*\r\nVia: 1.1 lexsys-gateway\r\nX-Forwarded-Host: h.example\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\n\r\n"));
+    return 0;
+}
+
+fn test_a_trusted_route_passes_them_on_and_adds_none_of_its_own() -> [] int {
+    let req = "GET / HTTP/1.1\r\nHost: h.example\r\nForwarded: for=1.2.3.4;proto=https\r\nX-Forwarded-For: 1.2.3.4\r\nX-Forwarded-Host: front.example\r\nX-Forwarded-Proto: https\r\nX-Real-IP: 1.2.3.4\r\nAccept: */*\r\n\r\n";
+    test.assert(rewrites_to(req, true, true, "GET / HTTP/1.1\r\nHost: h.example\r\nForwarded: for=1.2.3.4;proto=https\r\nX-Forwarded-For: 1.2.3.4\r\nX-Forwarded-Host: front.example\r\nX-Forwarded-Proto: https\r\nX-Real-IP: 1.2.3.4\r\nAccept: */*\r\nVia: 1.1 lexsys-gateway\r\nX-Request-Id: 1a-1f90-0000002a\r\n\r\n"));
+    return 0;
+}
+
+fn test_a_trusted_route_keeps_one_valid_request_id() -> [] int {
+    test.assert(rewrites_to("GET / HTTP/1.1\r\nHost: a\r\nX-Request-Id: edge-7.b_9\r\n\r\n", true, true, "GET / HTTP/1.1\r\nHost: a\r\nX-Request-Id: edge-7.b_9\r\nVia: 1.1 lexsys-gateway\r\n\r\n"));
+    // Any case of the name; the value is kept as sent.
+    test.assert(rewrites_to("GET / HTTP/1.1\r\nHost: a\r\nx-request-id: ABC\r\n\r\n", true, true, "GET / HTTP/1.1\r\nHost: a\r\nx-request-id: ABC\r\nVia: 1.1 lexsys-gateway\r\n\r\n"));
+    return 0;
+}
+
+fn test_an_invalid_or_repeated_request_id_is_replaced_even_on_a_trusted_route() -> [] int {
+    let want = "GET / HTTP/1.1\r\nHost: a\r\nVia: 1.1 lexsys-gateway\r\nX-Request-Id: 1a-1f90-0000002a\r\n\r\n";
+    // 65 bytes, empty, a comma, a space inside, a quote, a slash, a colon.
+    test.assert(rewrites_to("GET / HTTP/1.1\r\nHost: a\r\nX-Request-Id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n\r\n", true, true, want));
+    test.assert(rewrites_to("GET / HTTP/1.1\r\nHost: a\r\nX-Request-Id:\r\n\r\n", true, true, want));
+    test.assert(rewrites_to("GET / HTTP/1.1\r\nHost: a\r\nX-Request-Id: a,b\r\n\r\n", true, true, want));
+    test.assert(rewrites_to("GET / HTTP/1.1\r\nHost: a\r\nX-Request-Id: a b\r\n\r\n", true, true, want));
+    test.assert(rewrites_to("GET / HTTP/1.1\r\nHost: a\r\nX-Request-Id: a\"b\r\n\r\n", true, true, want));
+    test.assert(rewrites_to("GET / HTTP/1.1\r\nHost: a\r\nX-Request-Id: a/b\r\n\r\n", true, true, want));
+    test.assert(rewrites_to("GET / HTTP/1.1\r\nHost: a\r\nX-Request-Id: a:b\r\n\r\n", true, true, want));
+    // Two headers: neither is believed.
+    test.assert(rewrites_to("GET / HTTP/1.1\r\nHost: a\r\nX-Request-Id: one\r\nX-Request-Id: two\r\n\r\n", true, true, want));
+    // Exactly 64 bytes is valid, and kept as sent.
+    test.assert(rewrites_to("GET / HTTP/1.1\r\nHost: a\r\nX-Request-Id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n\r\n", true, true, "GET / HTTP/1.1\r\nHost: a\r\nX-Request-Id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\nVia: 1.1 lexsys-gateway\r\n\r\n"));
+    return 0;
+}
+
+fn test_a_request_id_named_by_connection_is_not_forwarded() -> [] int {
+    test.assert(rewrites_to("GET / HTTP/1.1\r\nHost: a\r\nConnection: x-request-id\r\nX-Request-Id: edge-1\r\n\r\n", true, true, "GET / HTTP/1.1\r\nHost: a\r\nVia: 1.1 lexsys-gateway\r\nX-Request-Id: 1a-1f90-0000002a\r\n\r\n"));
+    return 0;
+}
+
+fn test_via_is_appended_after_the_clients_via() -> [] int {
+    test.assert(rewrites_to("GET / HTTP/1.1\r\nHost: a\r\nVia: 1.1 front\r\n\r\n", true, true, "GET / HTTP/1.1\r\nHost: a\r\nVia: 1.1 front\r\nVia: 1.1 lexsys-gateway\r\nX-Request-Id: 1a-1f90-0000002a\r\n\r\n"));
+    test.assert(rewrites_to("GET / HTTP/1.1\r\nHost: a\r\nVia: 1.1 front\r\n\r\n", true, false, "GET / HTTP/1.1\r\nHost: a\r\nVia: 1.1 front\r\nVia: 1.1 lexsys-gateway\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\n\r\n"));
+    return 0;
+}
+
+fn test_the_generated_id_is_stamp_port_sequence_in_hex() -> [] int {
+    region a {
+        let table = alloc_slice[a](http.slots(16), 0);
+        let out = alloc_slice[a](1024, byte_of(0));
+        let req = "GET / HTTP/1.1\r\nHost: a\r\n\r\n";
+        test.assert(http.parse(req, table) > 0);
+        let n = forward.rewrite(req, table, out, true, false, 439041101823, 65535, 4294967295);
+        let want = "GET / HTTP/1.1\r\nHost: a\r\nVia: 1.1 lexsys-gateway\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 6638e38fff-ffff-ffffffff\r\n\r\n";
+        test.assert_eq(n, len(want));
+        test.assert(bytes.equal(out[0..n], want));
+        // Small numbers are padded to eight digits in the sequence only.
+        let m = forward.rewrite(req, table, out, true, false, 0, 1, 1);
+        test.assert(bytes.equal(out[0..m], "GET / HTTP/1.1\r\nHost: a\r\nVia: 1.1 lexsys-gateway\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 0-1-00000001\r\n\r\n"));
+    }
+    return 0;
+}
+
+fn test_the_response_gets_a_via_and_keeps_the_upstreams() -> [] int {
+    region a {
+        let table = alloc_slice[a](response.slots(16), 0);
+        let out = alloc_slice[a](1024, byte_of(0));
+        let resp = "HTTP/1.1 200 OK\r\nVia: 1.0 origin\r\nContent-Length: 0\r\n\r\n";
+        let head = response.parse(resp, table);
+        test.assert(head > 0);
+        let n = forward.rewrite_response(resp[0..head], table, out);
+        test.assert(bytes.equal(out[0..n], "HTTP/1.1 200 OK\r\nVia: 1.0 origin\r\nContent-Length: 0\r\nVia: 1.1 lexsys-gateway\r\nConnection: close\r\n\r\n"));
     }
     return 0;
 }

@@ -28,6 +28,7 @@ path_prefix = "/static"    # required
 methods = ["GET", "HEAD"]  # optional: GET HEAD POST PUT DELETE PATCH OPTIONS; omitted = all
 upstream = "web"           # required: a declared upstream
 max_body = 0               # optional: 0..1073741824, default 1048576
+trust_forwarded = false    # optional, default false: believe the forwarding headers of the party in front (docs/headers.md)
 ```
 
 `path_prefix` starts with `/`, has no trailing `/` (except `"/"` alone), no `//`, no `.` or `..` segment, no `%`, no
