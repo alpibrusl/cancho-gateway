@@ -8,6 +8,8 @@ and `net_out("")` (measured, `docs/design.md` section 2). The upstream set is co
 enforced by exact match before every connect, and tested; the compiler does not vouch for it. Strict, bounded request
 parsing (`std.http`) is the defence against request smuggling.
 
+**Site:** <https://alpibrusl.github.io/cancho-gateway/> (the overview and [the evidence](https://alpibrusl.github.io/cancho-gateway/evidence.html)); it is `docs/index.html` and `docs/evidence.html`, its figures drawn by `scripts/figures.py` from `bench/results/`, its images by `scripts/site_assets.py` from `docs/logo.jpg`.
+
 The model is [`cancho-cache`](https://github.com/alpibrusl/cancho-cache): one thread, one poller, memory sized at start,
 every input bounded with its own refusal, and measurements against the incumbent (nginx, HAProxy) fixed before the code.
 
@@ -16,7 +18,7 @@ and relays the response, with deadlines, backpressure and problem+json refusals,
 connections alive in a bounded pool (`docs/pool.md`), stops sending requests to an upstream that keeps failing (`docs/health.md`), applies a
 header policy (`Via`, `X-Forwarded-Host/Proto`, a request id, untrusted forwarding claims removed: `docs/headers.md`), writes one JSON
 access-log line per request to stdout (`docs/observability.md`) and echoes the request id in every response and error. It has been benchmarked
-against nginx, HAProxy, Envoy, Caddy, Traefik and Kong, and **loses to nginx and HAProxy on most cells** (`docs/bench.md`, sections 8 and 10).
+against nginx, HAProxy, Envoy, Caddy, Traefik and Kong, and **is slower than HAProxy on most cells and than nginx on POST bodies** (`docs/bench.md`, sections 8 and 10; the two runs disagree about nginx on the other cells).
 It has **no client-side keep-alive, no active health checks, no authentication, no rate limiting, no metrics endpoint yet** (#10's second
 slice), no TLS and no `X-Forwarded-For` of its own (the compiler gives no peer address). The plan and its tasks are in the epic issue; the design
 is `docs/design.md`.
@@ -35,4 +37,4 @@ discovery, clustering. WebSockets (the OCPP use case) are a later stage built on
 
 It is a server with its own authority row (the network and the clock, no files), and in this toolbox one program carries
 one authority row. It is not `cancho-web` (an application framework that serves routes and validates bodies, with
-middleware listed as not yet) and it is not `lexsys-hooks` (outbound webhook delivery).
+middleware listed as not yet) and it is not `cancho-hooks` (outbound webhook delivery).

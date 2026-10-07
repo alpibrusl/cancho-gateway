@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cancho-gateway: examples and download</title>
+<meta name="description" content="Six situations where cancho-gateway fits, each with its deployment file and what it answers and logs, and a download of the demo binary. Alpha.">
+<meta name="color-scheme" content="light dark">
+<meta property="og:title" content="cancho-gateway: examples and download">
+<meta property="og:image" content="https://alpibrusl.github.io/cancho-gateway/og.png">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="icon" type="image/png" sizes="64x64" href="favicon.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<style>
+
+:root {
+  --bg: #fbfbfc; --fg: #14171c; --muted: #566170; --line: #e1e4ea; --surface: #ffffff; --soft: #f0f3f6;
+  --accent: #265e8d; --accent-fg: #ffffff; --good: #0f7b5f; --warn: #92400e; --warn-bg: #fdf6e7; --warn-line: #e0b765; --bad: #d1362f;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0d1217; --fg: #e8eaee; --muted: #9ba5b3; --line: #232932; --surface: #141a21; --soft: #182029;
+    --accent: #6fa3d6; --accent-fg: #0a1522; --good: #4fd1a5; --warn: #f3c77a; --warn-bg: #1d1a12; --warn-line: #8a6a2a; --bad: #ff6b63; }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; scroll-padding-top: 4rem; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 1rem/1.6 var(--font); }
+a { color: var(--accent); text-underline-offset: .15em; }
+.wrap { width: 100%; max-width: 68rem; margin: 0 auto; padding: 0 20px; }
+.skip { position: absolute; left: 16px; top: -4rem; background: var(--accent); color: var(--accent-fg); padding: .5rem .8rem; border-radius: 6px; z-index: 9; }
+.skip:focus { top: 8px; }
+a:focus-visible, .btn:focus-visible, pre:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+header.top { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+header.top .wrap { display: flex; align-items: center; gap: 1.5rem; height: 3.4rem; }
+.brand { font: 700 1rem var(--mono); color: var(--fg); text-decoration: none; letter-spacing: -.01em; white-space: nowrap; }
+nav { display: flex; gap: 1.2rem; margin-left: auto; }
+nav a { color: var(--muted); text-decoration: none; font-size: .93rem; white-space: nowrap; }
+nav a:hover { color: var(--fg); }
+@media (max-width: 40rem) { nav a.opt { display: none; } }
+
+h1 { font-size: clamp(2.3rem, 6.2vw, 4rem); line-height: 1.04; letter-spacing: -.035em; margin: 0 0 1rem; font-weight: 750; }
+h2 { font-size: clamp(1.6rem, 3.4vw, 2.2rem); line-height: 1.15; letter-spacing: -.025em; margin: 0 0 .5rem; font-weight: 700; }
+h3 { font-size: 1.05rem; margin: 0 0 .25rem; }
+p { margin: 0 0 1rem; }
+section { padding: 4.5rem 0 0; }
+.lead { font-size: 1.2rem; color: var(--muted); max-width: 34rem; }
+.sub { color: var(--muted); max-width: 38rem; }
+code { font-family: var(--mono); font-size: .9em; background: var(--soft); padding: .1em .35em; border-radius: 5px; }
+
+.hero { padding: 4rem 0 0; display: grid; gap: 2.5rem; align-items: center; }
+@media (min-width: 58rem) { .hero { grid-template-columns: 1.05fr 1fr; } }
+.badge { display: inline-flex; gap: .5rem; align-items: center; font-size: .82rem; color: var(--warn); background: var(--warn-bg); border: 1px solid var(--warn-line); padding: .22rem .7rem; border-radius: 999px; margin-bottom: 1.2rem; text-decoration: none; }
+.badge i { width: .5rem; height: .5rem; border-radius: 50%; background: var(--warn-line); display: inline-block; }
+.cta { display: flex; flex-wrap: wrap; gap: .7rem; margin-top: 1.6rem; }
+.btn { display: inline-block; padding: .65rem 1.15rem; border-radius: 8px; font-weight: 600; text-decoration: none; border: 1px solid var(--accent); }
+.btn.primary { background: var(--accent); color: var(--accent-fg); }
+.btn.ghost { color: var(--accent); }
+.btn.ghost:hover { background: var(--soft); }
+
+.term { background: #0d1117; color: #d6dde8; border: 1px solid #262c36; border-radius: 12px; font: .84rem/1.65 var(--mono); padding: 1rem 1.1rem 1.1rem; box-shadow: 0 18px 50px -24px rgba(20, 30, 70, .55); overflow-x: auto; }
+.term .bar { display: flex; gap: .35rem; margin-bottom: .8rem; }
+.term .bar i { width: .65rem; height: .65rem; border-radius: 50%; background: #2d3440; display: block; }
+.term .c { color: #7d8797; } .term .g { color: #5fd3a6; } .term .b { color: #8cb0ff; } .term .y { color: #e8c170; } .term .r { color: #ff8b82; }
+.term pre { margin: 0; white-space: pre; }
+
+.three { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); margin-top: 3.2rem; }
+.three div { border-top: 3px solid var(--accent); padding-top: .8rem; }
+.three p { color: var(--muted); margin: 0; font-size: .96rem; }
+
+.figure { margin: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 1.2rem; }
+.figure.wide { margin-top: 2rem; }
+.figure svg, .figure img { display: block; width: 100%; height: auto; }
+.figure h3 { margin-bottom: .6rem; }
+.figure figcaption { color: var(--muted); font-size: .88rem; margin-top: .8rem; }
+.two { display: grid; gap: 1rem; grid-template-columns: 1fr; margin-top: 2rem; }
+@media (min-width: 52rem) { .two { grid-template-columns: 1fr 1fr; } }
+svg .t { fill: var(--fg); font: 600 13px var(--font); } svg .s { fill: var(--muted); font: 12px var(--font); }
+svg .box { fill: var(--surface); stroke: var(--line); stroke-width: 1.4; } svg .hot { fill: var(--soft); stroke: var(--accent); stroke-width: 2; }
+svg .ar { stroke: var(--muted); stroke-width: 1.5; fill: none; } svg .dash { stroke-dasharray: 5 4; }
+svg .dot { fill: var(--accent); } svg .axis { stroke: var(--line); stroke-width: 2; }
+svg .bar1 { fill: var(--accent); } svg .bar2 { fill: var(--line); }
+
+.grid { display: grid; gap: 1px; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); background: var(--line); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; margin-top: 2rem; }
+.grid div { background: var(--surface); padding: 1.1rem 1.2rem; }
+.grid p { color: var(--muted); font-size: .93rem; margin: 0; }
+
+.stats { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); margin: 2rem 0 0; }
+.stats div { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 1rem 1.1rem; }
+.stats b { display: block; font: 700 1.9rem/1.1 var(--font); letter-spacing: -.03em; }
+.stats span { color: var(--muted); font-size: .88rem; }
+.note { color: var(--muted); font-size: .88rem; margin-top: .9rem; }
+
+pre.code { background: var(--soft); border: 1px solid var(--line); border-radius: 12px; padding: 1rem 1.1rem; font: .86rem/1.65 var(--mono); overflow-x: auto; margin: 1.4rem 0 0; }
+.status { margin-top: 4.5rem; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 14px; padding: 1.3rem 1.5rem; }
+.status h2 { font-size: 1.2rem; letter-spacing: -.01em; }
+.status ul { margin: .4rem 0 0; padding-left: 1.2rem; color: var(--muted); }
+footer { margin-top: 4rem; border-top: 1px solid var(--line); padding: 1.6rem 0 2.6rem; color: var(--muted); font-size: .9rem; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: .5rem 1.6rem; }
+table.fit { width: 100%; border-collapse: collapse; margin-top: 2rem; font-size: .95rem; }
+table.fit th, table.fit td { text-align: left; padding: .8rem .9rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+table.fit thead th { color: var(--muted); font-weight: 600; font-size: .85rem; }
+table.fit tbody th { font-weight: 650; }
+table.fit td { color: var(--muted); }
+table.fit tr.us { background: var(--soft); } table.fit tr.us td, table.fit tr.us th { color: var(--fg); }
+@media (max-width: 44rem) { .fitwrap { overflow-x: auto; } table.fit.wide { min-width: 38rem; } }
+.cols { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); margin-top: 1.4rem; }
+.cols > div { border: 1px solid var(--line); border-radius: 14px; padding: 1.1rem 1.3rem; background: var(--surface); }
+.cols ul { margin: .4rem 0 0; padding-left: 1.1rem; color: var(--muted); } .cols li { margin: .25rem 0; }
+.cols .no h3 { color: var(--muted); }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+.logo { display: block; width: 11rem; height: auto; border-radius: 14px; background: #fff; padding: .35rem; border: 1px solid var(--line); margin-bottom: 1.4rem; }
+header.top img.mark { width: 1.9rem; height: 1.9rem; display: block; }
+header.top .brand { display: inline-flex; align-items: center; gap: .55rem; }
+table.fit.num td, table.fit.num th { white-space: nowrap; } table.fit.num td.n { text-align: right; font-variant-numeric: tabular-nums; }
+.good { color: var(--good); } .bad { color: var(--bad); }
+.two { align-items: start; }
+table.fit.wide tbody th { white-space: nowrap; }
+pre code { padding: 0; background: none; }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top"><div class="wrap">
+  <a class="brand" href="index.html"><img class="mark" src="mark.png" alt="" width="30" height="30">cancho-gateway</a>
+  <nav aria-label="Sections">
+    <a href="index.html" class="opt">Overview</a><a href="evidence.html" class="opt">Evidence</a><a href="#download">Download</a>
+    <a href="https://github.com/alpibrusl/cancho-gateway">GitHub</a>
+  </nav>
+</div></header>
+
+<main id="main" class="wrap">
+
+<div style="padding-top:3.5rem">
+  <a class="badge" href="index.html#status"><i></i>Alpha · only what is built is shown here</a>
+  <h1>Where it earns its place.</h1>
+  <p class="lead">Six situations, each with the deployment file that makes it work and what the gateway answers and logs. Every refusal and field below is one the tests exercise; the list at the end is what it cannot do yet.</p>
+</div>
+
+<section id="download">
+  <h2>Download and try it</h2>
+  <p class="sub">The configuration is compiled into the binary, so a release carries a <strong>demo gateway</strong>: it listens on port 8080 and forwards to one upstream on <code>127.0.0.1:9000</code>. To point a gateway at your own upstreams you build your own, from the sources in the same release.</p>
+  <div class="cta">
+    <a class="btn primary" href="https://github.com/alpibrusl/cancho-gateway/releases/latest/download/cancho-gateway-demo-linux-x86_64" download>Download the binary (Linux x86-64)</a>
+    <a class="btn ghost" href="https://github.com/alpibrusl/cancho-gateway/releases/latest">All assets and checksums</a>
+  </div>
+  <pre class="code" tabindex="0"><code>chmod +x cancho-gateway-demo-linux-x86_64
+python3 -m http.server 9000 &amp;                  # any upstream will do
+./cancho-gateway-demo-linux-x86_64               # one JSON line per request on stdout
+curl -si localhost:8080/                         # Via and X-Request-Id added</code></pre>
+  <p class="note">Each release has the binary, <code>cancho-gateway-demo.authority.json</code> (what the compiler says the binary may do), <code>cancho-gateway-src.tar.gz</code> and <code>SHA256SUMS</code>; check with <code>sha256sum -c SHA256SUMS</code>. Built in CI at the pinned compiler by <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/scripts/release.sh"><code>scripts/release.sh</code></a>. It links only libc. If no release is listed yet, the first tag has not been pushed: <a href="index.html#start">build it from source</a>. Alpha: not for production.</p>
+</section>
+
+<section id="front">
+  <h2>1. Internal APIs behind a TLS front</h2>
+  <p class="sub">Caddy or nginx terminates TLS and sets <code>X-Forwarded-For</code>. The gateway sits behind it, believes that front, and gives every request an id the services and the audit log share.</p>
+  <pre class="code" tabindex="0"><code>listen = 8080
+
+[[upstream]]
+name = "orders"
+addr = "10.0.1.5:9000"
+
+[[route]]
+name = "orders"
+host = "api.example.com"
+path_prefix = "/"
+upstream = "orders"
+trust_forwarded = true     # the party in front is mine: pass its headers on</code></pre>
+  <p class="note">With <code>trust_forwarded = false</code> (the default) a client&rsquo;s own <code>X-Forwarded-For</code>, <code>Forwarded</code> and <code>X-Real-IP</code> are removed, so a caller cannot choose what the service believes about forwarding. A client&rsquo;s <code>X-Request-Id</code> is kept only when it is 1 to 64 safe characters. <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/docs/headers.md">The table</a>.</p>
+</section>
+
+<section id="door">
+  <h2>2. One door for a few services</h2>
+  <p class="sub">Route by host, then by the longest path prefix, and by method. Static files are read-only; a wrong method is refused at the door, not discovered at the service.</p>
+  <pre class="code" tabindex="0"><code>[[route]]
+name = "web-static"
+path_prefix = "/static"
+methods = ["GET", "HEAD"]
+upstream = "web"
+max_body = 0
+
+[[route]]
+name = "web"
+path_prefix = "/"
+upstream = "web"</code></pre>
+  <pre class="code" tabindex="0"><code>POST /static/app.js  -> 405  {"rule":"route.method", ...}
+GET  /static/app.js  -> served by "web-static"
+GET  /anything-else  -> served by "web" (the longest prefix that matches)
+                        (with no "/" route at all: 404 {"rule":"route.none", ...})</code></pre>
+  <p class="note">Ties between two routes are a configuration error, found when the deployment is generated, not at 3 a.m.</p>
+</section>
+
+<section id="uploads">
+  <h2>3. Upload limits that are enforced</h2>
+  <p class="sub">A route sets the largest body it accepts. The declared length is checked before a byte is forwarded; a chunked body is counted as it arrives.</p>
+  <pre class="code" tabindex="0"><code>[[route]]
+name = "reports"
+path_prefix = "/reports"
+methods = ["POST"]
+upstream = "reports"
+max_body = 5242880          # 5 MiB</code></pre>
+  <pre class="code" tabindex="0"><code>HTTP/1.1 413 Payload Too Large
+{"status":413,"rule":"limit.body","request_id":"19b3c2a1f00-1f90-0000002c"}</code></pre>
+  <p class="note">The default is 1 MiB. A chunked body over the limit is cut off after part of it may already have gone upstream; the <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/docs/proxy.md">proxy notes</a> say so.</p>
+</section>
+
+<section id="legacy">
+  <h2>4. A strict door in front of a lenient server</h2>
+  <p class="sub">Old application servers and hand-written backends often disagree with a front proxy about where a request ends. That disagreement is request smuggling. The gateway refuses the ambiguous shapes and closes the connection, so the backend never sees them.</p>
+  <pre class="code" tabindex="0"><code>Content-Length and Transfer-Encoding together    -> 400 framing.two-lengths
+two different Content-Length headers             -> 400 framing.length
+obsolete header line folding                     -> 400 framing.fold
+a bare LF as a line ending                       -> 400 framing.line-ending
+CONNECT, or an absolute-form target              -> refused, own rule each</code></pre>
+  <p class="note">Tested against a corpus, split at every byte and mutated; <a href="evidence.html">the evidence page</a> lists what that found.</p>
+</section>
+
+<section id="flaky">
+  <h2>5. A flaky upstream that should not take everything down</h2>
+  <p class="sub">After a run of failures the gateway stops sending requests to that upstream for a while, answers at once, and lets one trial request through to see if it is back.</p>
+  <pre class="code" tabindex="0"><code># in the deployment file
+circuit_threshold = 5       # consecutive failures that open the circuit (0 turns it off)
+circuit_open_ms   = 10000   # how long it stays open
+connect_timeout_ms = 2000
+upstream_timeout_ms = 15000</code></pre>
+  <pre class="code" tabindex="0"><code>HTTP/1.1 503 Service Unavailable
+{"status":503,"rule":"proxy.circuit-open","request_id":"..."}</code></pre>
+  <p class="note">Other upstream failures keep their own tags: <code>proxy.connect</code>, <code>proxy.upstream-closed</code>, <code>proxy.head</code> (all 502) and <code>timeout.*</code>. A dead idle connection is retried once, and only for a request with no body that is safe to repeat.</p>
+</section>
+
+<section id="audit">
+  <h2>6. An audit trail and a capability report</h2>
+  <p class="sub">When someone asks &ldquo;what happened to request X&rdquo; or &ldquo;what can this process touch&rdquo;, there is an answer for each.</p>
+  <pre class="code" tabindex="0"><code>{"t":1791376430841,"id":"594fe-1f90-00000001","method":"GET","path":"/orders/7",
+ "route":"orders","upstream":"orders","status":200,"rule":"","outcome":"ok",
+ "ms":12,"upstream_ms":11,"bytes_in":0,"bytes_out":1834}
+
+{"id":"594fe-1f90-00000002","status":400,"rule":"framing.two-lengths",
+ "outcome":"refused", ...}</code></pre>
+  <p class="sub">The same id is in the response header and in a refusal&rsquo;s body. The log goes to stdout, so journald, a file or a collector can take it; if that reader stops, so does the gateway (see the alpha notes).</p>
+  <pre class="code" tabindex="0"><code>gateway  args, clock, conn_accept, conn_read, conn_write, heap,
+         io_write, net_in(""), net_out(""), poll        # no files, no foreign calls</code></pre>
+  <p class="note">That report is derived by the compiler and checked in CI: a build that gained a capability fails. The network bound is not narrowed (one bound covers listening and connecting), so the upstream set is enforced in code and tested.</p>
+</section>
+
+<aside class="status" id="not-yet">
+  <h2>What these cases do not cover yet</h2>
+  <ul>
+    <li><strong>Authentication</strong> and <strong>rate limiting</strong>: planned, not built. Do the check at the TLS front for now.</li>
+    <li><strong>TLS</strong> in the gateway itself, and <strong>WebSocket</strong> (for example OCPP between chargers and a back office): planned, not built.</li>
+    <li><strong>Metrics and health endpoints</strong>: the access log exists; counters and an admin listener do not.</li>
+    <li><strong>Client addresses</strong> in logs and headers: the compiler does not provide one yet.</li>
+    <li><strong>Changing a route</strong> means a new binary; there is no hot reload.</li>
+  </ul>
+</aside>
+
+</main>
+
+<footer><div class="wrap">
+  <a href="https://github.com/alpibrusl/cancho-gateway">Repository</a><a href="index.html">Overview</a><a href="evidence.html">Evidence</a>
+  <a href="https://github.com/alpibrusl/cancho">cancho</a>
+  <span>Alpha · EUPL-1.2</span>
+</div></footer>
+</body>
+</html>

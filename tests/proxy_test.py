@@ -727,17 +727,23 @@ class T:
         assert slow <= 3, "%d of 40 requests took more than 30 ms" % slow
 
     def access_log_has_one_line_per_request_with_its_fields(gw, up):
-        n, n0 = len(up.heads), len(gw.log_lines())
+        # Select by this request's id, not by position: a line left over from an earlier test (a keep-alive session logs when it ends,
+        # after its client has the answer) can arrive after the count is taken. Found when CI failed this test once in two runs.
+        n = len(up.heads)
         raw = request(gw, GET % b"/x?token=SECRET&a=1")
-        lines = gw.log_since(n0, 1)
+        mine = re.search(rb"\r\nX-Request-Id: ([^\r]*)\r\n", raw).group(1).decode()
+        end = time.time() + 2.0
+        while time.time() < end and not any(json.loads(l)["id"] == mine for l in gw.log_lines()):
+            time.sleep(0.02)
         time.sleep(0.2)
-        assert len(gw.log_since(n0)) == 1, "exactly one line for one request"
+        lines = [json.loads(l) for l in gw.log_lines() if json.loads(l)["id"] == mine]
+        assert len(lines) == 1, "exactly one line for one request: %d" % len(lines)
         e = lines[0]
         assert list(e) == ["t", "id", "method", "path", "route", "upstream", "status", "rule", "outcome", "ms", "upstream_ms", "bytes_in", "bytes_out"], list(e)
         assert (e["method"], e["path"], e["route"], e["upstream"], e["status"], e["rule"], e["outcome"]) == ("GET", "/x", "main", "up", 200, "", "ok"), e
         assert abs(e["t"] - time.time() * 1000) < 10000 and e["ms"] >= 0 and e["upstream_ms"] >= 0 and e["bytes_in"] == 0, e
         assert e["bytes_out"] == len(raw), (e["bytes_out"], len(raw))
-        assert b"SECRET" not in gw.log_lines()[-1] and b"token" not in gw.log_lines()[-1], "no query string in the log"
+        assert not any(b"SECRET" in l or b"token" in l for l in gw.log_lines()), "no query string in the log"
         # The id is the one the upstream saw and the client was given.
         assert e["id"] == seen_id(up, n) and re.search(rb"\r\nX-Request-Id: " + e["id"].encode() + rb"\r\n", raw), (e["id"], raw[:200])
 

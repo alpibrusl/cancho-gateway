@@ -1,0 +1,16 @@
+# The deployment the release binary is built from: a try-it-out gateway, not a production one.
+# It listens on 8080 and sends everything to one upstream on this machine, 127.0.0.1:9000, e.g.
+#   python3 -m http.server 9000
+# The configuration is compiled into the binary (docs/design.md section 2), so pointing a gateway at
+# YOUR upstreams means building your own: copy deploy/example.toml, edit it, run scripts/generate.py.
+
+listen = 8080
+
+[[upstream]]
+name = "app"
+addr = "127.0.0.1:9000"
+
+[[route]]
+name = "app"
+path_prefix = "/"
+upstream = "app"

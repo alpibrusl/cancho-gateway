@@ -93,3 +93,9 @@ jobs:
       - name: The authority is the compiler's, recorded, and within its ceiling
         working-directory: gateway
         run: python3 scripts/authority.py --check
+
+      - name: The site (docs/index.html, evidence.html) - its figures and tables come from the recorded results, and its links resolve
+        working-directory: gateway
+        run: |
+          python3 scripts/figures.py --check
+          python3 scripts/check_site.py
