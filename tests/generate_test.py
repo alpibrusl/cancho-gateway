@@ -49,6 +49,8 @@ REFUSALS = [
     ("config.circuit", 2, 'listen = 80\ncircuit_threshold = -1\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
     ("config.circuit", 2, 'listen = 80\ncircuit_open_ms = 50\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
     ("config.circuit", 2, 'listen = 80\ncircuit_open_ms = "10s"\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
+    ("config.log", 2, 'listen = 80\nlog_failure = "ignore"\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
+    ("config.log", 2, 'listen = 80\nlog_failure = true\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
     ("config.timeout", 3, 'listen = 80\nheader_timeout_ms = 5000\ntotal_timeout_ms = 1000\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
     # --- routes, with the line they must name
     ("config.unknown-key", 7, UP + R + 'path_pref = "/"\n'),
@@ -69,6 +71,9 @@ REFUSALS = [
     ("config.route", 8, UP + R + 'path_prefix = "/"\nmethods = ["GET", "GET"]\n'),
     ("config.route", 8, UP + R + 'path_prefix = "/"\nmax_body = -1\n'),
     ("config.route", 8, UP + R + 'path_prefix = "/"\ntrust_forwarded = "yes"\n'),
+    ("config.route", 8, UP + R + 'path_prefix = "/"\nname = "Has Space"\n'),
+    ("config.route", 8, UP + R + 'path_prefix = "/"\nname = "' + "a" * 33 + '"\n'),
+    ("config.route", 8, UP + R + 'path_prefix = "/"\nname = 7\n'),
     ("config.route", 8, UP + R + 'path_prefix = "/"\ntrust_forwarded = 1\n'),
     ("config.route", 8, UP + R + 'path_prefix = "/"\nmax_body = 1073741825\n'),
     ("config.route-upstream", 7, UP + '[[route]]\npath_prefix = "/"\nupstream = "b"\n'),

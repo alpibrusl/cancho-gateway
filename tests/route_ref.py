@@ -51,5 +51,5 @@ def select(routes, host, method, path):
     allowed = [(i, r) for i, r in on_path if bit and r["mask"] & bit]
     if allowed:
         i, r = max(allowed, key=lambda t: (len(t[1]["prefix"]), -t[0]))
-        return ("route", i, r["upstream"], r["max_body"], r["trust"])
+        return ("route", i, r["upstream"], r["max_body"], r["trust"], r["name"])
     return ("refuse", "route.method", 405) if on_path else ("refuse", "route.none", 404)

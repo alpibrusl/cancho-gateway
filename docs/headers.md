@@ -48,9 +48,9 @@ believes about forwarding: that is the property the gates test.
   honest: the gateway does not know it. A deployment that needs the address behind it puts a front that knows it in front and sets
   `trust_forwarded = true`. When `conn_peer` exists, the untrusted rows gain `X-Forwarded-For: <peer>` and `Forwarded: for=<peer>`, and the
   trusted row appends the peer to an existing `X-Forwarded-For`; the table is the contract for that change too.
-- **No request id in the response yet.** The id a client sent is in the request head, which is gone by the time the response is
-  rewritten (its buffer is reused), and keeping a 64-byte string per session for it is the same cost the access log (#10) needs for the same
-  reason; the two are done together there, and `problem+json` carries it from #18. Until then the id is in the upstream's view of the request only.
+- **The request id in the response and in `problem+json`: built with the access log (`docs/observability.md` section 4).** It was deferred here because the head the id came
+  from is gone when the response is rewritten; the per-session id area the log needs solves both, so the two were done together in #10's first slice. A response now carries
+  `X-Request-Id` (an upstream's own is removed first), and a refusal carries it in the header and as `"request_id"` in the body.
 - **No credentials of its own to leak.** In v1 the gateway holds none: it takes no keys and presents none upstream. The rule
   that stays true when #8 adds some: **a credential the gateway itself checks is removed before the request is forwarded**
   (the header #8's policy consumes is dropped in `forward.rewrite`, with a test that the upstream never sees it). `Proxy-Authorization` is
@@ -128,6 +128,5 @@ harness against the build just before this change (5 interleaved rounds, one cor
   first end-to-end tests, because with one request at a time the two are equal, and is killed by the 0.4 s test above.
 - The authority report did not change except for the pure-function list and counts (no new effect); the 2,000-line gate holds.
 
-**Not done, and why:** no `X-Forwarded-For` or `Forwarded: for=` of the gateway's own (no peer address: section 1); no request id in the response or in
-`problem+json` (needs a per-session id string; done with the access log, #10, and #18); the credential rule for #8 is recorded, and tested when #8 has a
+**Not done, and why:** no `X-Forwarded-For` or `Forwarded: for=` of the gateway's own (no peer address: section 1); the credential rule for #8 is recorded, and tested when #8 has a
 credential to strip.

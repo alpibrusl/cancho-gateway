@@ -41,7 +41,10 @@ def random_deployment(rng):
         if rng.random() < 0.5:
             lines += ["methods = [%s]" % ", ".join('"%s"' % m for m in rng.sample(METHODS, rng.randint(1, 4)))]
         lines += ["max_body = %d" % rng.choice([0, 10, 1000, 1 << 20, 1 << 30])]
-        lines += ["trust_forwarded = %s" % rng.choice(["true", "false"]), ""]
+        lines += ["trust_forwarded = %s" % rng.choice(["true", "false"])]
+        if rng.random() < 0.5:
+            lines += ['name = "n%d-%s"' % (rng.randrange(1000), rng.choice(["a", "b-c", "x_y"]))]
+        lines += [""]
     return "\n".join(lines)
 
 
@@ -92,20 +95,20 @@ def probe(binary, batch):
 
 def expected(routes, h, m, p):
     ans = route_ref.select(routes, h, m, p)
-    return "route %d %d %d %d" % (ans[1], ans[2], ans[3], ans[4]) if ans[0] == "route" else "refuse %s %d" % (ans[1], ans[2])
+    return "route %d %d %d %d %s" % (ans[1], ans[2], ans[3], ans[4], ans[5]) if ans[0] == "route" else "refuse %s %d" % (ans[1], ans[2])
 
 
 # Fixed cases against deploy/example.toml, with literal expectations (not derived from the reference): the host picks the
 # route set, the longest prefix wins on a segment boundary, a method the best prefix does not allow falls to a shorter one.
 FIXED = [
-    ("api.example.com", "GET", "/x", "route 0 0 1048576 1"),
-    ("API.Example.COM:8443", "DELETE", "/anything", "route 0 0 1048576 1"),
-    ("api.example.com", "GET", "/static/a", "route 0 0 1048576 1"),
-    ("other.example", "GET", "/static/a", "route 1 1 0 0"),
-    ("other.example", "HEAD", "/static", "route 1 1 0 0"),
-    ("other.example", "POST", "/static/a", "route 2 1 1048576 0"),
-    ("other.example", "GET", "/staticx", "route 2 1 1048576 0"),
-    ("other.example", "GET", "/", "route 2 1 1048576 0"),
+    ("api.example.com", "GET", "/x", "route 0 0 1048576 1 api"),
+    ("API.Example.COM:8443", "DELETE", "/anything", "route 0 0 1048576 1 api"),
+    ("api.example.com", "GET", "/static/a", "route 0 0 1048576 1 api"),
+    ("other.example", "GET", "/static/a", "route 1 1 0 0 web-static"),
+    ("other.example", "HEAD", "/static", "route 1 1 0 0 web-static"),
+    ("other.example", "POST", "/static/a", "route 2 1 1048576 0 web"),
+    ("other.example", "GET", "/staticx", "route 2 1 1048576 0 web"),
+    ("other.example", "GET", "/", "route 2 1 1048576 0 web"),
     ("other.example", "FETCH", "/", "refuse route.method 405"),
     ("other.example", "GET", "/a/../b", "refuse route.path 400"),
     ("other.example", "GET", "/a/%2e%2E/b", "refuse route.path 400"),

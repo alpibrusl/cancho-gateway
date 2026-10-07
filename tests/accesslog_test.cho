@@ -1,0 +1,197 @@
+edition 5;
+
+import std.bytes;
+import std.test;
+import gateway.accesslog;
+import gateway.out;
+
+fn test_an_ok_line_byte_for_byte() -> [] int {
+    region a {
+        let buf = alloc_slice[a](accesslog.max_line(), byte_of(0));
+        let n = accesslog.line(buf, 1791363042117, "19b3c2a1f00-1f90-0000002a", "GET", "/users/7", "api", "api", 200, "", 0, 12, 9, 0, 1834);
+        let want = "{\"t\":1791363042117,\"id\":\"19b3c2a1f00-1f90-0000002a\",\"method\":\"GET\",\"path\":\"/users/7\",\"route\":\"api\",\"upstream\":\"api\",\"status\":200,\"rule\":\"\",\"outcome\":\"ok\",\"ms\":12,\"upstream_ms\":9,\"bytes_in\":0,\"bytes_out\":1834}\n";
+        test.assert_eq(n, len(want));
+        test.assert(bytes.equal(buf[0..n], want));
+    }
+    return 0;
+}
+
+fn test_a_refusal_and_an_abort_carry_their_outcome_and_rule() -> [] int {
+    region a {
+        let buf = alloc_slice[a](accesslog.max_line(), byte_of(0));
+        let n = accesslog.line(buf, 5, "x-1", "POST", "/a", "", "", 413, "limit.body", 1, 3, 0, 0, 0);
+        test.assert(bytes.equal(buf[0..n], "{\"t\":5,\"id\":\"x-1\",\"method\":\"POST\",\"path\":\"/a\",\"route\":\"\",\"upstream\":\"\",\"status\":413,\"rule\":\"limit.body\",\"outcome\":\"refused\",\"ms\":3,\"upstream_ms\":0,\"bytes_in\":0,\"bytes_out\":0}\n"));
+        let m = accesslog.line(buf, 5, "x-1", "GET", "/a", "r", "u", 0, "", 2, 3, 0, 0, 0);
+        test.assert(bytes.equal(buf[0..m], "{\"t\":5,\"id\":\"x-1\",\"method\":\"GET\",\"path\":\"/a\",\"route\":\"r\",\"upstream\":\"u\",\"status\":0,\"rule\":\"\",\"outcome\":\"aborted\",\"ms\":3,\"upstream_ms\":0,\"bytes_in\":0,\"bytes_out\":0}\n"));
+    }
+    return 0;
+}
+
+fn test_the_named_bytes_escape_as_documented() -> [] int {
+    region a {
+        let buf = alloc_slice[a](64, byte_of(0));
+        let src = alloc_slice[a](1, byte_of(0));
+        src[0] = byte_of(0);
+        let (e0, u0) = out.put_json(buf, 0, src, 8, 64);
+        test.assert(bytes.equal(buf[0..e0], "\\u0000"));
+        src[0] = byte_of(10);
+        let (e1, u1) = out.put_json(buf, 0, src, 8, 64);
+        test.assert(bytes.equal(buf[0..e1], "\\u000a"));
+        src[0] = byte_of(127);
+        let (e2, u2) = out.put_json(buf, 0, src, 8, 64);
+        test.assert(bytes.equal(buf[0..e2], "\\u007f"));
+        src[0] = byte_of(128);
+        let (e3, u3) = out.put_json(buf, 0, src, 8, 64);
+        test.assert(bytes.equal(buf[0..e3], "\\u0080"));
+        src[0] = byte_of(255);
+        let (e4, u4) = out.put_json(buf, 0, src, 8, 64);
+        test.assert(bytes.equal(buf[0..e4], "\\u00ff"));
+        src[0] = byte_of(34);
+        let (e5, u5) = out.put_json(buf, 0, src, 8, 64);
+        test.assert(bytes.equal(buf[0..e5], "\\\""));
+        src[0] = byte_of(92);
+        let (e6, u6) = out.put_json(buf, 0, src, 8, 64);
+        test.assert(bytes.equal(buf[0..e6], "\\\\"));
+        src[0] = byte_of(47);
+        let (e7, u7) = out.put_json(buf, 0, src, 8, 64);
+        test.assert(bytes.equal(buf[0..e7], "/"));
+        src[0] = byte_of(32);
+        let (e8, u8) = out.put_json(buf, 0, src, 8, 64);
+        test.assert(bytes.equal(buf[0..e8], " "));
+    }
+    return 0;
+}
+
+fn test_every_byte_value_comes_out_as_printable_ascii_that_is_valid_json() -> [] int {
+    region a {
+        let buf = alloc_slice[a](16, byte_of(0));
+        let src = alloc_slice[a](1, byte_of(0));
+        var c = 0;
+        while c < 256 {
+            src[0] = byte_of(c);
+            let (end, used) = out.put_json(buf, 0, src, 8, 16);
+            test.assert_eq(used, 1);
+            test.assert(end == 1 || end == 2 || end == 6);
+            var i = 0;
+            while i < end {
+                let b = int_of(buf[i]);
+                test.assert(b >= 32 && b < 127);
+                i = i + 1;
+            }
+            // A bare quote or backslash never stands alone.
+            if end == 1 {
+                test.assert(c != 34 && c != 92);
+            }
+            c = c + 1;
+        }
+    }
+    return 0;
+}
+
+fn test_a_long_path_is_cut_at_128_bytes_and_says_so() -> [] int {
+    region a {
+        let buf = alloc_slice[a](accesslog.max_line(), byte_of(0));
+        let path = alloc_slice[a](200, byte_of(97));
+        let n = accesslog.line(buf, 1, "i", "GET", path, "r", "u", 200, "", 0, 1, 1, 0, 0);
+        test.assert(n > 0);
+        let want = alloc_slice[a](400, byte_of(0));
+        var k = out.put(want, 0, "\"path\":\"");
+        var i = 0;
+        while i < 128 {
+            k = out.put_byte(want, k, 'a');
+            i = i + 1;
+        }
+        k = out.put(want, k, "\",\"path_truncated\":true,\"route\"");
+        test.assert(contains(buf[0..n], want[0..k]));
+    }
+    return 0;
+}
+
+fn test_an_escaped_path_is_cut_at_256_output_bytes_between_escapes() -> [] int {
+    region a {
+        let buf = alloc_slice[a](accesslog.max_line(), byte_of(0));
+        let path = alloc_slice[a](128, byte_of(1));
+        let n = accesslog.line(buf, 1, "i", "GET", path, "r", "u", 200, "", 0, 1, 1, 0, 0);
+        test.assert(n > 0);
+        // 256 / 6 = 42 whole escapes (252 bytes); the 43rd would be 258.
+        let want = alloc_slice[a](400, byte_of(0));
+        var k = out.put(want, 0, "\"path\":\"");
+        var i = 0;
+        while i < 42 {
+            k = out.put(want, k, "\\u0001");
+            i = i + 1;
+        }
+        k = out.put(want, k, "\",\"path_truncated\":true");
+        test.assert(contains(buf[0..n], want[0..k]));
+    }
+    return 0;
+}
+
+fn contains[&h, &n](hay: &h [byte], needle: &n [byte]) -> [] bool {
+    if len(needle) > len(hay) {
+        return false;
+    }
+    var i = 0;
+    while i + len(needle) <= len(hay) {
+        if bytes.equal(hay[i..i + len(needle)], needle) {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn test_the_worst_line_fits_the_bound_and_is_one_line() -> [] int {
+    region a {
+        let buf = alloc_slice[a](accesslog.max_line(), byte_of(0));
+        let id = alloc_slice[a](64, byte_of(105));
+        let method = alloc_slice[a](16, byte_of(1));
+        let path = alloc_slice[a](128, byte_of(1));
+        let route = alloc_slice[a](32, byte_of(114));
+        let up = alloc_slice[a](32, byte_of(117));
+        let rule = alloc_slice[a](40, byte_of(108));
+        let n = accesslog.line(buf, 9999999999999, id, method, path, route, up, 504, rule, 2, 2147483647, 2147483647, 1073741824, 9007199254740991);
+        test.assert(n > 0);
+        test.assert(n <= accesslog.max_line());
+        // The only newline is the last byte, and no control byte appears before it.
+        var i = 0;
+        while i < n - 1 {
+            let b = int_of(buf[i]);
+            test.assert(b >= 32 && b < 127);
+            i = i + 1;
+        }
+        test.assert_eq(int_of(buf[n - 1]), 10);
+        test.assert_eq(n, 676);
+    }
+    return 0;
+}
+
+fn test_a_window_that_is_too_small_is_refused_not_overrun() -> [] int {
+    region a {
+        let buf = alloc_slice[a](40, byte_of(0));
+        test.assert_eq(accesslog.line(buf, 1, "i", "GET", "/", "r", "u", 200, "", 0, 1, 1, 0, 0), 0 - 1);
+    }
+    return 0;
+}
+
+fn test_the_dropped_line() -> [] int {
+    region a {
+        let buf = alloc_slice[a](64, byte_of(0));
+        let n = accesslog.dropped_line(buf, 77, 12);
+        test.assert(bytes.equal(buf[0..n], "{\"t\":77,\"log_dropped\":12}\n"));
+    }
+    return 0;
+}
+
+fn test_hex_is_padded_and_lowercase() -> [] int {
+    region a {
+        let buf = alloc_slice[a](32, byte_of(0));
+        let n = out.put_hex(buf, 0, 255, 8);
+        test.assert(bytes.equal(buf[0..n], "000000ff"));
+        let m = out.put_hex(buf, 0, 0, 1);
+        test.assert(bytes.equal(buf[0..m], "0"));
+        let q = out.put_hex(buf, 0, 4294967295, 1);
+        test.assert(bytes.equal(buf[0..q], "ffffffff"));
+    }
+    return 0;
+}

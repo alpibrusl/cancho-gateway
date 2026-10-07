@@ -13,7 +13,7 @@ fn rewrites_to(req: &static [byte], keep: bool, trust: bool, want: &static [byte
         let table = alloc_slice[a](http.slots(32), 0);
         let out = alloc_slice[a](2048, byte_of(0));
         if http.parse(req, table) > 0 {
-            let n = forward.rewrite(req, table, out, keep, trust, 26, 8080, 42);
+            let n = forward.rewrite(req, table, out, keep, trust, "1a-1f90-0000002a");
             ok = n == len(want) && bytes.equal(out[0..n], want);
         }
     }
@@ -49,11 +49,11 @@ fn test_a_connection_header_may_not_name_the_framing_headers() -> [] int {
         let table = alloc_slice[a](http.slots(16), 0);
         let out = alloc_slice[a](1024, byte_of(0));
         test.assert(http.parse("POST / HTTP/1.1\r\nHost: a\r\nConnection: Content-Length\r\nContent-Length: 0\r\n\r\n", table) > 0);
-        test.assert_eq(forward.rewrite("POST / HTTP/1.1\r\nHost: a\r\nConnection: Content-Length\r\nContent-Length: 0\r\n\r\n", table, out, false, false, 1, 1, 1), 0 - 1);
+        test.assert_eq(forward.rewrite("POST / HTTP/1.1\r\nHost: a\r\nConnection: Content-Length\r\nContent-Length: 0\r\n\r\n", table, out, false, false, "i"), 0 - 1);
         test.assert(http.parse("POST / HTTP/1.1\r\nHost: a\r\nConnection: close, transfer-encoding\r\nTransfer-Encoding: chunked\r\n\r\n", table) > 0);
-        test.assert_eq(forward.rewrite("POST / HTTP/1.1\r\nHost: a\r\nConnection: close, transfer-encoding\r\nTransfer-Encoding: chunked\r\n\r\n", table, out, false, false, 1, 1, 1), 0 - 1);
+        test.assert_eq(forward.rewrite("POST / HTTP/1.1\r\nHost: a\r\nConnection: close, transfer-encoding\r\nTransfer-Encoding: chunked\r\n\r\n", table, out, false, false, "i"), 0 - 1);
         test.assert(http.parse("GET / HTTP/1.1\r\nHost: a\r\nConnection: HOST\r\n\r\n", table) > 0);
-        test.assert_eq(forward.rewrite("GET / HTTP/1.1\r\nHost: a\r\nConnection: HOST\r\n\r\n", table, out, false, false, 1, 1, 1), 0 - 1);
+        test.assert_eq(forward.rewrite("GET / HTTP/1.1\r\nHost: a\r\nConnection: HOST\r\n\r\n", table, out, false, false, "i"), 0 - 1);
     }
     return 0;
 }
@@ -77,7 +77,7 @@ fn test_a_head_that_does_not_fit_is_refused() -> [] int {
         let out = alloc_slice[a](30, byte_of(0));
         let req = "GET / HTTP/1.1\r\nHost: a.example\r\n\r\n";
         test.assert(http.parse(req, table) > 0);
-        test.assert_eq(forward.rewrite(req, table, out, false, false, 1, 1, 1), 0 - 2);
+        test.assert_eq(forward.rewrite(req, table, out, false, false, "i"), 0 - 2);
     }
     return 0;
 }
@@ -101,8 +101,8 @@ fn test_the_response_head_loses_hop_by_hop_headers_and_closes() -> [] int {
         let resp = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive, X-Drop\r\nX-Drop: 1\r\nKeep-Alive: timeout=5\r\nX-Kept: 2\r\n\r\nhello";
         let head = response.parse(resp, table);
         test.assert(head > 0);
-        let n = forward.rewrite_response(resp[0..head], table, out);
-        let want = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Kept: 2\r\nVia: 1.1 cancho-gateway\r\nConnection: close\r\n\r\n";
+        let n = forward.rewrite_response(resp[0..head], table, out, "i-7");
+        let want = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Kept: 2\r\nVia: 1.1 cancho-gateway\r\nX-Request-Id: i-7\r\nConnection: close\r\n\r\n";
         test.assert_eq(n, len(want));
         test.assert(bytes.equal(out[0..n], want));
     }
@@ -115,7 +115,7 @@ fn test_a_response_head_that_does_not_fit_is_refused() -> [] int {
         let out = alloc_slice[a](20, byte_of(0));
         let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
         test.assert(response.parse(resp, table) > 0);
-        test.assert_eq(forward.rewrite_response(resp, table, out), 0 - 1);
+        test.assert_eq(forward.rewrite_response(resp, table, out, "i-7"), 0 - 1);
     }
     return 0;
 }
@@ -171,17 +171,38 @@ fn test_via_is_appended_after_the_clients_via() -> [] int {
 
 fn test_the_generated_id_is_stamp_port_sequence_in_hex() -> [] int {
     region a {
-        let table = alloc_slice[a](http.slots(16), 0);
-        let out = alloc_slice[a](1024, byte_of(0));
-        let req = "GET / HTTP/1.1\r\nHost: a\r\n\r\n";
-        test.assert(http.parse(req, table) > 0);
-        let n = forward.rewrite(req, table, out, true, false, 439041101823, 65535, 4294967295);
-        let want = "GET / HTTP/1.1\r\nHost: a\r\nVia: 1.1 cancho-gateway\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 6638e38fff-ffff-ffffffff\r\n\r\n";
-        test.assert_eq(n, len(want));
-        test.assert(bytes.equal(out[0..n], want));
+        let out = alloc_slice[a](64, byte_of(0));
+        let n = forward.put_generated_id(out, 0, 439041101823, 65535, 4294967295);
+        test.assert(bytes.equal(out[0..n], "6638e38fff-ffff-ffffffff"));
         // Small numbers are padded to eight digits in the sequence only.
-        let m = forward.rewrite(req, table, out, true, false, 0, 1, 1);
-        test.assert(bytes.equal(out[0..m], "GET / HTTP/1.1\r\nHost: a\r\nVia: 1.1 cancho-gateway\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 0-1-00000001\r\n\r\n"));
+        let m = forward.put_generated_id(out, 0, 0, 1, 1);
+        test.assert(bytes.equal(out[0..m], "0-1-00000001"));
+        let q = forward.put_generated_id(out, 5, 26, 8080, 42);
+        test.assert(bytes.equal(out[5..q], "1a-1f90-0000002a"));
+    }
+    return 0;
+}
+
+fn test_the_choice_of_a_clients_id() -> [] int {
+    region a {
+        let table = alloc_slice[a](http.slots(16), 0);
+        let one = "GET / HTTP/1.1\r\nHost: a\r\nAccept: */*\r\nX-Request-Id: edge-1\r\n\r\n";
+        test.assert(http.parse(one, table) > 0);
+        test.assert_eq(forward.id_choice(one, table, true), 2);
+        test.assert(bytes.equal(forward.id_value(one, table, 2), "edge-1"));
+        test.assert_eq(forward.id_choice(one, table, false), 0 - 1);
+        let two = "GET / HTTP/1.1\r\nHost: a\r\nX-Request-Id: a\r\nX-Request-Id: b\r\n\r\n";
+        test.assert(http.parse(two, table) > 0);
+        test.assert_eq(forward.id_choice(two, table, true), 0 - 1);
+        let bad = "GET / HTTP/1.1\r\nHost: a\r\nX-Request-Id: a b\r\n\r\n";
+        test.assert(http.parse(bad, table) > 0);
+        test.assert_eq(forward.id_choice(bad, table, true), 0 - 1);
+        let named = "GET / HTTP/1.1\r\nHost: a\r\nConnection: x-request-id\r\nX-Request-Id: ok\r\n\r\n";
+        test.assert(http.parse(named, table) > 0);
+        test.assert_eq(forward.id_choice(named, table, true), 0 - 1);
+        let none = "GET / HTTP/1.1\r\nHost: a\r\n\r\n";
+        test.assert(http.parse(none, table) > 0);
+        test.assert_eq(forward.id_choice(none, table, true), 0 - 1);
     }
     return 0;
 }
@@ -193,8 +214,21 @@ fn test_the_response_gets_a_via_and_keeps_the_upstreams() -> [] int {
         let resp = "HTTP/1.1 200 OK\r\nVia: 1.0 origin\r\nContent-Length: 0\r\n\r\n";
         let head = response.parse(resp, table);
         test.assert(head > 0);
-        let n = forward.rewrite_response(resp[0..head], table, out);
-        test.assert(bytes.equal(out[0..n], "HTTP/1.1 200 OK\r\nVia: 1.0 origin\r\nContent-Length: 0\r\nVia: 1.1 cancho-gateway\r\nConnection: close\r\n\r\n"));
+        let n = forward.rewrite_response(resp[0..head], table, out, "i-7");
+        test.assert(bytes.equal(out[0..n], "HTTP/1.1 200 OK\r\nVia: 1.0 origin\r\nContent-Length: 0\r\nVia: 1.1 cancho-gateway\r\nX-Request-Id: i-7\r\nConnection: close\r\n\r\n"));
+    }
+    return 0;
+}
+
+fn test_the_upstreams_own_request_id_is_replaced_by_the_requests() -> [] int {
+    region a {
+        let table = alloc_slice[a](response.slots(16), 0);
+        let out = alloc_slice[a](1024, byte_of(0));
+        let resp = "HTTP/1.1 200 OK\r\nx-request-id: theirs\r\nContent-Length: 0\r\nX-Request-Id: also-theirs\r\n\r\n";
+        let head = response.parse(resp, table);
+        test.assert(head > 0);
+        let n = forward.rewrite_response(resp[0..head], table, out, "ours");
+        test.assert(bytes.equal(out[0..n], "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nVia: 1.1 cancho-gateway\r\nX-Request-Id: ours\r\nConnection: close\r\n\r\n"));
     }
     return 0;
 }

@@ -1,0 +1,77 @@
+edition 5;
+
+module gateway.accesslog;
+
+import gateway.out;
+
+// One JSON line per request (docs/observability.md section 2), built into a caller's window. Pure: no effect, no allocation. The
+// caller queues the line and the loop writes it (section 3).
+//
+// Every string is escaped by `out.put_json`, and every field has a cap, so a hostile request can neither make the line unparseable nor
+// longer than `max_line()`: the path is cut at 128 input bytes and 256 output bytes, the method at 16, and the names, the tag and the id
+// come from sets the gateway itself controls (the generator's name pattern, the rule tables, the id format).
+
+pub fn max_line() -> [] int {
+    return 768;
+}
+
+// `outcome`: 0 ok (the response was relayed whole), 1 refused (the gateway answered; `rule` says why), 2 aborted (a side went away, or
+// the total deadline cut a response that had begun).
+fn outcome_text(outcome: int) -> [] &static [byte] {
+    if outcome == 0 {
+        return "ok";
+    }
+    if outcome == 1 {
+        return "refused";
+    }
+    return "aborted";
+}
+
+fn put_field[&o, &s](out: &!o [byte], at: int, key: &static [byte], value: &s [byte], max_in: int, max_out: int) -> [] int {
+    var k = out.put(out, at, ",\"");
+    k = out.put(out, k, key);
+    k = out.put(out, k, "\":\"");
+    let (end, used) = out.put_json(out, k, value, max_in, max_out);
+    return out.put(out, end, "\"");
+}
+
+fn put_number[&o](out: &!o [byte], at: int, key: &static [byte], value: int) -> [] int {
+    var k = out.put(out, at, ",\"");
+    k = out.put(out, k, key);
+    k = out.put(out, k, "\":");
+    return out.put_int(out, k, value);
+}
+
+// The line for one request, with its newline, from offset 0 of `out`; answers its length, or `0 - 1` if `out` is too small.
+pub fn line[&o, &i, &m, &p, &r, &u, &l](out: &!o [byte], t: int, id: &i [byte], method: &m [byte], path: &p [byte], route: &r [byte], upstream: &u [byte], status: int, rule: &l [byte], outcome: int, ms: int, upstream_ms: int, bytes_in: int, bytes_out: int) -> [] int {
+    var k = out.put(out, 0, "{\"t\":");
+    k = out.put_int(out, k, t);
+    k = put_field(out, k, "id", id, 64, 64);
+    k = put_field(out, k, "method", method, 16, 24);
+    k = out.put(out, k, ",\"path\":\"");
+    let (end, used) = out.put_json(out, k, path, 128, 256);
+    k = out.put(out, end, "\"");
+    if used < len(path) {
+        k = out.put(out, k, ",\"path_truncated\":true");
+    }
+    k = put_field(out, k, "route", route, 32, 32);
+    k = put_field(out, k, "upstream", upstream, 32, 32);
+    k = put_number(out, k, "status", status);
+    k = put_field(out, k, "rule", rule, 40, 40);
+    k = put_field(out, k, "outcome", outcome_text(outcome), 8, 8);
+    k = put_number(out, k, "ms", ms);
+    k = put_number(out, k, "upstream_ms", upstream_ms);
+    k = put_number(out, k, "bytes_in", bytes_in);
+    k = put_number(out, k, "bytes_out", bytes_out);
+    k = out.put(out, k, "}\n");
+    return k;
+}
+
+// The line that announces `dropped` lines lost to a full queue.
+pub fn dropped_line[&o](out: &!o [byte], t: int, dropped: int) -> [] int {
+    var k = out.put(out, 0, "{\"t\":");
+    k = out.put_int(out, k, t);
+    k = out.put(out, k, ",\"log_dropped\":");
+    k = out.put_int(out, k, dropped);
+    return out.put(out, k, "}\n");
+}

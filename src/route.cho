@@ -234,6 +234,13 @@ pub fn max_body(index: int) -> [] int {
     return number(bytes.field(blob[at..line_end(blob, at)], 9, 5));
 }
 
+// The name of route `index` (`[a-z][a-z0-9_-]{0,31}`, validated by the generator): what the access log calls the route.
+pub fn name(index: int) -> [] &static [byte] {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return bytes.field(blob[at..line_end(blob, at)], 9, 7);
+}
+
 // 1 if route `index` trusts the forwarding headers of the party in front of the gateway (docs/headers.md section 2), else 0.
 pub fn trust_forwarded(index: int) -> [] int {
     let blob = routes_table.blob();

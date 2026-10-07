@@ -34,6 +34,7 @@
     "line_start",
     "max_body",
     "method_bit",
+    "name",
     "number",
     "path_ok",
     "prefix_matches",
@@ -46,5 +47,5 @@
   ],
   "folded_operators": 9,
   "folded_calls": 0,
-  "functions": 28
+  "functions": 29
 }

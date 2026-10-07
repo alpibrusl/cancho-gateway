@@ -10,10 +10,11 @@ import gateway.out;
 //
 //     HTTP/1.1 404 Not Found
 //     Content-Type: application/problem+json
-//     Content-Length: 80
+//     Content-Length: 123
+//     X-Request-Id: 19b3c2a1f00-1f90-0000002a
 //     Connection: close
 //
-//     {"type":"about:blank","title":"Not Found","status":404,"rule":"route.none"}
+//     {"type":"about:blank","title":"Not Found","status":404,"rule":"route.none","request_id":"19b3c2a1f00-1f90-0000002a"}
 
 pub fn reason(status: int) -> [] &static [byte] {
     if status == 400 {
@@ -52,28 +53,33 @@ pub fn reason(status: int) -> [] &static [byte] {
     return "Error";
 }
 
-// The body alone, at `at`; answers the new offset.
-pub fn body[&o, &t](out: &!o [byte], at: int, status: int, rule: &t [byte]) -> [] int {
+// The body alone, at `at`; answers the new offset. `id` is the request's id (docs/observability.md section 4): a member of the body so
+// that a client or an agent can quote it.
+pub fn body[&o, &t, &d](out: &!o [byte], at: int, status: int, rule: &t [byte], id: &d [byte]) -> [] int {
     var k = out.put(out, at, "{\"type\":\"about:blank\",\"title\":\"");
     k = out.put(out, k, reason(status));
     k = out.put(out, k, "\",\"status\":");
     k = out.put_int(out, k, status);
     k = out.put(out, k, ",\"rule\":\"");
     k = out.put(out, k, rule);
+    k = out.put(out, k, "\",\"request_id\":\"");
+    k = out.put(out, k, id);
     return out.put(out, k, "\"}");
 }
 
-// Head and body, from offset 0; answers the length, or `0 - 1` if `out` is too small.
-pub fn response[&o, &t](out: &!o [byte], status: int, rule: &t [byte]) -> [] int {
+// Head and body, from offset 0; answers the length, or `0 - 1` if `out` is too small. The head carries the id too.
+pub fn response[&o, &t, &d](out: &!o [byte], status: int, rule: &t [byte], id: &d [byte]) -> [] int {
     // The body's length is known without writing it twice: everything but the variable parts is fixed.
-    let fixed = len("{\"type\":\"about:blank\",\"title\":\"") + len("\",\"status\":") + len(",\"rule\":\"") + len("\"}");
-    let length = fixed + len(reason(status)) + out.digits(status) + len(rule);
+    let fixed = len("{\"type\":\"about:blank\",\"title\":\"") + len("\",\"status\":") + len(",\"rule\":\"") + len("\",\"request_id\":\"") + len("\"}");
+    let length = fixed + len(reason(status)) + out.digits(status) + len(rule) + len(id);
     var k = out.put(out, 0, "HTTP/1.1 ");
     k = out.put_int(out, k, status);
     k = out.put(out, k, " ");
     k = out.put(out, k, reason(status));
     k = out.put(out, k, "\r\nContent-Type: application/problem+json\r\nContent-Length: ");
     k = out.put_int(out, k, length);
+    k = out.put(out, k, "\r\nX-Request-Id: ");
+    k = out.put(out, k, id);
     k = out.put(out, k, "\r\nConnection: close\r\n\r\n");
-    return body(out, k, status, rule);
+    return body(out, k, status, rule, id);
 }

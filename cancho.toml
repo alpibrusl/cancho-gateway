@@ -7,7 +7,7 @@ cancho = "a4572ea3b506e4bcec1c4be43deda1043c11ba9f"   # the compiler these sourc
 
 [[bin]]
 name = "gateway"
-sources = ["generated/deploy.cho", "generated/routes.cho", "src/out.cho", "src/problem.cho", "src/framing.cho", "src/chunked.cho", "src/route.cho", "src/response.cho", "src/forward.cho", "src/egress.cho", "src/proxy.cho", "src/version.cho", "src/gateway.cho"]
+sources = ["generated/deploy.cho", "generated/routes.cho", "src/out.cho", "src/accesslog.cho", "src/problem.cho", "src/framing.cho", "src/chunked.cho", "src/route.cho", "src/response.cho", "src/forward.cho", "src/egress.cho", "src/proxy.cho", "src/version.cho", "src/gateway.cho"]
 std = true
 out = "build/gateway"
 
@@ -47,4 +47,9 @@ std = true
 [[test]]
 name = "forward"
 sources = ["src/out.cho", "src/response.cho", "src/forward.cho", "tests/forward_test.cho"]
+std = true
+
+[[test]]
+name = "accesslog"
+sources = ["src/out.cho", "src/accesslog.cho", "tests/accesslog_test.cho"]
 std = true
