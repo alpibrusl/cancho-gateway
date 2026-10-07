@@ -11,11 +11,15 @@ parsing (`std.http`) is the defence against request smuggling.
 The model is [`cancho-cache`](https://github.com/alpibrusl/cancho-cache): one thread, one poller, memory sized at start,
 every input bounded with its own refusal, and measurements against the incumbent (nginx, HAProxy) fixed before the code.
 
-**Status: a working first slice, not a finished gateway.** It accepts, frames and routes requests, forwards them to a compiled-in
-upstream and relays the response, with deadlines, backpressure and problem+json refusals, all tested end to end
-(`docs/proxy.md`). It keeps upstream connections alive in a bounded pool (`docs/pool.md`). It stops sending requests to an upstream that keeps failing (`docs/health.md`). It has **no client-side keep-alive, no active health checks, no authentication, no rate limiting, no access log, no header
-policy beyond hop-by-hop stripping**, and has not been benchmarked. The plan and its tasks are in the epic issue; the design is
-`docs/design.md`.
+**Status: a working gateway slice, not a finished one.** It accepts, frames and routes requests, forwards them to a compiled-in upstream
+and relays the response, with deadlines, backpressure and problem+json refusals, all tested end to end (`docs/proxy.md`). It keeps upstream
+connections alive in a bounded pool (`docs/pool.md`), stops sending requests to an upstream that keeps failing (`docs/health.md`), applies a
+header policy (`Via`, `X-Forwarded-Host/Proto`, a request id, untrusted forwarding claims removed: `docs/headers.md`), writes one JSON
+access-log line per request to stdout (`docs/observability.md`) and echoes the request id in every response and error. It has been benchmarked
+against nginx, HAProxy, Envoy, Caddy, Traefik and Kong, and **loses to nginx and HAProxy on most cells** (`docs/bench.md`, sections 8 and 10).
+It has **no client-side keep-alive, no active health checks, no authentication, no rate limiting, no metrics endpoint yet** (#10's second
+slice), no TLS and no `X-Forwarded-For` of its own (the compiler gives no peer address). The plan and its tasks are in the epic issue; the design
+is `docs/design.md`.
 
 ## Intended scope (v1)
 

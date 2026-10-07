@@ -109,12 +109,13 @@ fn first_line_end[&s](src: &s [byte]) -> [] int {
     return 0;
 }
 
-// The headers of a message minus the hop-by-hop ones and any a `Connection` header names, as `name: value` lines.
+// The headers of a response minus the hop-by-hop ones, any a `Connection` header names and an `X-Request-Id` of the upstream's own (the
+// gateway writes the request's), as `name: value` lines.
 fn copy_headers[&s, &t, &o](src: &s [byte], table: &t [int], count: int, out: &!o [byte], at: int) -> [] int {
     var k = at;
     var i = 0;
     while i < count {
-        if !hop_by_hop(name_of(src, table, i)) && !named_by_connection(src, table, count, i) {
+        if !hop_by_hop(name_of(src, table, i)) && !named_by_connection(src, table, count, i) && !is(name_of(src, table, i), "x-request-id") {
             k = out.put(out, k, name_of(src, table, i));
             k = out.put(out, k, ": ");
             k = out.put(out, k, value_of(src, table, i));
@@ -161,15 +162,52 @@ fn count_named[&s, &t, &l](src: &s [byte], table: &t [int], count: int, lower: &
     return n;
 }
 
+// The index of the header whose value is the request's id, or `0 - 1` if the gateway makes one up: only on a route that trusts the
+// party in front, only if the client sent exactly one `X-Request-Id`, only if its value is valid (`id_valid`) and the header
+// survives the `Connection` rule. The proxy asks this to decide the id it will log and echo; `rewrite` asks it to decide what to copy,
+// so the two cannot disagree.
+pub fn id_choice[&s, &t](src: &s [byte], table: &t [int], trust: bool) -> [] int {
+    let count = http.header_count(table);
+    if !trust || count_named(src, table, count, "x-request-id") != 1 {
+        return 0 - 1;
+    }
+    var i = 0;
+    while i < count {
+        if is(name_of(src, table, i), "x-request-id") {
+            if !named_by_connection(src, table, count, i) && !hop_by_hop(name_of(src, table, i)) && id_valid(value_of(src, table, i)) {
+                return i;
+            }
+            return 0 - 1;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+// The value of header `i` of a parsed request, as `id_choice` answers it.
+pub fn id_value[&s, &t](src: &s [byte], table: &t [int], i: int) -> [] &s [byte] {
+    return value_of(src, table, i);
+}
+
+// The id the gateway makes up for a request, `<stamp>-<port>-<seq>` in hex (docs/headers.md section 3), from offset `at`; answers the
+// new offset.
+pub fn put_generated_id[&o](out: &!o [byte], at: int, stamp: int, port: int, seq: int) -> [] int {
+    var k = out.put_hex(out, at, stamp, 1);
+    k = out.put(out, k, "-");
+    k = out.put_hex(out, k, port, 1);
+    k = out.put(out, k, "-");
+    return out.put_hex(out, k, seq, 8);
+}
+
 // Write the request head into `out` from offset 0; answers its length, or `0 - rule`. `src` and `table` are a request
 // `std.http.parse` accepted. The request line is rebuilt as HTTP/1.1 whatever the client spoke, so the upstream may keep the
 // connection open; `keep_alive` false adds `Connection: close` for an upstream that must not.
 //
 // The header policy (docs/headers.md section 2): hop-by-hop headers and those a `Connection` header names are removed; unless
 // `trust` (the route trusts the party in front) the client's `Forwarded`, `X-Forwarded-*` and `X-Real-IP` are removed and
-// `X-Forwarded-Host` (the Host as received) and `X-Forwarded-Proto: http` are added; `Via` is appended; `X-Request-Id` is kept
-// only if `trust` and the client sent exactly one with a valid value, else a generated one, `<stamp>-<port>-<seq>` in hex, is added.
-pub fn rewrite[&s, &t, &o](src: &s [byte], table: &t [int], out: &!o [byte], keep_alive: bool, trust: bool, id_stamp: int, id_port: int, id_seq: int) -> [] int {
+// `X-Forwarded-Host` (the Host as received) and `X-Forwarded-Proto: http` are added; `Via` is appended; `X-Request-Id` is the client's
+// own where `id_choice` says it is believed, else `id` (the one the proxy fixed for the session) is added.
+pub fn rewrite[&s, &t, &o, &d](src: &s [byte], table: &t [int], out: &!o [byte], keep_alive: bool, trust: bool, id: &d [byte]) -> [] int {
     let count = http.header_count(table);
     if connection_lists(src, table, count, "content-length") || connection_lists(src, table, count, "transfer-encoding") || connection_lists(src, table, count, "host") {
         return 0 - 1;
@@ -178,8 +216,7 @@ pub fn rewrite[&s, &t, &o](src: &s [byte], table: &t [int], out: &!o [byte], kee
     k = out.put(out, k, " ");
     k = out.put(out, k, http.target(src, table));
     k = out.put(out, k, " HTTP/1.1\r\n");
-    let ids = count_named(src, table, count, "x-request-id");
-    var kept_id = false;
+    let kept = id_choice(src, table, trust);
     var i = 0;
     while i < count {
         let name = name_of(src, table, i);
@@ -188,10 +225,7 @@ pub fn rewrite[&s, &t, &o](src: &s [byte], table: &t [int], out: &!o [byte], kee
             copy = false;
         }
         if copy && is(name, "x-request-id") {
-            copy = trust && ids == 1 && id_valid(value_of(src, table, i));
-            if copy {
-                kept_id = true;
-            }
+            copy = i == kept;
         }
         if copy {
             k = out.put(out, k, name);
@@ -207,13 +241,9 @@ pub fn rewrite[&s, &t, &o](src: &s [byte], table: &t [int], out: &!o [byte], kee
         k = out.put(out, k, http.header(src, table, "host"));
         k = out.put(out, k, "\r\nX-Forwarded-Proto: http\r\n");
     }
-    if !kept_id {
+    if kept < 0 {
         k = out.put(out, k, "X-Request-Id: ");
-        k = out.put_hex(out, k, id_stamp, 1);
-        k = out.put(out, k, "-");
-        k = out.put_hex(out, k, id_port, 1);
-        k = out.put(out, k, "-");
-        k = out.put_hex(out, k, id_seq, 8);
+        k = out.put(out, k, id);
         k = out.put(out, k, "\r\n");
     }
     if !keep_alive {
@@ -227,12 +257,15 @@ pub fn rewrite[&s, &t, &o](src: &s [byte], table: &t [int], out: &!o [byte], kee
 }
 
 // Write the response head for the client into `out` from offset 0: the upstream's status line and headers, minus the hop-by-hop
-// ones, then `Connection: close` (the client's connection closes after the response in this slice). `src` and `table` are a
-// head `response.parse` accepted. Answers the length, or `0 - 1` if it does not fit.
-pub fn rewrite_response[&s, &t, &o](src: &s [byte], table: &t [int], out: &!o [byte]) -> [] int {
+// ones and any `X-Request-Id` of its own, then `Via`, the request's id (`id`: the one in the access log) and `Connection: close` (the
+// client's connection closes after the response in this slice). `src` and `table` are a head `response.parse` accepted. Answers the
+// length, or `0 - 1` if it does not fit.
+pub fn rewrite_response[&s, &t, &o, &d](src: &s [byte], table: &t [int], out: &!o [byte], id: &d [byte]) -> [] int {
     var k = out.put(out, 0, src[0..first_line_end(src)]);
     k = copy_headers(src, table, table[2], out, k);
-    k = out.put(out, k, "Via: 1.1 cancho-gateway\r\nConnection: close\r\n\r\n");
+    k = out.put(out, k, "Via: 1.1 cancho-gateway\r\nX-Request-Id: ");
+    k = out.put(out, k, id);
+    k = out.put(out, k, "\r\nConnection: close\r\n\r\n");
     if k < 0 {
         return 0 - 1;
     }

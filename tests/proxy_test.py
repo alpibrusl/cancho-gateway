@@ -22,7 +22,7 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LEX = os.environ.get("CANCHO", "cancho")
-SOURCES = ["out", "problem", "framing", "chunked", "route", "response", "forward", "egress", "proxy", "version", "gateway"]
+SOURCES = ["out", "accesslog", "problem", "framing", "chunked", "route", "response", "forward", "egress", "proxy", "version", "gateway"]
 
 
 def free_port():
@@ -122,6 +122,13 @@ class Upstream:
                 for _ in range(30):
                     c.sendall(b"x")
                     time.sleep(0.01)
+            elif path.startswith("/s404"):
+                c.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 4\r\nConnection: close\r\n\r\ngone")
+            elif path.startswith("/delay"):
+                time.sleep(0.3)
+                c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            elif path.startswith("/xrid"):
+                c.sendall(b"HTTP/1.1 200 OK\r\nX-Request-Id: theirs\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
             elif path.startswith("/stall"):
                 c.settimeout(8)
                 try:
@@ -412,7 +419,7 @@ class FlapUpstream:
 
 
 class Gateway:
-    def __init__(self, tmp, port, up_port, dead_port, ka_port, flap_port, pool=4, circuit=3):
+    def __init__(self, tmp, port, up_port, dead_port, ka_port, flap_port, pool=4, circuit=3, logq=None, read=True, stdout=None, log_failure=None):
         deploy = pathlib.Path(tmp) / "deploy.toml"
         deploy.write_text("""listen = %d
 header_timeout_ms = 1000
@@ -423,7 +430,7 @@ idle_timeout_ms = 500
 pool_idle_max = %d
 circuit_threshold = %d
 circuit_open_ms = 1000
-
+%s
 [[upstream]]
 name = "up"
 addr = "127.0.0.1:%d"
@@ -441,42 +448,88 @@ name = "flap"
 addr = "127.0.0.1:%d"
 
 [[route]]
+name = "dead"
 path_prefix = "/dead"
 upstream = "dead"
 
 [[route]]
+name = "ka"
 path_prefix = "/ka"
 upstream = "ka"
 max_body = 1048576
 
 [[route]]
+name = "flap"
 path_prefix = "/flap"
 upstream = "flap"
 
 [[route]]
+name = "trusted"
 path_prefix = "/trusted"
 upstream = "up"
 trust_forwarded = true
 
 [[route]]
+name = "main"
 path_prefix = "/"
 upstream = "up"
 max_body = 1048576
-""" % (port, pool, circuit, up_port, dead_port, ka_port, flap_port))
+""" % (port, pool, circuit, 'log_failure = "%s"' % log_failure if log_failure else "", up_port, dead_port, ka_port, flap_port))
         subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(deploy), "--out", tmp], check=True)
         files = [os.path.join(tmp, "deploy.cho"), os.path.join(tmp, "routes.cho")] + [str(ROOT / "src" / (n + ".cho")) for n in SOURCES]
+        if logq:
+            # A build whose access-log queue is `logq` bytes, to reach the full-queue case without a million requests.
+            source = (ROOT / "src" / "proxy.cho").read_text()
+            assert "return 262144;" in source
+            patched = os.path.join(tmp, "proxy_small_queue.cho")
+            pathlib.Path(patched).write_text(source.replace("return 262144;", "return %d;" % logq))
+            files = [patched if f.endswith("/src/proxy.cho") else f for f in files]
         built = subprocess.run([LEX, "build", "--std", *files, "-o", os.path.join(tmp, "gateway")], capture_output=True, text=True)
         if built.returncode != 0:
             raise SystemExit("build failed: " + built.stderr[:400])
         self.port = port
-        self.proc = subprocess.Popen([os.path.join(tmp, "gateway")], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.proc = subprocess.Popen([os.path.join(tmp, "gateway")], stdout=stdout or subprocess.PIPE, stderr=subprocess.PIPE)
+        # The access log (docs/observability.md): the gateway's stdout, read as it comes so that the pipe never fills.
+        self.log = []
+        self.log_lock = threading.Lock()
+        self.reading = False
+        if read and not stdout:
+            self.start_reader()
+        # The readiness probe below is a connection too, and it gets a line when the gateway sees it leave.
         for _ in range(100):
             try:
                 socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+                end = time.time() + 3
+                while read and not stdout and not self.log_lines() and time.time() < end:
+                    time.sleep(0.02)
                 return
             except OSError:
                 time.sleep(0.05)
         raise SystemExit("gateway did not start")
+
+    def start_reader(self):
+        if not self.reading:
+            self.reading = True
+            threading.Thread(target=self.read_log, daemon=True).start()
+
+    def read_log(self):
+        for raw in self.proc.stdout:
+            with self.log_lock:
+                self.log.append(raw)
+
+    def log_lines(self):
+        """The raw lines written so far (bytes, each with its newline)."""
+        with self.log_lock:
+            return list(self.log)
+
+    def log_since(self, n, want=None, wait=2.0):
+        """The access-log lines after the first `n`, parsed; waits up to `wait` seconds for `want` of them."""
+        end = time.time() + wait
+        while True:
+            lines = self.log_lines()[n:]
+            if want is None or len(lines) >= want or time.time() > end:
+                return [json.loads(l) for l in lines]
+            time.sleep(0.02)
 
     def alive(self):
         return self.proc.poll() is None
@@ -518,6 +571,17 @@ def request(gw, raw, read=True, timeout=6, trickle=0.0, pause=0.0):
             out += b"[%s]" % str(e).encode()
     s.close()
     return out
+
+
+def logged(gw, raw, want=1, **kw):
+    """Send `raw`; answer the response and the access-log lines (parsed) it caused."""
+    n0 = len(gw.log_lines())
+    response = request(gw, raw, **kw)
+    return response, gw.log_since(n0, want)
+
+
+def seen_id(up, n):
+    return heads_of(up.heads[n])["x-request-id"][0]
 
 
 def heads_of(head):
@@ -661,6 +725,203 @@ class T:
             assert status == 200 and got == body, (status, len(got))
             slow += time.time() - t0 > 0.03
         assert slow <= 3, "%d of 40 requests took more than 30 ms" % slow
+
+    def access_log_has_one_line_per_request_with_its_fields(gw, up):
+        n, n0 = len(up.heads), len(gw.log_lines())
+        raw = request(gw, GET % b"/x?token=SECRET&a=1")
+        lines = gw.log_since(n0, 1)
+        time.sleep(0.2)
+        assert len(gw.log_since(n0)) == 1, "exactly one line for one request"
+        e = lines[0]
+        assert list(e) == ["t", "id", "method", "path", "route", "upstream", "status", "rule", "outcome", "ms", "upstream_ms", "bytes_in", "bytes_out"], list(e)
+        assert (e["method"], e["path"], e["route"], e["upstream"], e["status"], e["rule"], e["outcome"]) == ("GET", "/x", "main", "up", 200, "", "ok"), e
+        assert abs(e["t"] - time.time() * 1000) < 10000 and e["ms"] >= 0 and e["upstream_ms"] >= 0 and e["bytes_in"] == 0, e
+        assert e["bytes_out"] == len(raw), (e["bytes_out"], len(raw))
+        assert b"SECRET" not in gw.log_lines()[-1] and b"token" not in gw.log_lines()[-1], "no query string in the log"
+        # The id is the one the upstream saw and the client was given.
+        assert e["id"] == seen_id(up, n) and re.search(rb"\r\nX-Request-Id: " + e["id"].encode() + rb"\r\n", raw), (e["id"], raw[:200])
+
+    def access_log_bytes_in_counts_the_forwarded_body(gw, up):
+        body = os.urandom(5000)
+        raw, lines = logged(gw, b"POST /echo HTTP/1.1\r\nHost: a\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+        e = lines[0]
+        assert (e["method"], e["path"], e["status"], e["bytes_in"]) == ("POST", "/echo", 200, 5000), e
+        assert e["bytes_out"] == len(raw), (e["bytes_out"], len(raw))
+
+    def access_log_refusals_carry_their_rule_and_the_id_is_in_the_body(gw, up):
+        cases = [
+            (b"GET /x HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n", 400, "framing.two-lengths", "", ""),
+            (b"GET /a/../b HTTP/1.1\r\nHost: a\r\n\r\n", 400, "route.path", "GET", "/a/../b"),
+            (b"POST /x HTTP/1.1\r\nHost: a\r\nContent-Length: 2000000\r\n\r\n", 413, "limit.body", "POST", "/x"),
+            (b"GET /dead/x HTTP/1.1\r\nHost: a\r\n\r\n", 502, "proxy.connect", "GET", "/dead/x"),
+        ]
+        for raw, status, rule, method, path in cases:
+            response, lines = logged(gw, raw)
+            e = lines[0]
+            assert (e["status"], e["rule"], e["outcome"], e["method"]) == (status, rule, "refused", method), (e, raw)
+            if path:
+                assert e["path"] == path, e
+            head, _, body = response.partition(b"\r\n\r\n")
+            doc = json.loads(body)
+            assert doc["request_id"] == e["id"] and doc["rule"] == rule, (doc, e)
+            assert re.search(rb"\r\nX-Request-Id: " + e["id"].encode() + rb"\r\n", head + b"\r\n"), head
+            assert e["bytes_out"] == len(response), (e["bytes_out"], len(response))
+        # A refusal that happens after a route was chosen names the route and, once an upstream is chosen, the upstream.
+        _, lines = logged(gw, GET % b"/dead/x")
+        assert (lines[0]["route"], lines[0]["upstream"]) == ("dead", "dead"), lines[0]
+        _, lines = logged(gw, b"POST /x HTTP/1.1\r\nHost: a\r\nContent-Length: 2000000\r\n\r\n")
+        assert (lines[0]["route"], lines[0]["upstream"]) == ("main", "up"), lines[0]
+
+    def access_log_a_timeout_and_a_departure(gw, up):
+        _, lines = logged(gw, GET % b"/stall", timeout=8, want=1)
+        e = lines[0]
+        assert (e["status"], e["rule"], e["outcome"]) == (504, "timeout.upstream", "refused") and e["ms"] >= 1000, e
+        # A client that connects, sends half a head and leaves: no status was ever sent.
+        n0 = len(gw.log_lines())
+        s = socket.create_connection(("127.0.0.1", gw.port), timeout=2)
+        s.sendall(b"GET /half HTT")
+        s.close()
+        e = gw.log_since(n0, 1)[0]
+        assert (e["status"], e["rule"], e["outcome"], e["bytes_out"]) == (0, "", "aborted", 0), e
+        # A client that leaves in the middle of a response.
+        n0 = len(gw.log_lines())
+        s = socket.create_connection(("127.0.0.1", gw.port), timeout=5)
+        s.sendall(GET % b"/big?n=3000000")
+        got = b""
+        while len(got) < 20000:
+            got += s.recv(65536)
+        s.close()
+        e = gw.log_since(n0, 1, wait=4)[0]
+        assert (e["status"], e["outcome"], e["path"]) == (200, "aborted", "/big") and 0 < e["bytes_out"] < 3000000, e
+
+    def a_trusted_routes_kept_id_is_the_one_logged_and_echoed(gw, up):
+        n = len(up.heads)
+        raw, lines = logged(gw, b"GET /trusted/x HTTP/1.1\r\nHost: a\r\nX-Request-Id: edge-42\r\n\r\n")
+        assert lines[0]["id"] == "edge-42" and lines[0]["route"] == "trusted", lines[0]
+        assert seen_id(up, n) == "edge-42" and b"\r\nX-Request-Id: edge-42\r\n" in raw, raw[:200]
+        # A bad one is replaced by the connection's own, and that is what is logged.
+        raw, lines = logged(gw, b"GET /trusted/x HTTP/1.1\r\nHost: a\r\nX-Request-Id: a b\r\n\r\n")
+        assert lines[0]["id"] != "a b" and re.fullmatch(r"[0-9a-f]+-[0-9a-f]+-[0-9a-f]{8,}", lines[0]["id"]), lines[0]
+
+    def the_upstreams_own_request_id_is_not_passed_on(gw, up):
+        raw, lines = logged(gw, GET % b"/xrid")
+        head = raw.split(b"\r\n\r\n")[0]
+        assert head.lower().count(b"x-request-id:") == 1 and b"theirs" not in head, head
+        assert b"X-Request-Id: " + lines[0]["id"].encode() in head, (head, lines[0])
+
+    def hostile_requests_make_valid_bounded_log_lines(gw, up):
+        crafted = [b'/"\\' * 40, b"/" + bytes(range(1, 32)) * 3, b"/\x7f\x80\xff" * 30, b"/" + b"a" * 400, b"/%00%0d%0a" * 20, b"/\xc3\xa9" * 60]
+        sent = 0
+        for path in crafted:
+            for method in (b"GET", b"POST"):
+                n0 = len(gw.log_lines())
+                request(gw, method + b" " + path + b" HTTP/1.1\r\nHost: a\r\nContent-Length: 0\r\nX-Request-Id: " + b"x" * 65 + b"\r\n\r\n")
+                gw.log_since(n0, 1)
+                for raw in gw.log_lines()[n0:]:
+                    sent += 1
+                    assert len(raw) <= 768 and raw.endswith(b"\n") and all(32 <= c < 127 for c in raw[:-1]), raw
+                    e = json.loads(raw)
+                    assert len(e["path"]) <= 256, e
+        # A path of 16 KiB: refused for its size, logged within the bound.
+        n0 = len(gw.log_lines())
+        request(gw, b"GET /" + b"a" * 16000 + b" HTTP/1.1\r\nHost: a\r\n\r\n")
+        gw.log_since(n0, 1)
+        for raw in gw.log_lines()[n0:]:
+            assert len(raw) <= 768 and json.loads(raw)["path"].count("a") <= 128, raw
+            sent += 1
+        assert sent >= 12, sent
+
+    def the_log_does_not_disturb_what_it_logs_under_concurrency(gw, up):
+        n0 = len(gw.log_lines())
+        results = []
+
+        def one(i):
+            r = request(gw, GET % (b"/x/%d" % i))
+            results.append(split(r)[0])
+
+        threads = [threading.Thread(target=one, args=(i,)) for i in range(40)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        lines = gw.log_since(n0, 40, wait=4)
+        assert results == [200] * 40, results
+        assert len(lines) == 40 and len({l["id"] for l in lines}) == 40, len(lines)
+        assert sorted(l["path"] for l in lines) == sorted("/x/%d" % i for i in range(40))
+
+    def smallq_a_full_queue_drops_lines_and_announces_them(gw, up):
+        # A gateway built with a 1,600 byte access-log queue (room for four lines). A hundred clients that open a connection, send half a head and
+        # leave together end their sessions in one turn: more lines than the queue holds. The ones that do not fit are dropped and counted, and
+        # the count is written into the log as soon as there is room.
+        n0 = len(gw.log_lines())
+        socks = []
+        for _ in range(100):
+            s = socket.create_connection(("127.0.0.1", gw.port), timeout=2)
+            s.sendall(b"GET /half HT")
+            socks.append(s)
+        time.sleep(0.3)
+        for s in socks:
+            s.close()
+        time.sleep(0.5)
+        assert split(request(gw, GET % b"/x"))[0] == 200
+        time.sleep(0.4)
+        parsed = [json.loads(l) for l in gw.log_lines()[n0:]]
+        logged = [e for e in parsed if "id" in e]
+        announced = sum(e["log_dropped"] for e in parsed if "log_dropped" in e)
+        assert announced > 0, "the queue was never full: the test does not reach the case it is for"
+        assert len(logged) + announced == 101, (len(logged), announced)
+        assert logged[-1]["path"] == "/x" and logged[-1]["status"] == 200, logged[-1]
+
+    def pipe_a_full_pipe_stalls_the_loop_and_loses_nothing(gw, up):
+        # The gateway's stdout is a pipe nobody reads (docs/observability.md section 3, gate 5).
+        ok = 0
+        while ok < 4000:
+            try:
+                response = request(gw, GET % b"/x", timeout=1.0)
+            except OSError:
+                break
+            if not response.startswith(b"HTTP/1.1 200"):
+                break
+            ok += 1
+        print("      requests answered before the loop stalled on a full pipe: %d" % ok)
+        assert 50 < ok < 4000, ok
+        gw.start_reader()
+        time.sleep(1.0)
+        parsed = [json.loads(l) for l in gw.log_lines()]
+        logged = [e for e in parsed if "id" in e]
+        seqs = [int(e["id"].rsplit("-", 1)[1], 16) for e in logged]
+        assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), "lines in order, none twice"
+        assert not [e for e in parsed if "log_dropped" in e], "nothing was dropped: the loop waited instead"
+        assert sum(1 for e in logged if e["status"] == 200) >= ok, (len(logged), ok)
+        assert split(request(gw, GET % b"/x"))[0] == 200
+
+    def access_log_upstream_ms_is_the_wait_for_the_first_byte(gw, up):
+        raw, lines = logged(gw, GET % b"/delay")
+        e = lines[0]
+        assert e["status"] == 200 and 250 <= e["upstream_ms"] <= 1500 and e["ms"] >= e["upstream_ms"], e
+
+    def access_log_records_the_upstreams_own_status(gw, up):
+        raw, lines = logged(gw, GET % b"/s404")
+        e = lines[0]
+        assert (e["status"], e["outcome"], e["rule"]) == (404, "ok", ""), e
+        assert e["bytes_out"] == len(raw), (e["bytes_out"], len(raw))
+
+    def fullstdout_when_the_log_cannot_be_written_the_gateway_stops_with_status_6(gw, up):
+        # stdout is /dev/full: the first write fails (ENOSPC). The default is to stop rather than serve what it cannot account for.
+        try:
+            request(gw, GET % b"/x")
+        except OSError:
+            pass  # it may be gone already: the readiness probe's own connection was the first line to write
+        end = time.time() + 5
+        while gw.proc.poll() is None and time.time() < end:
+            time.sleep(0.05)
+        assert gw.proc.poll() == 6, gw.proc.poll()
+
+    def continueonfail_a_gateway_told_to_continue_keeps_serving(gw, up):
+        for _ in range(5):
+            assert split(request(gw, GET % b"/x"))[0] == 200
+            time.sleep(0.1)
+        assert gw.alive()
 
     def chunked_body_echo(gw, up):
         parts = [os.urandom(random.randint(1, 20000)) for _ in range(12)]
@@ -1334,6 +1595,13 @@ def main():
         gw.ka = ka
         gw.flap = flap
         gw0 = None
+        extra = {}
+        for prefix, kw in (("smallq_", dict(logq=1600)), ("pipe_", dict(read=False)), ("fullstdout_", dict(stdout=open("/dev/full", "wb"))),
+                           ("continueonfail_", dict(stdout=open("/dev/full", "wb"), log_failure="continue"))):
+            if any(n.startswith(prefix) for n in names):
+                extra[prefix] = Gateway(tempfile.mkdtemp(prefix="gwx"), free_port(), up_port, dead, ka_port, flap_port, **kw)
+                extra[prefix].ka = ka
+                extra[prefix].flap = flap
         if any(n.startswith("nopool_") for n in names):
             gw0 = Gateway(tmp0, free_port(), up_port, dead, ka_port, flap_port, pool=0, circuit=0)
             gw0.ka = ka
@@ -1341,10 +1609,10 @@ def main():
         try:
             for name in names:
                 t0 = time.time()
-                g = gw0 if name.startswith("nopool_") else gw
+                g = gw0 if name.startswith("nopool_") else next((x for p, x in extra.items() if name.startswith(p)), gw)
                 try:
                     getattr(T, name)(g, up)
-                    if not g.alive():
+                    if not g.alive() and not name.startswith("fullstdout_"):  # that one is about the gateway stopping
                         raise AssertionError("the gateway died")
                     print("ok    %-52s %.1fs" % (name, time.time() - t0))
                 except (AssertionError, OSError) as e:
@@ -1355,6 +1623,8 @@ def main():
                         break
         finally:
             gw.stop()
+            for x in extra.values():
+                x.stop()
             if gw0:
                 gw0.stop()
             up.stop = True

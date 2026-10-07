@@ -5,6 +5,7 @@ module gateway.proxy;
 import std.bytes;
 import std.conns;
 import std.http;
+import gateway.accesslog;
 import gateway.chunked;
 import gateway.deploy;
 import gateway.egress;
@@ -52,8 +53,20 @@ import gateway.route;
 //    20  upstream: 1 if the connection came from the pool
 //    21  client: the expiry of the half-open trial it holds (0: none)
 //    22  upstream: 1 if the request it is answering was a HEAD
-//    23  client: 2 * the request's id sequence number + 1 if its route trusts the forwarding headers (docs/headers.md); the head
-//        is rewritten again for a retry, and the same number gives it the same X-Request-Id
+//    23  client: 2 * the connection's sequence number + 1 if its route trusts the forwarding headers (docs/headers.md)
+//    24  client: the clock when it was accepted
+//    25  client: the clock when its request was routed (0 until then)
+//    26  client: the clock when the upstream's response head arrived (0 until then)
+//    27  client: response bytes queued for it
+//    28  client: request body bytes forwarded for it (as sent: chunk framing included)
+//    29  client: the status it was sent (a refusal's, or the upstream's), 0 if none
+//    30  client: flags, 1 the gateway refused it, 2 its response was relayed whole, 4 its access-log line is written
+//    31  client: its route's index + 1, 0 if none was selected
+//
+// Per slot `k`, `meta[256k..256k+256]` is the client's: byte 0 the length of its request id, 1 of the rule tag it was refused with, 2 of its
+// method, 3 of its path; then the id (64 bytes at 4), the tag (40 at 68), the method (16 at 108) and the path up to `?` (128 at 124).
+// The id is the connection's own when it is accepted, and the client's if its route trusts one and it sent a valid one (docs/headers.md).
+// The access-log line is built from these when the session ends (docs/observability.md).
 
 fn slot_limit() -> [] int {
     return 256;
@@ -68,7 +81,16 @@ fn pend_size() -> [] int {
 }
 
 fn stride() -> [] int {
-    return 24;
+    return 32;
+}
+
+fn meta_size() -> [] int {
+    return 256;
+}
+
+// The access-log queue: lines wait here until the loop writes them (docs/observability.md section 3).
+fn logq_size() -> [] int {
+    return 262144;
 }
 
 // Idle upstream connections kept per upstream, and for how long; 0 keeps none (every request then uses its own connection).
@@ -133,12 +155,128 @@ res struct Core {
     // Per upstream, four ints: consecutive failures, when the circuit is open until (0: closed), until when a half-open trial
     // request is in flight (0: none), unused.
     health: Box[[int]],
-    // Two ints: the clock at start, and the number of requests given an id so far (docs/headers.md section 3).
+    // Sixteen ints: 0 the clock at start, 1 the number of connections given an id so far, 2 the wall clock minus the monotonic one at
+    // start, 3 the clock of the turn in progress, 4 the bytes waiting in `logq`, 5 the lines dropped since the last announcement,
+    // 6 the lines dropped in all, 7 the log writes that failed.
     ids: Box[[int]],
+    meta: Box[[byte]],
+    logq: Box[[byte]],
 }
 
 fn token_of(k: int) -> [] int {
     return k + 1;
+}
+
+// Is bit `bit` set in the flags `v`?
+fn flag_has(v: int, bit: int) -> [] bool {
+    return v / bit % 2 == 1;
+}
+
+// Set `bit` in the flags of client slot `k`.
+fn flag_set[&c](core: &!c Core, k: int, bit: int) -> [] int {
+    let st = contents(core.state);
+    let p = stride() * k;
+    if !flag_has(st[p + 30], bit) {
+        st[p + 30] = st[p + 30] + bit;
+    }
+    return 0;
+}
+
+// Keep the first `cap` bytes of `value` in client `k`'s meta area at `at`, its length at `lenpos`.
+fn meta_put[&c, &s](core: &!c Core, k: int, at: int, cap: int, lenpos: int, value: &s [byte]) -> [] int {
+    let m = contents(core.meta);
+    var n = len(value);
+    if n > cap {
+        n = cap;
+    }
+    let base = k * meta_size();
+    copy_into(m[base + at..base + at + n], value[0..n]);
+    m[base + lenpos] = byte_of(n);
+    return n;
+}
+
+// The `n`-byte field of client `k`'s meta area at `at`, whose length is at `lenpos`.
+fn meta_get[&c](core: &c Core, k: int, at: int, lenpos: int) -> [] &c [byte] {
+    let m = contents(core.meta);
+    let base = k * meta_size();
+    return m[base + at..base + at + int_of(m[base + lenpos])];
+}
+
+// Client `k` has been accepted: its start, its own id (the next sequence number), and every field of the record cleared.
+fn session_begin[&c](core: &!c Core, k: int, now: int) -> [] int {
+    let st = contents(core.state);
+    let ids = contents(core.ids);
+    let m = contents(core.meta);
+    let p = stride() * k;
+    ids[1] = ids[1] + 1;
+    st[p + 23] = 2 * ids[1];
+    st[p + 24] = now;
+    st[p + 25] = 0;
+    st[p + 26] = 0;
+    st[p + 27] = 0;
+    st[p + 28] = 0;
+    st[p + 29] = 0;
+    st[p + 30] = 0;
+    st[p + 31] = 0;
+    let base = k * meta_size();
+    m[base + 1] = byte_of(0);
+    m[base + 2] = byte_of(0);
+    m[base + 3] = byte_of(0);
+    let n = forward.put_generated_id(m[base + 4..base + 4 + 64], 0, ids[0], deploy.listen_port(), ids[1]);
+    m[base] = byte_of(n);
+    return 0;
+}
+
+// Queue the access-log line of client `k`, once, when its session ends (docs/observability.md sections 2 and 3). Pure memory work: the
+// loop writes the queue. A line that does not fit is dropped and counted, and announced when there is room again.
+fn log_end[&c](core: &!c Core, k: int) -> [] int {
+    let st = contents(core.state);
+    let p = stride() * k;
+    if st[p] != 1 || st[p + 1] != 1 || flag_has(st[p + 30], 4) {
+        return 0;
+    }
+    flag_set(core, k, 4);
+    let ids = contents(core.ids);
+    let q = contents(core.logq);
+    let now = ids[3];
+    var outcome = 2;
+    if flag_has(st[p + 30], 1) {
+        outcome = 1;
+    } else if flag_has(st[p + 30], 2) {
+        outcome = 0;
+    }
+    var upstream_ms = 0;
+    if st[p + 26] > 0 && st[p + 25] > 0 {
+        upstream_ms = st[p + 26] - st[p + 25];
+    }
+    var route_name = "";
+    if st[p + 31] > 0 {
+        route_name = route.name(st[p + 31] - 1);
+    }
+    var upstream_name = "";
+    if st[p + 31] > 0 {
+        upstream_name = deploy.upstream_name(st[p + 11]);
+    }
+    var at = ids[4];
+    if ids[5] > 0 && logq_size() - at >= accesslog.max_line() * 2 {
+        let announced = accesslog.dropped_line(q[at..at + accesslog.max_line()], ids[2] + now, ids[5]);
+        if announced > 0 {
+            at = at + announced;
+            ids[5] = 0;
+        }
+    }
+    var n = 0 - 1;
+    if logq_size() - at >= accesslog.max_line() {
+        n = accesslog.line(q[at..at + accesslog.max_line()], ids[2] + st[p + 24], meta_get(core, k, 4, 0), meta_get(core, k, 108, 2), meta_get(core, k, 124, 3), route_name, upstream_name, st[p + 29], meta_get(core, k, 68, 1), outcome, now - st[p + 24], upstream_ms, st[p + 28], st[p + 27]);
+    }
+    if n < 0 {
+        ids[5] = ids[5] + 1;
+        ids[6] = ids[6] + 1;
+    } else {
+        at = at + n;
+    }
+    ids[4] = at;
+    return 0;
 }
 
 // If client `k` was admitted as the half-open trial and the circuit has not yet heard its outcome, hand the trial back (its
@@ -165,6 +303,9 @@ fn drop_session[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [] int 
     if peer >= 0 {
         release_trial(core, peer);
     }
+    // The client's request ends here. (Every call but one passes the client; the one that passes an upstream does so because its client is
+    // already gone, and that client's line was written when it went.)
+    log_end(core, k);
     conns.close(tab, k);
     st[stride() * k] = 0;
     if peer >= 0 && st[stride() * peer] == 1 {
@@ -436,13 +577,18 @@ fn refuse[&t, &c, &r](tab: &!t conns.Table, core: &!c Core, k: int, status: int,
         st[stride() * peer] = 0;
     }
     st[p + 2] = 0 - 1;
+    // The record of the refusal, for the access log: its status and rule, and that the gateway made it.
+    st[p + 29] = status;
+    flag_set(core, k, 1);
+    meta_put(core, k, 68, 40, 1, rule);
     let base = k * pend_size();
-    let n = problem.response(pd[base..base + pend_size()], status, rule);
+    let n = problem.response(pd[base..base + pend_size()], status, rule, meta_get(core, k, 4, 0));
     if n < 0 {
         drop_session(tab, core, k);
         return 0;
     }
     st[p + 5] = n;
+    st[p + 27] = st[p + 27] + n;
     st[p + 8] = 1;
     st[p + 3] = 4;
     st[p + 4] = 0;
@@ -462,6 +608,7 @@ fn finish_response[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: in
     let reuse = st[pu + 19] == 1 && st[pu + 4] == 0 && st[pc + 10] == 1 && st[pu + 14] == 0;
     st[pc + 2] = 0 - 1;
     st[pc + 8] = 1;
+    flag_set(core, client, 2);
     if st[pc + 10] == 0 {
         // The upstream answered before the request body was all sent: the client may still be sending, so it lingers.
         st[pc + 3] = 4;
@@ -511,16 +658,20 @@ fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int)
                         // Passed on as it came; the final response is still to come.
                         copy_into(pd[cb + st[pc + 5]..cb + st[pc + 5] + r], view[0..r]);
                         st[pc + 5] = st[pc + 5] + r;
+                        st[pc + 27] = st[pc + 27] + r;
                         st[pc + 13] = 1;
                     } else {
                         health_ok(core, st[pu + 11]);
-                        let m = forward.rewrite_response(view[0..r], tb, pd[cb + st[pc + 5]..cb + pend_size()]);
+                        let m = forward.rewrite_response(view[0..r], tb, pd[cb + st[pc + 5]..cb + pend_size()], meta_get(core, client, 4, 0));
                         if m < 0 {
                             drop_session(tab, core, client);
                             return 0;
                         }
                         st[pc + 5] = st[pc + 5] + m;
+                        st[pc + 27] = st[pc + 27] + m;
                         st[pc + 13] = 1;
+                        st[pc + 26] = now;
+                        st[pc + 29] = response.code(tb);
                         // The response has begun: only the total deadline remains.
                         st[pc + 7] = 0;
                         let mode = response.body_mode(tb, st[pu + 22] == 1);
@@ -580,6 +731,7 @@ fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int)
                 copy_into(bf[ub..ub + st[pu + 4] - used], bf[ub + used..ub + st[pu + 4]]);
                 st[pu + 4] = st[pu + 4] - used;
                 st[pc + 5] = st[pc + 5] + used;
+                st[pc + 27] = st[pc + 27] + used;
                 let before = st[pc + 5];
                 if done {
                     finish_response(tab, core, u, now);
@@ -654,6 +806,7 @@ fn pump_request[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, now: int) 
                 }
                 copy_into(pd[ub + st[pu + 5]..ub + st[pu + 5] + used], bf[cb..cb + used]);
                 st[pu + 5] = st[pu + 5] + used;
+                st[p + 28] = st[p + 28] + used;
                 if st[p + 10] == 1 {
                     // Whatever follows the request is not this request's: the connection closes after the response.
                     st[p + 4] = 0;
@@ -696,11 +849,17 @@ fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, now: int) ->
         refuse(tab, core, k, framing.status(0 - r), framing.tag(0 - r), now);
         return 0;
     }
+    // The head is good: keep what the access log will say about it (the head's buffer is reused as the request goes on).
+    meta_put(core, k, 108, 16, 2, http.method(view, tb));
+    meta_put(core, k, 124, 128, 3, http.path(view, tb));
     let sel = route.select(http.header(view, tb, "host"), http.method(view, tb), http.path(view, tb));
     if sel < 0 {
         refuse(tab, core, k, route.status(0 - sel), route.tag(0 - sel), now);
         return 0;
     }
+    // The route is known: the access log names it and its upstream even if the request is refused from here on.
+    st[p + 31] = sel + 1;
+    st[p + 11] = route.upstream(sel);
     let max_body = route.max_body(sel);
     if http.is_chunked(tb) {
         chunked.init(ch[k * chunked.state_len()..k * chunked.state_len() + chunked.state_len()], max_body);
@@ -728,10 +887,14 @@ fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, now: int) ->
     }
     st[p + 11] = route.upstream(sel);
     st[p + 15] = r;
-    // The request's id, kept so that a retry carries the same one, and whether its route trusts the forwarding headers.
-    let ids = contents(core.ids);
-    ids[1] = ids[1] + 1;
-    st[p + 23] = 2 * ids[1] + route.trust_forwarded(sel);
+    // Whether its route trusts the forwarding headers, and so which id it carries: the client's own if the route believes one, else the
+    // one it was given when it was accepted. Fixed here, so a retry carries the same one.
+    st[p + 23] = st[p + 23] / 2 * 2 + route.trust_forwarded(sel);
+    let own = forward.id_choice(view, tb, route.trust_forwarded(sel) == 1);
+    if own >= 0 {
+        meta_put(core, k, 4, 64, 0, forward.id_value(view, tb, own));
+    }
+    st[p + 25] = now;
     // A request with no body and an idempotent method may be sent again, once, if a pooled connection turns out to be dead.
     let method = http.method(view, tb);
     st[p + 16] = 0;
@@ -765,8 +928,7 @@ fn attach[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, slot: int, now: 
     if http.parse(view, tb) < 0 {
         failed = 1;
     } else {
-        let ids = contents(core.ids);
-        let m = forward.rewrite(view, tb, pd[slot * pend_size()..slot * pend_size() + pend_size()], pool_max() > 0, st[p + 23] % 2 == 1, ids[0], deploy.listen_port(), st[p + 23] / 2);
+        let m = forward.rewrite(view, tb, pd[slot * pend_size()..slot * pend_size() + pend_size()], pool_max() > 0, st[p + 23] % 2 == 1, meta_get(core, k, 4, 0));
         if m < 0 {
             failed = 0 - m + 1;
         } else {
@@ -1141,6 +1303,7 @@ fn accept_all[&h, &l, &c](heap: &!h Heap, conn: conns.Table, listener: &!l Liste
                         st[p + 20] = 0;
                         st[p + 21] = 0;
                         st[p + 22] = 0;
+                        session_begin(core, slot, now);
                         borrow mut table as &!ct in {
                             // TCP_NODELAY: a request is forwarded in as many writes as it arrives in reads, and a small trailing write
                             // behind a large one would otherwise wait for the peer's delayed acknowledgement (tens of milliseconds).
@@ -1166,7 +1329,7 @@ fn accept_all[&h, &l, &c](heap: &!h Heap, conn: conns.Table, listener: &!l Liste
 }
 
 // Serve until the process is killed. Answers a non-zero status only if it could not start.
-pub fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net(""), clock: &k Clock) -> [heap, conn_accept, conn_read, conn_write, poll, clock, net_out("")] int {
+pub fn run[&h, &l, &n, &k, &i](heap: &!h Heap, listener: &!l Listener, net: &n Net(""), clock: &k Clock, io: &!i Io) -> [heap, conn_accept, conn_read, conn_write, poll, clock, io_write, net_out("")] int {
     match poller_new() {
         Polling::Ok(pl) => {
             var poller = pl;
@@ -1174,17 +1337,24 @@ pub fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net("
                 poller_add_listener(pw, listener, 0);
             }
             let limit = slot_limit();
-            var core = Core { poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * limit, 0), bufs: box_slice(heap, limit * buf_size(), byte_of(0)), pends: box_slice(heap, limit * pend_size(), byte_of(0)), table: box_slice(heap, http.slots(64), 0), chunks: box_slice(heap, limit * chunked.state_len(), 0), health: box_slice(heap, 4 * 256, 0), ids: box_slice(heap, 2, 0) };
+            var core = Core { poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * limit, 0), bufs: box_slice(heap, limit * buf_size(), byte_of(0)), pends: box_slice(heap, limit * pend_size(), byte_of(0)), table: box_slice(heap, http.slots(64), 0), chunks: box_slice(heap, limit * chunked.state_len(), 0), health: box_slice(heap, 4 * 256, 0), ids: box_slice(heap, 16, 0), meta: box_slice(heap, limit * meta_size(), byte_of(0)), logq: box_slice(heap, logq_size(), byte_of(0)) };
             var tab = conns.empty(heap, 64);
             borrow mut core as &!cw in {
-                contents(cw.ids)[0] = clock_ms(clock);
+                let mono = clock_ms(clock);
+                contents(cw.ids)[0] = mono;
+                contents(cw.ids)[2] = clock_unix_ms(clock) - mono;
             }
-            while true {
+            var running = true;
+            var status = 0;
+            while running {
                 var ready = 0 - 1;
                 borrow mut core as &!cw in {
                     ready = poller_wait(cw.poller, contents(cw.events), 250);
                 }
                 let now = clock_ms(clock);
+                borrow mut core as &!cw in {
+                    contents(cw.ids)[3] = now;
+                }
                 var j = 0;
                 while j < ready {
                     var token = 0 - 1;
@@ -1226,9 +1396,38 @@ pub fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net("
                         sweep(tw, cw, now);
                     }
                 }
+                // The lines of the requests that ended this turn, written together (docs/observability.md section 3).
+                var pending = 0;
+                borrow core as &cr in {
+                    pending = contents(cr.ids)[4];
+                }
+                if pending > 0 {
+                    var failed = false;
+                    borrow mut core as &!cw in {
+                        let wrote = write_bytes(io, contents(cw.logq)[0..pending]);
+                        if wrote != pending {
+                            failed = true;
+                        }
+                        match flush_out(io) {
+                            Done::Ok(z) => {
+                            }
+                            Done::Failed(e) => {
+                                failed = true;
+                            }
+                        }
+                        contents(cw.ids)[4] = 0;
+                        if failed {
+                            contents(cw.ids)[7] = contents(cw.ids)[7] + 1;
+                        }
+                    }
+                    if failed && deploy.log_failure_exit() == 1 {
+                        running = false;
+                        status = 6;
+                    }
+                }
             }
             conns.drop(heap, tab);
-            let Core { poller, events, state, bufs, pends, table, chunks, health, ids } = core;
+            let Core { poller, events, state, bufs, pends, table, chunks, health, ids, meta, logq } = core;
             poller_close(poller);
             unbox_slice(heap, events);
             unbox_slice(heap, state);
@@ -1238,7 +1437,9 @@ pub fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net("
             unbox_slice(heap, chunks);
             unbox_slice(heap, health);
             unbox_slice(heap, ids);
-            return 0;
+            unbox_slice(heap, meta);
+            unbox_slice(heap, logq);
+            return status;
         }
         Polling::Failed(e) => {
             return 4;

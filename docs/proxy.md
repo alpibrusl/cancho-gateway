@@ -4,7 +4,7 @@ Status: **a working reverse proxy, with deliberate gaps.** (Upstream keep-alive 
 framing and routing (tasks #3, #4), a fresh upstream connection per request, request body forwarding (Content-Length and
 chunked), response relay, backpressure both ways, deadlines, refusals as `application/problem+json`. **Not built:** keep-alive
 on either side and the upstream pool (#6), (the header policy of #7 is built: `docs/headers.md`), authentication (#8), rate limits
-(#9), the access log and metrics (#10), WebSockets (#15). Section 6 lists what is untested.
+(#9), the metrics endpoint (#10; the access log is built), WebSockets (#15). Section 6 lists what is untested.
 
 ## 1. The flow of one request
 
@@ -107,7 +107,7 @@ which the lingering close now prevents. (3) `route.select` once divided by a met
 - The response is relayed **unverified**. Because the upstream is told `Connection: close`, a lying `Content-Length` cannot
   desynchronise a later request; the client sees what the upstream sent.
 - The header policy is `docs/headers.md` (`Via`, `X-Forwarded-Host/Proto`, `X-Request-Id`, untrusted forwarding claims removed). **No `X-Forwarded-For`
-  of its own: the gateway cannot know the client's address.** No request id in the response yet. No access log (#10).
+  of its own: the gateway cannot know the client's address.** The request id is in every response and error, and one access-log line per request goes to stdout (`docs/observability.md`). No metrics endpoint yet (#10, second slice).
 - No keep-alive: every request costs a TCP connection on each side. #14 will say what that costs against nginx and HAProxy; this
   slice has **not** been benchmarked.
 - A single upstream address per route; no health checks or retries (#6).

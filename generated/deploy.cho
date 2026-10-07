@@ -51,6 +51,11 @@ pub fn circuit_open_ms() -> [] int {
     return 10000;
 }
 
+// 1 if the gateway stops when its access log cannot be written, 0 if it carries on (docs/observability.md section 3).
+pub fn log_failure_exit() -> [] int {
+    return 1;
+}
+
 // The longest common prefix of the addresses, cut at a delimiter: what `narrow` would be given once
 // cancho has separate listen and connect bounds. Empty means no shared prefix.
 pub fn intended_egress_prefix() -> [] &static [byte] {

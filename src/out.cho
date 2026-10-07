@@ -83,6 +83,52 @@ pub fn put_hex[&o](out: &!o [byte], at: int, v: int, min: int) -> [] int {
     return k;
 }
 
+// A JSON string's contents (no quotes), the first `max_in` bytes of `s` and at most `max_out` bytes of output, never stopping in the
+// middle of an escape: `"` and `\` are backslash-escaped, every byte below 0x20, 0x7f and every byte from 0x80 up is written as
+// `\u00XX` (the byte read as Latin-1: always valid JSON, never invalid UTF-8). Answers the new offset, or `0 - 1` if `out` is too
+// small, and how many bytes of `s` it used.
+pub fn put_json[&o, &s](out: &!o [byte], at: int, s: &s [byte], max_in: int, max_out: int) -> [] (int, int) {
+    var k = at;
+    var used = 0;
+    var written = 0;
+    var limit = len(s);
+    if max_in < limit {
+        limit = max_in;
+    }
+    while used < limit {
+        let c = int_of(s[used]);
+        var width = 1;
+        if c == '"' || c == '\\' {
+            width = 2;
+        } else if c < 32 || c >= 127 {
+            width = 6;
+        }
+        if written + width > max_out {
+            return (k, used);
+        }
+        if width == 1 {
+            k = put_byte(out, k, c);
+        } else if width == 2 {
+            k = put_byte(out, k, '\\');
+            k = put_byte(out, k, c);
+        } else {
+            k = put(out, k, "\\u00");
+            k = put_hex_digit(out, k, c / 16);
+            k = put_hex_digit(out, k, c % 16);
+        }
+        written = written + width;
+        used = used + 1;
+    }
+    return (k, used);
+}
+
+fn put_hex_digit[&o](out: &!o [byte], at: int, d: int) -> [] int {
+    if d >= 10 {
+        return put_byte(out, at, 'a' + d - 10);
+    }
+    return put_byte(out, at, '0' + d);
+}
+
 // The decimal digits `v` takes.
 pub fn digits(v: int) -> [] int {
     var n = 1;
