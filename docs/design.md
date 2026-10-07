@@ -126,7 +126,7 @@ connection. Nothing else, ever.
 
 Recorded one by one in #16. TLS (**corrected 2026-10-07:** the reason first recorded here, that TLS needs foreign code and would make the
 authority report unbounded, no longer holds: cancho has a TLS 1.3 server in pure cancho, `packages/tls`, cancho #338 and #339, example #346.
-Integrating it is undecided and would add file reads (one certificate directory, `/dev/urandom`) to the report; until it is built, a front terminates TLS),
+Integrating it is undecided and would add file reads (one certificate directory, `/dev/urandom`) to the report; until it is built, a front terminates TLS; the decision, the data path, the numbers and the gates are `docs/tls.md`),
 HTTP/2/gRPC, caching, response rewriting, dynamic discovery, clustering. Dynamic
 discovery additionally contradicts section 2 (a mutable set cannot be bounded by a compile-time literal).
 
