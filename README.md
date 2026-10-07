@@ -37,4 +37,4 @@ discovery, clustering. WebSockets (the OCPP use case) are a later stage built on
 
 It is a server with its own authority row (the network and the clock, no files), and in this toolbox one program carries
 one authority row. It is not `cancho-web` (an application framework that serves routes and validates bodies, with
-middleware listed as not yet) and it is not `lexsys-hooks` (outbound webhook delivery).
+middleware listed as not yet) and it is not `cancho-hooks` (outbound webhook delivery).
