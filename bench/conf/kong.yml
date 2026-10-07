@@ -1,0 +1,9 @@
+# Kong (open source, DB-less) as a plain reverse proxy: one service, one route, no plugins. Settings that are not in this file are
+# environment variables in bench/run.py (worker count 1, no access log, no admin API, keep-alive to the upstream, 64k body buffer).
+_format_version: "3.0"
+services:
+- name: s
+  url: http://127.0.0.1:@UP@
+  routes:
+  - name: r
+    paths: ["/"]
