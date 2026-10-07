@@ -22,7 +22,7 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LEX = os.environ.get("CANCHO", "cancho")
-SOURCES = ["out", "accesslog", "problem", "framing", "chunked", "route", "response", "forward", "egress", "proxy", "version", "gateway"]
+SOURCES = ["out", "accesslog", "problem", "framing", "chunked", "route", "response", "forward", "egress", "admin", "metrics", "proxy", "version", "gateway"]
 
 
 def free_port():
@@ -419,8 +419,9 @@ class FlapUpstream:
 
 
 class Gateway:
-    def __init__(self, tmp, port, up_port, dead_port, ka_port, flap_port, pool=4, circuit=3, logq=None, read=True, stdout=None, log_failure=None):
+    def __init__(self, tmp, port, up_port, dead_port, ka_port, flap_port, pool=4, circuit=3, logq=None, read=True, stdout=None, log_failure=None, admin=False, routes=0):
         deploy = pathlib.Path(tmp) / "deploy.toml"
+        self.admin = free_port() if admin else None
         deploy.write_text("""listen = %d
 header_timeout_ms = 1000
 connect_timeout_ms = 1000
@@ -469,12 +470,12 @@ path_prefix = "/trusted"
 upstream = "up"
 trust_forwarded = true
 
-[[route]]
+%s[[route]]
 name = "main"
 path_prefix = "/"
 upstream = "up"
 max_body = 1048576
-""" % (port, pool, circuit, 'log_failure = "%s"' % log_failure if log_failure else "", up_port, dead_port, ka_port, flap_port))
+""" % (port, pool, circuit, ('log_failure = "%s"\n' % log_failure if log_failure else "") + ("admin_listen = %d\n" % self.admin if admin else ""), up_port, dead_port, ka_port, flap_port, "".join('[[route]]\nname = "r%03d"\npath_prefix = "/r%03d"\nupstream = "up"\n\n' % (i, i) for i in range(routes))))
         subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(deploy), "--out", tmp], check=True)
         files = [os.path.join(tmp, "deploy.cho"), os.path.join(tmp, "routes.cho")] + [str(ROOT / "src" / (n + ".cho")) for n in SOURCES]
         if logq:

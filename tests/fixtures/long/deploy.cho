@@ -58,32 +58,32 @@ pub fn log_failure_exit() -> [] int {
 
 // The admin listener's port (metrics, health; docs/observability.md section 7), 0 if there is none.
 pub fn admin_port() -> [] int {
-    return 0;
+    return 9090;
 }
 
 // The longest common prefix of the addresses, cut at a delimiter: what `narrow` would be given once
 // cancho has separate listen and connect bounds. Empty means no shared prefix.
 pub fn intended_egress_prefix() -> [] &static [byte] {
-    return "10.0.1.";
+    return "127.0.0.1:";
 }
 
 // Upstream `i` (0-based), as host:port; the empty string past the end.
 pub fn upstream_addr(i: int) -> [] &static [byte] {
     if i == 0 {
-        return "10.0.1.5:9000";
+        return "127.0.0.1:9000";
     }
     if i == 1 {
-        return "10.0.1.6:9000";
+        return "127.0.0.1:9001";
     }
     return "";
 }
 
 pub fn upstream_name(i: int) -> [] &static [byte] {
     if i == 0 {
-        return "api";
+        return "uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu";
     }
     if i == 1 {
-        return "web";
+        return "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv";
     }
     return "";
 }

@@ -194,7 +194,8 @@ def build_gateway(args, root, dest, from_rev):
         f'listen = {PORT}\npool_idle_max = 64\n\n[[upstream]]\nname = "u"\naddr = "127.0.0.1:{UP}"\n\n'
         '[[route]]\nname = "all"\npath_prefix = "/"\nupstream = "u"\n')
     subprocess.run([sys.executable, str(dest / "scripts" / "generate.py"), str(dest / "deploy.toml")], check=True, cwd=dest)
-    subprocess.run([which(args, "cancho"), "build"], check=True, cwd=dest)
+    # CANCHO_IGNORE_REV=1: build with a compiler other than the pinned one (a local check only; recorded runs use the pinned compiler).
+    subprocess.run([which(args, "cancho"), "build"] + (["--ignore-compiler-rev"] if os.environ.get("CANCHO_IGNORE_REV") else []), check=True, cwd=dest)
 
 
 def proxy_cmd(args, name):

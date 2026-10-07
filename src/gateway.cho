@@ -17,6 +17,14 @@ fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
     return len(s);
 }
 
+// The admin listener's `tcp_listen` answer, or a `Failed` for a deployment that has none (`proxy.run` matches it as "no admin listener").
+fn admin_listening[&n](net: &n Net("")) -> [net_in("")] Listening {
+    if deploy.admin_port() == 0 {
+        return Listening::Failed(0);
+    }
+    return tcp_listen(net, deploy.admin_port(), 16, 0);
+}
+
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args, net, clock } = split(world);
     release(fs);
@@ -45,14 +53,41 @@ fn main(world: World) -> [] int {
         match tcp_listen(nn, deploy.listen_port(), 1024, 0) {
             Listening::Ok(l) => {
                 var listener = l;
-                borrow mut heap as &!h in {
-                    borrow mut listener as &!lh in {
-                        listener_nonblocking(lh);
-                        borrow clock as &ck in {
-                            borrow mut io as &!ii in {
-                                served = proxy.run(h, lh, nn, ck, ii);
+                // The admin listener, if the deployment has one (docs/observability.md section 7); else a `Failed` that `proxy.run` matches as "none".
+                var admin = admin_listening(nn);
+                var admin_failed = false;
+                if deploy.admin_port() != 0 {
+                    borrow mut admin as &!aw in {
+                        match aw {
+                            Listening::Ok(x) => {
+                            }
+                            Listening::Failed(e) => {
+                                admin_failed = true;
                             }
                         }
+                    }
+                }
+                if admin_failed {
+                    served = 2;
+                } else {
+                    borrow mut heap as &!h in {
+                        borrow mut listener as &!lh in {
+                            borrow mut admin as &!ah in {
+                                listener_nonblocking(lh);
+                                borrow clock as &ck in {
+                                    borrow mut io as &!ii in {
+                                        served = proxy.run(h, lh, ah, nn, ck, ii);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                match admin {
+                    Listening::Ok(al) => {
+                        listener_close(al);
+                    }
+                    Listening::Failed(e) => {
                     }
                 }
                 listener_close(listener);

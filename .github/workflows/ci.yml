@@ -47,6 +47,8 @@ jobs:
         working-directory: gateway
         run: |
           python3 scripts/generate.py deploy/example.toml --check
+          python3 scripts/generate.py tests/fixtures/long/deploy.toml --out tests/fixtures/long --check
+          for f in deploy/demo.toml deploy/examples/*.toml; do python3 scripts/generate.py "$f" --out "$RUNNER_TEMP" > /dev/null; done
           python3 tests/generate_test.py
 
       - name: Build
@@ -74,6 +76,10 @@ jobs:
       - name: The proxy core against real sockets and an upstream that misbehaves
         working-directory: gateway
         run: python3 tests/proxy_test.py
+
+      - name: The admin listener and the metrics against an independent count made from the access log
+        working-directory: gateway
+        run: python3 tests/admin_test.py
 
       - name: The header policy against nginx (the table in the test says where they differ on purpose, and why)
         working-directory: gateway

@@ -50,6 +50,11 @@ REFUSALS = [
     ("config.circuit", 2, 'listen = 80\ncircuit_open_ms = 50\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
     ("config.circuit", 2, 'listen = 80\ncircuit_open_ms = "10s"\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
     ("config.log", 2, 'listen = 80\nlog_failure = "ignore"\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
+    ("config.admin", 2, 'listen = 80\nadmin_listen = 80\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
+    ("config.admin", 2, 'listen = 80\nadmin_listen = 70000\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
+    ("config.admin", 2, 'listen = 80\nadmin_listen = -1\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
+    ("config.admin", 2, 'listen = 80\nadmin_listen = "9090"\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
+    ("config.admin", 2, 'listen = 80\nadmin_listen = true\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
     ("config.log", 2, 'listen = 80\nlog_failure = true\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
     ("config.timeout", 3, 'listen = 80\nheader_timeout_ms = 5000\ntotal_timeout_ms = 1000\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
     # --- routes, with the line they must name

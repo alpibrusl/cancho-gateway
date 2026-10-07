@@ -1,0 +1,27 @@
+# A deployment whose route and upstream names are as long as the generator allows (32 bytes), for the unit tests that fix the size of the
+# largest metrics answer (tests/metrics_bound_test.cho): the bound counts each name in every line it appears in.
+listen = 8080
+admin_listen = 9090
+
+[[upstream]]
+name = "uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu"
+addr = "127.0.0.1:9000"
+
+[[upstream]]
+name = "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+addr = "127.0.0.1:9001"
+
+[[route]]
+name = "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+path_prefix = "/a"
+upstream = "uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu"
+
+[[route]]
+name = "ssssssssssssssssssssssssssssssss"
+path_prefix = "/b"
+upstream = "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+
+[[route]]
+name = "tttttttttttttttttttttttttttttttt"
+path_prefix = "/"
+upstream = "uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu"

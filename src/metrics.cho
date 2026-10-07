@@ -1,0 +1,639 @@
+edition 5;
+
+module gateway.metrics;
+
+import std.bytes;
+import gateway.deploy;
+import gateway.out;
+import gateway.route;
+import gateway.routes_table;
+
+// Counters, the latency histograms and the admin listener's answers (docs/observability.md sections 6 and 7). Pure: no effect, no
+// allocation. The caller owns three blocks and passes them in:
+//
+//   `stats`  (`stats_len()` ints): the counters. Per route 32 ints: 0..5 requests by class (0 none, 1 to 5 for 1xx to 5xx), 6 bytes in,
+//            7 bytes out, 8..21 the duration histogram's buckets (counts per bucket, not cumulative), 22 the sum of the durations in ms.
+//            Per upstream 24 ints: 0 responses, 1 retries, 2 failures, 3..16 the wait histogram's buckets, 17 its sum. Then the rule
+//            table: 96 counts, 96 name lengths, the count of `other`, and how many entries are used.
+//   `names`  (`names_len()` bytes): the 96 rule names, 40 bytes each. A tag is added when it is first seen; a client can only cause a tag
+//            the code already has, so the table fills to about 60 and no further. A tag after the 96th is counted as `other`.
+//   `gauge`  (`gauge_len()` ints), filled by the caller when a scrape is answered: 0 uptime in ms, 1 sessions active, 2 1 if the log is
+//            failing, 3 log lines dropped, 4 log writes failed, then for each upstream i: 5 + 2i idle pooled connections, 6 + 2i 1 if its
+//            circuit is open.
+//
+// Every number is written saturated at 10^18 - 1 (a counter does not get there in the life of a process), so that the size of an answer
+// has a bound that `worst_case()` states and the unit test checks.
+
+pub fn bucket_count() -> [] int {
+    return 14;
+}
+
+// The upper bound of bucket `i` in milliseconds (the last bucket, +Inf, has none: 0).
+pub fn bound(i: int) -> [] int {
+    if i == 0 {
+        return 1;
+    }
+    if i == 1 {
+        return 2;
+    }
+    if i == 2 {
+        return 5;
+    }
+    if i == 3 {
+        return 10;
+    }
+    if i == 4 {
+        return 25;
+    }
+    if i == 5 {
+        return 50;
+    }
+    if i == 6 {
+        return 100;
+    }
+    if i == 7 {
+        return 250;
+    }
+    if i == 8 {
+        return 500;
+    }
+    if i == 9 {
+        return 1000;
+    }
+    if i == 10 {
+        return 2500;
+    }
+    if i == 11 {
+        return 5000;
+    }
+    if i == 12 {
+        return 10000;
+    }
+    return 0;
+}
+
+// The bucket a duration of `ms` falls in: the first whose bound is at least `ms`, else the last.
+pub fn bucket_of(ms: int) -> [] int {
+    var i = 0;
+    while i < 13 {
+        if ms <= bound(i) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 13;
+}
+
+fn route_block() -> [] int {
+    return 32;
+}
+
+fn upstream_block() -> [] int {
+    return 24;
+}
+
+pub fn rule_cap() -> [] int {
+    return 96;
+}
+
+pub fn rule_name_max() -> [] int {
+    return 40;
+}
+
+fn routes() -> [] int {
+    return routes_table.count();
+}
+
+fn upstreams() -> [] int {
+    return deploy.upstream_count();
+}
+
+fn up_base(i: int) -> [] int {
+    return routes() * route_block() + i * upstream_block();
+}
+
+fn rule_base() -> [] int {
+    return routes() * route_block() + upstreams() * upstream_block();
+}
+
+pub fn stats_len() -> [] int {
+    return rule_base() + 2 * rule_cap() + 2;
+}
+
+pub fn names_len() -> [] int {
+    return rule_cap() * rule_name_max();
+}
+
+pub fn gauge_len() -> [] int {
+    return 5 + 2 * upstreams();
+}
+
+fn sat(v: int) -> [] int {
+    if v < 0 {
+        return 0;
+    }
+    if v > 999999999999999999 {
+        return 999999999999999999;
+    }
+    return v;
+}
+
+// 0 for no status, 1 to 5 for 1xx to 5xx.
+fn class_of(status: int) -> [] int {
+    if status >= 100 && status < 600 {
+        return status / 100;
+    }
+    return 0;
+}
+
+fn class_name(c: int) -> [] &static [byte] {
+    if c == 1 {
+        return "1xx";
+    }
+    if c == 2 {
+        return "2xx";
+    }
+    if c == 3 {
+        return "3xx";
+    }
+    if c == 4 {
+        return "4xx";
+    }
+    if c == 5 {
+        return "5xx";
+    }
+    return "none";
+}
+
+// The slot of rule `tag` in the table, adding it if it is new; the cap if the table is full (the `other` counter).
+fn rule_index[&s, &n, &t](stats: &!s [int], names: &!n [byte], tag: &t [byte]) -> [] int {
+    let base = rule_base();
+    let used = stats[base + 2 * rule_cap() + 1];
+    var i = 0;
+    while i < used {
+        let l = stats[base + rule_cap() + i];
+        if l == len(tag) && bytes.equal(names[i * rule_name_max()..i * rule_name_max() + l], tag) {
+            return i;
+        }
+        i = i + 1;
+    }
+    if used >= rule_cap() || len(tag) > rule_name_max() {
+        return rule_cap();
+    }
+    copy_into(names[used * rule_name_max()..used * rule_name_max() + len(tag)], tag);
+    stats[base + rule_cap() + used] = len(tag);
+    stats[base + 2 * rule_cap() + 1] = used + 1;
+    return used;
+}
+
+fn observe[&s](stats: &!s [int], first: int, sum_at: int, ms: int) -> [] int {
+    var v = ms;
+    if v < 0 {
+        v = 0;
+    }
+    let b = first + bucket_of(v);
+    stats[b] = stats[b] + 1;
+    stats[sum_at] = stats[sum_at] + v;
+    return 0;
+}
+
+// A request has ended (the access log's line is built from the same record). `route` is the route's index or `0 - 1` if it was refused
+// before one was chosen; `upstream` the upstream's index (only looked at if there is a route); `wait_ms` the wait for the response head,
+// or `0 - 1` if none arrived; `rule` the tag it was refused with, or empty.
+pub fn record[&s, &n, &r](stats: &!s [int], names: &!n [byte], status: int, route_index: int, upstream_index: int, ms: int, wait_ms: int, bytes_in: int, bytes_out: int, rule: &r [byte], retried: bool) -> [] int {
+    if route_index >= 0 {
+        let b = route_index * route_block();
+        let c = b + class_of(status);
+        stats[c] = stats[c] + 1;
+        stats[b + 6] = stats[b + 6] + bytes_in;
+        stats[b + 7] = stats[b + 7] + bytes_out;
+        observe(stats, b + 8, b + 22, ms);
+        if upstream_index >= 0 && upstream_index < upstreams() {
+            let u = up_base(upstream_index);
+            if wait_ms >= 0 {
+                stats[u] = stats[u] + 1;
+                observe(stats, u + 3, u + 17, wait_ms);
+            }
+            if retried {
+                stats[u + 1] = stats[u + 1] + 1;
+            }
+        }
+    }
+    if len(rule) > 0 {
+        var at = rule_base() + rule_index(stats, names, rule);
+        if at == rule_base() + rule_cap() {
+            at = rule_base() + 2 * rule_cap();
+        }
+        stats[at] = stats[at] + 1;
+    }
+    return 0;
+}
+
+// An upstream failed as the circuit counts failures.
+pub fn upstream_failed[&s](stats: &!s [int], upstream_index: int) -> [] int {
+    if upstream_index >= 0 && upstream_index < upstreams() {
+        let u = up_base(upstream_index) + 2;
+        stats[u] = stats[u] + 1;
+    }
+    return 0;
+}
+
+fn total[&s](stats: &s [int], first: int) -> [] int {
+    var n = 0;
+    var i = 0;
+    while i < 14 {
+        n = n + stats[first + i];
+        i = i + 1;
+    }
+    return n;
+}
+
+// ---- JSON ----
+
+fn num[&o](out: &!o [byte], at: int, v: int) -> [] int {
+    return out.put_int(out, at, sat(v));
+}
+
+fn jkey[&o](out: &!o [byte], at: int, key: &static [byte]) -> [] int {
+    var k = out.put(out, at, "\"");
+    k = out.put(out, k, key);
+    return out.put(out, k, "\":");
+}
+
+fn jnum[&o](out: &!o [byte], at: int, key: &static [byte], v: int) -> [] int {
+    return num(out, jkey(out, at, key), v);
+}
+
+fn jhist[&o, &s](out: &!o [byte], at: int, key: &static [byte], stats: &s [int], first: int, sum_at: int) -> [] int {
+    var k = out.put(out, jkey(out, at, key), "{\"buckets\":[");
+    var i = 0;
+    while i < 14 {
+        if i > 0 {
+            k = out.put(out, k, ",");
+        }
+        k = num(out, k, stats[first + i]);
+        i = i + 1;
+    }
+    k = out.put(out, k, "],");
+    k = jnum(out, k, "sum", stats[sum_at]);
+    k = out.put(out, k, ",");
+    k = jnum(out, k, "count", total(stats, first));
+    return out.put(out, k, "}");
+}
+
+fn rule_name[&n, &s](names: &n [byte], stats: &s [int], i: int) -> [] &n [byte] {
+    return names[i * rule_name_max()..i * rule_name_max() + stats[rule_base() + rule_cap() + i]];
+}
+
+// The metrics as JSON, from offset `at`; answers the new offset, or `0 - 1` if `out` is too small. The keys and their order are fixed;
+// routes and upstreams are in the deployment's order, refusals in the order each tag was first seen.
+pub fn json[&o, &s, &n, &g](out: &!o [byte], at: int, stats: &s [int], names: &n [byte], gauge: &g [int]) -> [] int {
+    var k = out.put(out, at, "{\"v\":1,");
+    k = jnum(out, k, "uptime_ms", gauge[0]);
+    k = out.put(out, k, ",");
+    k = jnum(out, k, "sessions_active", gauge[1]);
+    k = out.put(out, k, ",\"le_ms\":[");
+    var b = 0;
+    while b < 13 {
+        if b > 0 {
+            k = out.put(out, k, ",");
+        }
+        k = out.put_int(out, k, bound(b));
+        b = b + 1;
+    }
+    k = out.put(out, k, "],\"routes\":[");
+    var i = 0;
+    while i < routes() {
+        if i > 0 {
+            k = out.put(out, k, ",");
+        }
+        let base = i * route_block();
+        k = out.put(out, k, "{\"name\":\"");
+        k = out.put(out, k, route.name(i));
+        k = out.put(out, k, "\",\"requests\":{");
+        var c = 0;
+        while c < 6 {
+            if c > 0 {
+                k = out.put(out, k, ",");
+            }
+            k = jnum(out, k, class_name(c), stats[base + c]);
+            c = c + 1;
+        }
+        k = out.put(out, k, "},");
+        k = jnum(out, k, "bytes_in", stats[base + 6]);
+        k = out.put(out, k, ",");
+        k = jnum(out, k, "bytes_out", stats[base + 7]);
+        k = out.put(out, k, ",");
+        k = jhist(out, k, "duration_ms", stats, base + 8, base + 22);
+        k = out.put(out, k, "}");
+        i = i + 1;
+    }
+    k = out.put(out, k, "],\"upstreams\":[");
+    i = 0;
+    while i < upstreams() {
+        if i > 0 {
+            k = out.put(out, k, ",");
+        }
+        let base = up_base(i);
+        k = out.put(out, k, "{\"name\":\"");
+        k = out.put(out, k, deploy.upstream_name(i));
+        k = out.put(out, k, "\",");
+        k = jnum(out, k, "responses", stats[base]);
+        k = out.put(out, k, ",");
+        k = jnum(out, k, "retries", stats[base + 1]);
+        k = out.put(out, k, ",");
+        k = jnum(out, k, "failures", stats[base + 2]);
+        k = out.put(out, k, ",");
+        k = jnum(out, k, "pool_idle", gauge[5 + 2 * i]);
+        k = out.put(out, k, ",\"circuit_open\":");
+        if gauge[6 + 2 * i] != 0 {
+            k = out.put(out, k, "true,");
+        } else {
+            k = out.put(out, k, "false,");
+        }
+        k = jhist(out, k, "wait_ms", stats, base + 3, base + 17);
+        k = out.put(out, k, "}");
+        i = i + 1;
+    }
+    k = out.put(out, k, "],\"refusals\":{");
+    let used = stats[rule_base() + 2 * rule_cap() + 1];
+    i = 0;
+    while i < used {
+        k = out.put(out, k, "\"");
+        k = out.put(out, k, rule_name(names, stats, i));
+        k = out.put(out, k, "\":");
+        k = num(out, k, stats[rule_base() + i]);
+        k = out.put(out, k, ",");
+        i = i + 1;
+    }
+    k = jnum(out, k, "other", stats[rule_base() + 2 * rule_cap()]);
+    k = out.put(out, k, "},\"log\":{");
+    k = jnum(out, k, "dropped", gauge[3]);
+    k = out.put(out, k, ",");
+    k = jnum(out, k, "write_failures", gauge[4]);
+    return out.put(out, k, "}}\n");
+}
+
+// ---- Prometheus text exposition ----
+
+fn family[&o](out: &!o [byte], at: int, name: &static [byte], kind: &static [byte], help: &static [byte]) -> [] int {
+    var k = out.put(out, at, "# HELP cancho_gateway_");
+    k = out.put(out, k, name);
+    k = out.put(out, k, " ");
+    k = out.put(out, k, help);
+    k = out.put(out, k, "\n# TYPE cancho_gateway_");
+    k = out.put(out, k, name);
+    k = out.put(out, k, " ");
+    k = out.put(out, k, kind);
+    return out.put(out, k, "\n");
+}
+
+// `cancho_gateway_<name><suffix>{<key>="<value>"} <v>`
+fn sample[&o, &v](out: &!o [byte], at: int, name: &static [byte], suffix: &static [byte], key: &static [byte], value: &v [byte], v: int) -> [] int {
+    var k = out.put(out, at, "cancho_gateway_");
+    k = out.put(out, k, name);
+    k = out.put(out, k, suffix);
+    k = out.put(out, k, "{");
+    k = out.put(out, k, key);
+    k = out.put(out, k, "=\"");
+    k = out.put(out, k, value);
+    k = out.put(out, k, "\"} ");
+    k = num(out, k, v);
+    return out.put(out, k, "\n");
+}
+
+fn plain[&o](out: &!o [byte], at: int, name: &static [byte], v: int) -> [] int {
+    var k = out.put(out, at, "cancho_gateway_");
+    k = out.put(out, k, name);
+    k = out.put(out, k, " ");
+    k = num(out, k, v);
+    return out.put(out, k, "\n");
+}
+
+fn phist[&o, &v, &s](out: &!o [byte], at: int, name: &static [byte], key: &static [byte], value: &v [byte], stats: &s [int], first: int, sum_at: int) -> [] int {
+    var k = at;
+    var running = 0;
+    var i = 0;
+    while i < 14 {
+        running = running + stats[first + i];
+        k = out.put(out, k, "cancho_gateway_");
+        k = out.put(out, k, name);
+        k = out.put(out, k, "_bucket{");
+        k = out.put(out, k, key);
+        k = out.put(out, k, "=\"");
+        k = out.put(out, k, value);
+        k = out.put(out, k, "\",le=\"");
+        if i < 13 {
+            k = out.put_int(out, k, bound(i));
+        } else {
+            k = out.put(out, k, "+Inf");
+        }
+        k = out.put(out, k, "\"} ");
+        k = num(out, k, running);
+        k = out.put(out, k, "\n");
+        i = i + 1;
+    }
+    k = sample(out, k, name, "_sum", key, value, stats[sum_at]);
+    return sample(out, k, name, "_count", key, value, running);
+}
+
+// `cancho_gateway_<name>{<k1>="<v1>",<k2>="<v2>"} <v>`
+fn sample2[&o, &a, &b](out: &!o [byte], at: int, name: &static [byte], k1: &static [byte], v1: &a [byte], k2: &static [byte], v2: &b [byte], v: int) -> [] int {
+    var k = out.put(out, at, "cancho_gateway_");
+    k = out.put(out, k, name);
+    k = out.put(out, k, "{");
+    k = out.put(out, k, k1);
+    k = out.put(out, k, "=\"");
+    k = out.put(out, k, v1);
+    k = out.put(out, k, "\",");
+    k = out.put(out, k, k2);
+    k = out.put(out, k, "=\"");
+    k = out.put(out, k, v2);
+    k = out.put(out, k, "\"} ");
+    k = num(out, k, v);
+    return out.put(out, k, "\n");
+}
+
+// The metrics as Prometheus text, from offset `at`; answers the new offset, or `0 - 1`.
+pub fn prometheus[&o, &s, &n, &g](out: &!o [byte], at: int, stats: &s [int], names: &n [byte], gauge: &g [int]) -> [] int {
+    var k = family(out, at, "uptime_ms", "gauge", "Milliseconds since the gateway started.");
+    k = plain(out, k, "uptime_ms", gauge[0]);
+    k = family(out, k, "sessions_active", "gauge", "Client connections being served.");
+    k = plain(out, k, "sessions_active", gauge[1]);
+    k = family(out, k, "requests_total", "counter", "Requests that were routed, by route and status class.");
+    var i = 0;
+    while i < routes() {
+        var c = 0;
+        while c < 6 {
+            k = sample2(out, k, "requests_total", "route", route.name(i), "class", class_name(c), stats[i * route_block() + c]);
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    k = family(out, k, "bytes_in_total", "counter", "Request bytes forwarded, by route.");
+    i = 0;
+    while i < routes() {
+        k = sample(out, k, "bytes_in_total", "", "route", route.name(i), stats[i * route_block() + 6]);
+        i = i + 1;
+    }
+    k = family(out, k, "bytes_out_total", "counter", "Response bytes sent, by route.");
+    i = 0;
+    while i < routes() {
+        k = sample(out, k, "bytes_out_total", "", "route", route.name(i), stats[i * route_block() + 7]);
+        i = i + 1;
+    }
+    k = family(out, k, "request_duration_ms", "histogram", "Time from accept to the end of the request, by route.");
+    i = 0;
+    while i < routes() {
+        k = phist(out, k, "request_duration_ms", "route", route.name(i), stats, i * route_block() + 8, i * route_block() + 22);
+        i = i + 1;
+    }
+    k = family(out, k, "refusals_total", "counter", "Requests the gateway refused, by rule.");
+    let used = stats[rule_base() + 2 * rule_cap() + 1];
+    i = 0;
+    while i < used {
+        k = sample(out, k, "refusals_total", "", "rule", rule_name(names, stats, i), stats[rule_base() + i]);
+        i = i + 1;
+    }
+    k = sample(out, k, "refusals_total", "", "rule", "other", stats[rule_base() + 2 * rule_cap()]);
+    k = family(out, k, "upstream_responses_total", "counter", "Requests whose response head arrived, by upstream.");
+    i = 0;
+    while i < upstreams() {
+        k = sample(out, k, "upstream_responses_total", "", "upstream", deploy.upstream_name(i), stats[up_base(i)]);
+        i = i + 1;
+    }
+    k = family(out, k, "upstream_retries_total", "counter", "Requests sent again on a fresh connection, by upstream.");
+    i = 0;
+    while i < upstreams() {
+        k = sample(out, k, "upstream_retries_total", "", "upstream", deploy.upstream_name(i), stats[up_base(i) + 1]);
+        i = i + 1;
+    }
+    k = family(out, k, "upstream_failures_total", "counter", "Failures as the circuit counts them, by upstream.");
+    i = 0;
+    while i < upstreams() {
+        k = sample(out, k, "upstream_failures_total", "", "upstream", deploy.upstream_name(i), stats[up_base(i) + 2]);
+        i = i + 1;
+    }
+    k = family(out, k, "upstream_wait_ms", "histogram", "Wait for the response head, by upstream.");
+    i = 0;
+    while i < upstreams() {
+        k = phist(out, k, "upstream_wait_ms", "upstream", deploy.upstream_name(i), stats, up_base(i) + 3, up_base(i) + 17);
+        i = i + 1;
+    }
+    k = family(out, k, "pool_idle", "gauge", "Idle pooled connections, by upstream.");
+    i = 0;
+    while i < upstreams() {
+        k = sample(out, k, "pool_idle", "", "upstream", deploy.upstream_name(i), gauge[5 + 2 * i]);
+        i = i + 1;
+    }
+    k = family(out, k, "circuit_open", "gauge", "1 if the upstream's circuit is open, by upstream.");
+    i = 0;
+    while i < upstreams() {
+        k = sample(out, k, "circuit_open", "", "upstream", deploy.upstream_name(i), gauge[6 + 2 * i]);
+        i = i + 1;
+    }
+    k = family(out, k, "log_dropped_total", "counter", "Access-log lines dropped because the queue was full.");
+    k = plain(out, k, "log_dropped_total", gauge[3]);
+    k = family(out, k, "log_write_failures_total", "counter", "Access-log writes that failed.");
+    return plain(out, k, "log_write_failures_total", gauge[4]);
+}
+
+// ---- readiness ----
+
+// 1 if the gateway is ready: no upstream's circuit is open and the log is not failing.
+pub fn is_ready[&g](gauge: &g [int]) -> [] int {
+    if gauge[2] != 0 {
+        return 0;
+    }
+    var i = 0;
+    while i < upstreams() {
+        if gauge[6 + 2 * i] != 0 {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// The body of `/readyz` from offset `at`: `{"ready":true}` or `{"ready":false,"why":[...]}`, the reasons as data.
+pub fn ready_body[&o, &g](out: &!o [byte], at: int, gauge: &g [int]) -> [] int {
+    if is_ready(gauge) == 1 {
+        return out.put(out, at, "{\"ready\":true}\n");
+    }
+    var k = out.put(out, at, "{\"ready\":false,\"why\":[");
+    var first = true;
+    var i = 0;
+    while i < upstreams() {
+        if gauge[6 + 2 * i] != 0 {
+            if !first {
+                k = out.put(out, k, ",");
+            }
+            first = false;
+            k = out.put(out, k, "\"upstream ");
+            k = out.put(out, k, deploy.upstream_name(i));
+            k = out.put(out, k, ": circuit open\"");
+        }
+        i = i + 1;
+    }
+    if gauge[2] != 0 {
+        if !first {
+            k = out.put(out, k, ",");
+        }
+        k = out.put(out, k, "\"log: a write failed in the last 10 s\"");
+    }
+    return out.put(out, k, "]}\n");
+}
+
+// ---- the response, and its size ----
+
+// Room kept at the front of the response buffer for the head, which is written after the body (its Content-Length is the body's length).
+pub fn head_room() -> [] int {
+    return 192;
+}
+
+// Write the head of a `status` answer of content type `ctype` in front of the body that fills `out[head_room()..end]`; answers where the
+// response starts (the body is not moved). `status` is 200 or 503.
+pub fn frame[&o](out: &!o [byte], status: int, ctype: &static [byte], end: int) -> [] int {
+    let body = end - head_room();
+    var reason = "OK";
+    if status == 503 {
+        reason = "Service Unavailable";
+    }
+    let length = len("HTTP/1.1 ") + out.digits(status) + 1 + len(reason) + len("\r\nContent-Type: ") + len(ctype) + len("\r\nContent-Length: ") + out.digits(body) + len("\r\nConnection: close\r\n\r\n");
+    if length > head_room() {
+        return 0 - 1;
+    }
+    let start = head_room() - length;
+    var k = out.put(out, start, "HTTP/1.1 ");
+    k = out.put_int(out, k, status);
+    k = out.put(out, k, " ");
+    k = out.put(out, k, reason);
+    k = out.put(out, k, "\r\nContent-Type: ");
+    k = out.put(out, k, ctype);
+    k = out.put(out, k, "\r\nContent-Length: ");
+    k = out.put_int(out, k, body);
+    k = out.put(out, k, "\r\nConnection: close\r\n\r\n");
+    if k < 0 {
+        return 0 - 1;
+    }
+    return start;
+}
+
+// An upper bound on the response to a scrape, for this deployment: what the buffer is sized to, and within a tenth of the largest answer there
+// can be (the unit test checks both). In the Prometheus text, which is the larger format: the families' comments and the four plain
+// lines (2,161 bytes, rounded up), a line for each rule and one for `other` (98 bytes: the name's 40 and an 18-digit number), per route
+// 24 lines (1,836 bytes and its name 24 times), per upstream 21 lines (1,615 bytes and its name 21 times).
+pub fn worst_case() -> [] int {
+    var bytes = head_room() + 2304 + (rule_cap() + 1) * 98 + 64;
+    var i = 0;
+    while i < routes() {
+        bytes = bytes + 1836 + 24 * len(route.name(i));
+        i = i + 1;
+    }
+    i = 0;
+    while i < upstreams() {
+        bytes = bytes + 1615 + 21 * len(deploy.upstream_name(i));
+        i = i + 1;
+    }
+    return bytes;
+}

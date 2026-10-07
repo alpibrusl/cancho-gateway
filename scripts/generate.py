@@ -38,7 +38,7 @@ TIMEOUT_RANGE = (100, 600000)
 DEFAULT_BODY = 1 << 20
 METHODS = ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
 KEYS = {
-    "": ["listen", "header_timeout_ms", "connect_timeout_ms", "upstream_timeout_ms", "total_timeout_ms", "idle_timeout_ms", "pool_idle_max", "circuit_threshold", "circuit_open_ms", "log_failure"],
+    "": ["listen", "header_timeout_ms", "connect_timeout_ms", "upstream_timeout_ms", "total_timeout_ms", "idle_timeout_ms", "pool_idle_max", "circuit_threshold", "circuit_open_ms", "log_failure", "admin_listen"],
     "upstream": ["name", "addr"],
     "route": ["name", "host", "path_prefix", "methods", "upstream", "max_body", "trust_forwarded"],
 }
@@ -160,6 +160,12 @@ def load(path):
     if log_failure not in ("exit", "continue"):
         refuse("config.log", 'log_failure must be "exit" (stop when the access log cannot be written) or "continue" (docs/observability.md section 3)', key="log_failure")
     timeouts["log_failure_exit"] = 1 if log_failure == "exit" else 0
+    admin = doc.get("admin_listen", 0)
+    if not isinstance(admin, int) or isinstance(admin, bool) or not 0 <= admin <= 65535:
+        refuse("config.admin", "admin_listen must be a port in 1..65535, or 0 for no admin listener (docs/observability.md section 7)", key="admin_listen")
+    if admin == listen:
+        refuse("config.admin", "admin_listen must differ from listen: the proxy's port is the public one", key="admin_listen")
+    timeouts["admin_port"] = admin
     if not timeouts["header_timeout_ms"] <= timeouts["total_timeout_ms"] or not timeouts["connect_timeout_ms"] <= timeouts["total_timeout_ms"]:
         refuse("config.timeout", "total_timeout_ms must be at least the header and connect timeouts", key="total_timeout_ms")
     ups = doc.get("upstream", [])
@@ -257,6 +263,8 @@ def render_deploy(listen, ups, timeouts):
         "pub fn circuit_open_ms() -> [] int {", "    return %d;" % timeouts["circuit_open_ms"], "}", "",
         "// 1 if the gateway stops when its access log cannot be written, 0 if it carries on (docs/observability.md section 3).",
         "pub fn log_failure_exit() -> [] int {", "    return %d;" % timeouts["log_failure_exit"], "}", "",
+        "// The admin listener's port (metrics, health; docs/observability.md section 7), 0 if there is none.",
+        "pub fn admin_port() -> [] int {", "    return %d;" % timeouts["admin_port"], "}", "",
         "// The longest common prefix of the addresses, cut at a delimiter: what `narrow` would be given once",
         "// cancho has separate listen and connect bounds. Empty means no shared prefix.",
         "pub fn intended_egress_prefix() -> [] &static [byte] {", "    return %s;" % literal(prefix), "}", "",
