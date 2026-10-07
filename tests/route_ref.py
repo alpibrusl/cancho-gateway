@@ -1,4 +1,4 @@
-"""The reference route selector (docs/routes.md), written from the specification and not from src/route.ls.
+"""The reference route selector (docs/routes.md), written from the specification and not from src/route.cho.
 
 `select(routes, host, method, path)` answers ("route", index) or ("refuse", tag, status). `routes` are the dicts that
 scripts/generate.py's `load` returns (host None for any, prefix, mask, upstream, max_body, trust).

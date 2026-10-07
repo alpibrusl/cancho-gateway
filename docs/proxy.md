@@ -21,7 +21,7 @@ on either side and the upstream pool (#6), (the header policy of #7 is built: `d
    connection closes.
 
 A slot is a client or an upstream connection; the two ends of a request point at each other. Per slot: a 16 KiB read buffer, a
-32 KiB write queue, and sixteen state ints (layout in `src/proxy.ls`).
+32 KiB write queue, and sixteen state ints (layout in `src/proxy.cho`).
 
 ## 2. Backpressure and the loop
 
@@ -55,7 +55,7 @@ the response**: a download longer than it is cut, not refused.
 **Where this differs from design section 4:** a client that arrives when the table is full is **closed without a response**
 (there is no slot to answer in); `limit.connections` 503 is only sent when the upstream half cannot be opened.
 
-**A refused client is kept open for a moment.** lex-sys has no half-close (`shutdown`), and closing a socket with unread request
+**A refused client is kept open for a moment.** cancho has no half-close (`shutdown`), and closing a socket with unread request
 bytes in it sends a reset that can destroy the response before the client has read it (RFC 9112 9.6). So after a refusal is
 written the gateway reads and discards the client's input until it has been silent for 500 ms, or for at most three seconds.
 
@@ -102,7 +102,7 @@ which the lingering close now prevents. (3) `route.select` once divided by a met
 ## 6. Not tested, not built
 
 - **Upstream host names.** `tcp_connect_start` given a name resolves it inside the builtin with `getaddrinfo`, which **blocks the
-  loop** (`lex-sys/examples/tls_nb/resolve_demo.ls`). Every test uses IP literals. The generator still accepts names.
+  loop** (`cancho/examples/tls_nb/resolve_demo.cho`). Every test uses IP literals. The generator still accepts names.
 - HTTP/1.0 clients through the proxy, `Expect: 100-continue`, `HEAD` responses, and an upstream that sends `1xx` responses.
 - The response is relayed **unverified**. Because the upstream is told `Connection: close`, a lying `Content-Length` cannot
   desynchronise a later request; the client sees what the upstream sent.

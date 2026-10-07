@@ -6,19 +6,19 @@ Read `docs/design.md` first: it fixes scope, the authority row and the gates bef
 
 All of these pass before anything is called done (CI runs them, `.github/workflows/ci.yml`):
 
-    lex-sys fmt --check src tests generated
-    python3 scripts/generate.py deploy/example.toml --check   # generated/deploy.ls is current
+    cancho fmt --check src tests generated
+    python3 scripts/generate.py deploy/example.toml --check   # generated/deploy.cho is current
     python3 tests/generate_test.py
     python3 tests/response/run.py                # upstream response heads (docs/pool.md)
     python3 tests/proxy_test.py                  # the proxy core, end to end (docs/proxy.md)
     python3 tests/route_test.py 12 400          # route selection vs the reference; also --fixed (docs/routes.md)
-    lex-sys build
-    lex-sys test
+    cancho build
+    cancho test
     python3 tests/smuggling/run.py --gateway    # also --prefixes, --fuzz 1500, --chunked (docs/framing.md)
     python3 scripts/lines.py                 # no source file over 2,000 lines; split by concern
     python3 scripts/authority.py --check     # the compiler's authority report, within authority.toml
 
-`LEX_SYS` or `lex-sys` on `PATH` is the compiler pinned in `lex-sys.toml`.
+`CANCHO` or `cancho` on `PATH` is the compiler pinned in `cancho.toml`.
 
 ## Rules
 

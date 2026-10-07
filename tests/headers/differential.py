@@ -7,7 +7,7 @@ connection management headers are removed from both views before comparing; the 
 default route (/p) and a route with trust_forwarded (/trusted/p), where the forwarding headers must pass exactly as nginx passes them.
 
 A difference must be listed in EXPECTED with its reason; an unlisted difference fails, and so does a listed one that has gone away
-(the table cannot go stale). Needs nginx on PATH (or NGINX=...), lex-sys (LEX_SYS), and runs from any directory.
+(the table cannot go stale). Needs nginx on PATH (or NGINX=...), cancho (CANCHO), and runs from any directory.
 """
 
 import os

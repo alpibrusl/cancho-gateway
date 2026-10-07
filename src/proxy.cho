@@ -114,7 +114,7 @@ fn flush_ms() -> [] int {
 // After a refusal has been written the connection is kept open until the client has been silent this long (and for at most three
 // seconds), its input read and thrown away: closing a socket with
 // unread request bytes in it sends a reset, which can destroy the response before the client has read it (RFC 9112 9.6).
-// lex-sys has no half-close, so the gateway lingers instead.
+// cancho has no half-close, so the gateway lingers instead.
 fn linger_ms() -> [] int {
     return 500;
 }

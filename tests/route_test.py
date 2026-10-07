@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test of route selection: src/route.ls against tests/route_ref.py over generated tables and requests.
+"""Differential test of route selection: src/route.cho against tests/route_ref.py over generated tables and requests.
 
     python3 tests/route_test.py [TABLES] [REQUESTS]    # defaults: 12 tables, 400 requests each
 
@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 import generate  # noqa: E402
 import route_ref  # noqa: E402
 
-LEX = os.environ.get("LEX_SYS", "lex-sys")
+LEX = os.environ.get("CANCHO", "cancho")
 METHODS = generate.METHODS
 SEGMENTS = ["a", "api", "static", "v1", "x", "a.b", "..", ".", "api2"]
 
@@ -144,8 +144,8 @@ def main():
         with tempfile.TemporaryDirectory() as tmp:
             subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), deploy, "--out", tmp], check=True)
             binary = os.path.join(tmp, "probe")
-            built = subprocess.run([LEX, "build", "--std", os.path.join(tmp, "routes.ls"), str(ROOT / "src" / "route.ls"),
-                                    str(ROOT / "src" / "route_probe.ls"), "-o", binary], capture_output=True, text=True)
+            built = subprocess.run([LEX, "build", "--std", os.path.join(tmp, "routes.cho"), str(ROOT / "src" / "route.cho"),
+                                    str(ROOT / "src" / "route_probe.cho"), "-o", binary], capture_output=True, text=True)
             if built.returncode != 0:
                 raise SystemExit("build failed: " + built.stderr[:300])
             batch = requests(rng, routes, per)

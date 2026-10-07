@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The deployment generator (tasks #11 and #4, docs/design.md section 2, docs/routes.md).
 
-    python3 scripts/generate.py deploy/example.toml            # write generated/deploy.ls and generated/routes.ls
+    python3 scripts/generate.py deploy/example.toml            # write generated/deploy.cho and generated/routes.cho
     python3 scripts/generate.py deploy/example.toml --check    # change nothing; exit 1 if either is stale
     python3 scripts/generate.py deploy/example.toml --explain  # print what it admits, change nothing
     python3 scripts/generate.py deploy/example.toml --out DIR  # write the two modules into DIR instead
@@ -249,7 +249,7 @@ def render_deploy(listen, ups, timeouts):
         "pub fn circuit_threshold() -> [] int {", "    return %d;" % timeouts["circuit_threshold"], "}", "",
         "pub fn circuit_open_ms() -> [] int {", "    return %d;" % timeouts["circuit_open_ms"], "}", "",
         "// The longest common prefix of the addresses, cut at a delimiter: what `narrow` would be given once",
-        "// lex-sys has separate listen and connect bounds. Empty means no shared prefix.",
+        "// cancho has separate listen and connect bounds. Empty means no shared prefix.",
         "pub fn intended_egress_prefix() -> [] &static [byte] {", "    return %s;" % literal(prefix), "}", "",
         "// Upstream `i` (0-based), as host:port; the empty string past the end.",
         "pub fn upstream_addr(i: int) -> [] &static [byte] {",
@@ -300,7 +300,7 @@ def main():
         print(json.dumps({"file": args[0], "hint": r.hint, "key": r.key, "line": r.line, "message": str(r), "rule": r.rule},
                          sort_keys=True), file=sys.stderr)
         return 2
-    outputs = {"deploy.ls": render_deploy(listen, ups, timeouts), "routes.ls": render_routes(routes)}
+    outputs = {"deploy.cho": render_deploy(listen, ups, timeouts), "routes.cho": render_routes(routes)}
     if "--explain" in flags:
         prefix = intended_prefix([a for _, a in ups])
         print("listen %d; %d upstream(s): %s" % (listen, len(ups), ", ".join(a for _, a in ups)))

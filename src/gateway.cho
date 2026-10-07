@@ -6,7 +6,7 @@ import gateway.proxy;
 import gateway.version;
 
 // `gateway` -- the reverse proxy (docs/design.md, docs/proxy.md). `gateway --version` prints its name and version; any other
-// invocation serves on the port the deployment compiled in (`generated/deploy.ls`).
+// invocation serves on the port the deployment compiled in (`generated/deploy.cho`).
 
 fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
     var n = 0;

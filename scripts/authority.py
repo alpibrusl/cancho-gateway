@@ -5,7 +5,7 @@
     python3 scripts/authority.py --check    # change nothing; exit 1 on drift or a breach
 
 A derived label must be in authority.toml; `bounded` must be true; no foreign symbol; and no label
-named in FORBIDDEN, whatever the ceiling says. The compiler is $LEX_SYS, or `lex-sys` on PATH.
+named in FORBIDDEN, whatever the ceiling says. The compiler is $CANCHO, or `cancho` on PATH.
 """
 
 import json
@@ -20,10 +20,10 @@ FORBIDDEN = {"ffi", "fs_read", "fs_write", "file_read", "file_write", "dir_read"
 
 
 def derive(files):
-    out = subprocess.run([os.environ.get("LEX_SYS", "lex-sys"), "authority", *files, "--std", "--output", "json"],
+    out = subprocess.run([os.environ.get("CANCHO", "cancho"), "authority", *files, "--std", "--output", "json"],
                          capture_output=True, text=True)
     if out.returncode != 0:
-        sys.exit("lex-sys authority failed:\n" + out.stdout + out.stderr)
+        sys.exit("cancho authority failed:\n" + out.stdout + out.stderr)
     return json.loads(out.stdout)
 
 
@@ -50,7 +50,7 @@ def problems_for(name, report, allowed):
 
 def main():
     check = "--check" in sys.argv[1:]
-    with open(ROOT / "lex-sys.toml", "rb") as f:
+    with open(ROOT / "cancho.toml", "rb") as f:
         project = tomllib.load(f)
     with open(ROOT / "authority.toml", "rb") as f:
         ceilings = tomllib.load(f)

@@ -9,12 +9,12 @@ health is in `docs/health.md`. Everything here is measured by `tests/response/ru
 The first slice (`docs/proxy.md`) opened a connection per request and read the response until the upstream closed it. To reuse a
 connection the gateway must know **where a response ends**, so it now reads the response head and frames the body.
 
-- `src/response.ls`: a strict response-head parser (section 2).
+- `src/response.cho`: a strict response-head parser (section 2).
 - `forward.rewrite_response`: the head the client gets, hop-by-hop headers removed, `Connection: close` added (the client's
   connection still closes after each response).
 - `forward.rewrite`: the request line is now sent as `HTTP/1.1` whatever the client spoke, and carries no `Connection` header
   (keep-alive is the default), unless pooling is off (`pool_idle_max = 0`), when it carries `Connection: close` as before.
-- `src/proxy.ls`: response framing, the pool, retry.
+- `src/proxy.cho`: response framing, the pool, retry.
 - Deployment keys: `pool_idle_max` (idle connections kept per upstream, 0 to 64, default 4; **0 turns pooling off**) and
   `idle_timeout_ms` (100 to 600000, default 5000).
 

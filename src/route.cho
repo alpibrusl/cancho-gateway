@@ -11,7 +11,7 @@ import gateway.routes_table;
 //   2. Inside it, the longest path_prefix that matches on a segment boundary and allows the method wins.
 //   3. A path that matches some route but no route that allows the method is 405; one that matches nothing is 404.
 //
-// `select` answers a route index (0 or more) or `0 - rule`. The table is `generated/routes.ls`, validated at generation time
+// `select` answers a route index (0 or more) or `0 - rule`. The table is `generated/routes.cho`, validated at generation time
 // (no ties, no malformed prefix), so equal-length matches cannot occur; the first in file order is taken if they ever did.
 
 pub fn rule_count() -> [] int {

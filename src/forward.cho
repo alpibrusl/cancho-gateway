@@ -201,7 +201,7 @@ pub fn rewrite[&s, &t, &o](src: &s [byte], table: &t [int], out: &!o [byte], kee
         }
         i = i + 1;
     }
-    k = out.put(out, k, "Via: 1.1 lexsys-gateway\r\n");
+    k = out.put(out, k, "Via: 1.1 cancho-gateway\r\n");
     if !trust {
         k = out.put(out, k, "X-Forwarded-Host: ");
         k = out.put(out, k, http.header(src, table, "host"));
@@ -232,7 +232,7 @@ pub fn rewrite[&s, &t, &o](src: &s [byte], table: &t [int], out: &!o [byte], kee
 pub fn rewrite_response[&s, &t, &o](src: &s [byte], table: &t [int], out: &!o [byte]) -> [] int {
     var k = out.put(out, 0, src[0..first_line_end(src)]);
     k = copy_headers(src, table, table[2], out, k);
-    k = out.put(out, k, "Via: 1.1 lexsys-gateway\r\nConnection: close\r\n\r\n");
+    k = out.put(out, k, "Via: 1.1 cancho-gateway\r\nConnection: close\r\n\r\n");
     if k < 0 {
         return 0 - 1;
     }

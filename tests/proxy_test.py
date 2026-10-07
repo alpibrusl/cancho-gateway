@@ -21,7 +21,7 @@ import threading
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-LEX = os.environ.get("LEX_SYS", "lex-sys")
+LEX = os.environ.get("CANCHO", "cancho")
 SOURCES = ["out", "problem", "framing", "chunked", "route", "response", "forward", "egress", "proxy", "version", "gateway"]
 
 
@@ -464,7 +464,7 @@ upstream = "up"
 max_body = 1048576
 """ % (port, pool, circuit, up_port, dead_port, ka_port, flap_port))
         subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(deploy), "--out", tmp], check=True)
-        files = [os.path.join(tmp, "deploy.ls"), os.path.join(tmp, "routes.ls")] + [str(ROOT / "src" / (n + ".ls")) for n in SOURCES]
+        files = [os.path.join(tmp, "deploy.cho"), os.path.join(tmp, "routes.cho")] + [str(ROOT / "src" / (n + ".cho")) for n in SOURCES]
         built = subprocess.run([LEX, "build", "--std", *files, "-o", os.path.join(tmp, "gateway")], capture_output=True, text=True)
         if built.returncode != 0:
             raise SystemExit("build failed: " + built.stderr[:400])
@@ -566,7 +566,7 @@ class T:
         head = up.heads[n].decode()
         lines = head.split("\r\n")
         assert lines[:3] == ["GET /x HTTP/1.1", "Host: a.example", "Accept: */*"], head
-        assert lines[3:5] == ["Via: 1.1 lexsys-gateway", "X-Forwarded-Host: a.example"] and lines[5] == "X-Forwarded-Proto: http", head
+        assert lines[3:5] == ["Via: 1.1 cancho-gateway", "X-Forwarded-Host: a.example"] and lines[5] == "X-Forwarded-Proto: http", head
         assert re.fullmatch(r"X-Request-Id: [0-9a-f]+-[0-9a-f]+-[0-9a-f]{8,}", lines[6]) and len(lines) == 7, head
 
     def forwarding_claims_are_not_believed_on_a_default_route(gw, up):
@@ -586,7 +586,7 @@ class T:
         assert h["forwarded"] == ["for=1.2.3.4"] and h["x-forwarded-for"] == ["1.2.3.4"] and h["x-real-ip"] == ["1.2.3.4"], h
         assert h["x-forwarded-host"] == ["front.example"] and h["x-forwarded-proto"] == ["https"], h
         assert h["x-request-id"] == ["edge-42"], h
-        assert h["via"] == ["1.1 lexsys-gateway"], h
+        assert h["via"] == ["1.1 cancho-gateway"], h
 
     def a_trusted_route_replaces_a_bad_request_id(gw, up):
         for bad in (b"a,b", b"a b", b"x" * 65, b"", b"a/b"):
@@ -614,7 +614,7 @@ class T:
     def the_response_gets_a_via(gw, up):
         raw = request(gw, GET % b"/x")
         head = raw.split(b"\r\n\r\n")[0].decode()
-        assert head.count("Via: 1.1 lexsys-gateway") == 1, head
+        assert head.count("Via: 1.1 cancho-gateway") == 1, head
 
     def crafted_header_values_add_no_header_the_gateway_did_not_write(gw, up):
         # Whatever the client sends, every head the upstream sees has no stray control byte and carries only the client's own header names
