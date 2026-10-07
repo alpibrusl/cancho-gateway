@@ -37,7 +37,7 @@ discovery, clustering. WebSockets (the OCPP use case) are a later stage built on
 reason no longer holds: cancho has a TLS 1.3 server written in cancho, no foreign code (`packages/tls`, cancho #338 and #339; the example
 `examples/tls_echo`, #346; cancho's own notes say it has not been independently reviewed). **Using it here is not built.** It is a design
 decision for #16, because it changes what this program may do: the authority report would gain reading one certificate directory
-and 32 bytes of `/dev/urandom` (the gateway has no file access today), the engine takes about 350 KiB (cancho's figure) plus
+and 32 bytes of `/dev/urandom` (the gateway has no file access today; cancho's open PR #364 would let the report name those two paths instead of `fs_read("")`), the engine takes about 350 KiB (cancho's figure) plus
 per-connection state, and every handshake costs a signature. Until that is decided and measured, terminate TLS in front.
 
 ## Why a repository of its own
