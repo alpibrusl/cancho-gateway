@@ -28,7 +28,7 @@ CONF = ROOT / "bench" / "conf"
 PORT, UP = 18080, 19090
 PROXY_CORE, UP_CORE, LOAD_CORES = "0", "1", "2,3"
 TICKS = os.sysconf("SC_CLK_TCK")
-ALL_PROXIES = ["lexsys", "nginx", "haproxy", "envoy", "caddy", "traefik"]
+ALL_PROXIES = ["lexsys", "nginx", "haproxy", "envoy", "caddy", "traefik", "kong"]
 CELLS = {
     "C1": dict(path="/", conns=64, extra=[], want=2),
     "C1b": dict(path="/", conns=8, extra=[], want=2),
@@ -78,7 +78,8 @@ def rss_kib(pgid):
 
 
 class Proc:
-    def __init__(self, argv, core, env=None, log=None):
+    def __init__(self, argv, core, env=None, log=None, port=None):
+        self.port = port
         e = dict(os.environ, **(env or {}))
         self.p = subprocess.Popen(["taskset", "-c", core] + argv, env=e, start_new_session=True,
                                   stdout=open(log or os.devnull, "wb"), stderr=subprocess.STDOUT)
@@ -98,6 +99,14 @@ class Proc:
         except ProcessLookupError:
             pass
         self.p.wait()
+        # A proxy that is still shutting down keeps its port: the next one would see it "listening" and then lose the bind.
+        end = time.time() + 20
+        while self.port and time.time() < end:
+            try:
+                socket.create_connection(("127.0.0.1", self.port), 0.2).close()
+                time.sleep(0.2)
+            except OSError:
+                break
 
 
 def wait_port(port, seconds=20):
@@ -153,27 +162,55 @@ def prepare(args):
         for k, v in subs.items():
             text = text.replace(k, v)
         (work / src.name).write_text(text)
-    # The gateway: this repository, copied, with a deployment of one route to the one upstream.
-    gw = work / "gw"
-    if gw.exists():
-        shutil.rmtree(gw)
-    for d in ["src", "scripts", "generated"]:
-        shutil.copytree(ROOT / d, gw / d)
-    for f in ["lex-sys.toml", "authority.toml"]:
-        shutil.copy(ROOT / f, gw / f)
-    (gw / "deploy.toml").write_text(
-        f'listen = {PORT}\npool_idle_max = 64\n\n[[upstream]]\nname = "u"\naddr = "127.0.0.1:{UP}"\n\n'
-        '[[route]]\nname = "all"\npath_prefix = "/"\nupstream = "u"\n')
-    subprocess.run([sys.executable, str(gw / "scripts" / "generate.py"), str(gw / "deploy.toml")], check=True, cwd=gw)
-    subprocess.run([which(args, "lex-sys"), "build"], check=True, cwd=gw)
+    # The gateway: this repository, copied, with a deployment of one route to the one upstream. With --baseline-rev, the same
+    # from that revision as well (proxy "lexsys-base"), so that a change to the gateway is measured against its own earlier build
+    # in the same interleaved rounds, not against numbers from another time of day.
+    build_gateway(args, ROOT, work / "gw", from_rev=None)
+    if args.baseline_rev:
+        build_gateway(args, ROOT, work / "gw-base", from_rev=args.baseline_rev)
+    if "kong" in args.proxies.split(","):
+        if not args.kong_root:
+            sys.exit("kong needs --kong-root (an extracted kong image, with /dev and /proc mounted in it; docs/bench.md section 9)")
+        (args.kong_root / "bench").mkdir(exist_ok=True)
+        (args.kong_root / "bench" / "kong.yml").write_text((work / "kong.yml").read_text())
     for d in ["nginx-body", "nginx-proxy", "nginx-fcgi", "nginx-uwsgi", "nginx-scgi", "up-body", "up-proxy", "up-fcgi", "up-uwsgi", "up-scgi"]:
         (work / d).mkdir(exist_ok=True)
+
+
+def build_gateway(args, root, dest, from_rev):
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    if from_rev:
+        tar = subprocess.run(["git", "archive", from_rev, "src", "scripts", "generated", "lex-sys.toml", "authority.toml"], cwd=root,
+                             check=True, capture_output=True).stdout
+        subprocess.run(["tar", "-x", "-C", str(dest)], input=tar, check=True)
+    else:
+        for d in ["src", "scripts", "generated"]:
+            shutil.copytree(root / d, dest / d)
+        for f in ["lex-sys.toml", "authority.toml"]:
+            shutil.copy(root / f, dest / f)
+    (dest / "deploy.toml").write_text(
+        f'listen = {PORT}\npool_idle_max = 64\n\n[[upstream]]\nname = "u"\naddr = "127.0.0.1:{UP}"\n\n'
+        '[[route]]\nname = "all"\npath_prefix = "/"\nupstream = "u"\n')
+    subprocess.run([sys.executable, str(dest / "scripts" / "generate.py"), str(dest / "deploy.toml")], check=True, cwd=dest)
+    subprocess.run([which(args, "lex-sys"), "build"], check=True, cwd=dest)
 
 
 def proxy_cmd(args, name):
     w = args.work
     if name == "lexsys":
         return [str(w / "gw" / "build" / "gateway")], {}
+    if name == "lexsys-base":
+        return [str(w / "gw-base" / "build" / "gateway")], {}
+    if name == "kong":
+        shutil.rmtree(args.kong_root / "tmp" / "kong-prefix", ignore_errors=True)
+        env = dict(KONG_DATABASE="off", KONG_DECLARATIVE_CONFIG="/bench/kong.yml", KONG_PROXY_LISTEN=f"127.0.0.1:{PORT}",
+                   KONG_ADMIN_LISTEN="off", KONG_STATUS_LISTEN="off", KONG_NGINX_WORKER_PROCESSES="1", KONG_NGINX_DAEMON="off",
+                   KONG_PROXY_ACCESS_LOG="off", KONG_ADMIN_ACCESS_LOG="off", KONG_PROXY_ERROR_LOG="/dev/null", KONG_LOG_LEVEL="error",
+                   KONG_PLUGINS="off", KONG_PREFIX="/tmp/kong-prefix", KONG_ANONYMOUS_REPORTS="off",
+                   KONG_NGINX_HTTP_CLIENT_BODY_BUFFER_SIZE="64k", KONG_DNS_RESOLVER="127.0.0.1", KONG_NGINX_MAIN_USER="root")
+        return ["chroot", str(args.kong_root), "/usr/local/bin/kong", "start"], env
     if name == "nginx":
         return [which(args, "nginx"), "-c", str(w / "nginx.conf"), "-g", "daemon off;"], {}
     if name == "haproxy":
@@ -254,7 +291,7 @@ def run_oha(args, rate, duration, proxy, upstream):
 
 def start_proxy(args, name, slow=False):
     argv, env = proxy_cmd(args, name)
-    proxy = Proc(argv, PROXY_CORE, env, args.work / f"{name}.log")
+    proxy = Proc(argv, PROXY_CORE, env, args.work / f"{name}.log", PORT)
     if not wait_port(PORT):
         proxy.stop()
         return None, f"{name} did not listen on port {PORT} within 20 s (see {name}.log)"
@@ -316,10 +353,14 @@ def main():
     ap.add_argument("--cells", default="C1,C1b,C2,C3,C4,C5,C6")
     ap.add_argument("--oha-rate", type=int, default=0, help="also run oha at this open-loop rate on C1 (requests/s)")
     ap.add_argument("--resume", action="store_true", help="continue from RESULTS.json in --work: runs already recorded are not repeated")
+    ap.add_argument("--baseline-rev", help="also build and measure this git revision of the gateway, as the proxy lexsys-base")
+    ap.add_argument("--kong-root", type=pathlib.Path, help="an extracted Kong image (chroot), with /dev and /proc bind-mounted into it")
     ap.add_argument("--bin", action="append", default=[], metavar="NAME=PATH")
     args = ap.parse_args()
     args.bins = dict(b.split("=", 1) for b in args.bin)
     args.work = args.work.resolve()
+    if args.baseline_rev and "lexsys-base" not in args.proxies:
+        args.proxies += ",lexsys-base"
     proxies = args.proxies.split(",")
     cells = args.cells.split(",")
     prepare(args)

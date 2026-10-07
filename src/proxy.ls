@@ -539,7 +539,8 @@ fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int)
                         finish_response(tab, core, u, now);
                         return 0;
                     }
-                    if flush(tab, core, client, now) == 1 {
+                    // Body bytes that came in the same read follow the head in the same write: one send instead of two.
+                    if st[pu + 4] == 0 && flush(tab, core, client, now) == 1 {
                         return 0;
                     }
                     going = true;
@@ -825,8 +826,8 @@ fn dial[&h, &n, &c](heap: &!h Heap, tab: conns.Table, net: &n Net(""), core: &!c
             if attach(tw, core, k, pooled, now) == 0 {
                 st[p + 3] = 3;
                 st[p + 7] = now + upstream_ms();
-                settle(tw, core, pooled);
-                settle(tw, core, k);
+                // pump_request writes the head and then settles both sessions, so the pooled connection's interest changes at most
+                // once (and not at all when the write completes): settling first would arm and disarm write interest around it.
                 pump_request(tw, core, k, now);
             }
         }

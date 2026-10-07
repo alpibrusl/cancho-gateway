@@ -240,3 +240,171 @@ limit is about 127 (design.md), so 100 is near its ceiling while the others are 
 - It does not say anything about TLS, HTTP/2, many upstreams, real networks, long-lived connections, or the gateway under the
   200+ concurrent connections it cannot hold. Caddy is 2.6.2 and Traefik 3.6.0, both older than current.
 - No pass or fail criterion is adopted here (section 5). If one is proposed from these data it must be marked as proposed after them.
+
+## 9. Amendment of 2026-10-07, fixed before the second run (sections 1 to 8 are unchanged)
+
+The first run (section 8) left Kong out as "not set up here". Two things change for the second run, and nothing else in the protocol:
+
+- **Kong is added.** Kong Gateway open source **3.9.3** (the `library/kong:3.9` image from Docker Hub, extracted from its layers and run in a `chroot` of the extracted tree with `/dev` and `/proc` bind-mounted; the GitHub release and the vendor's package repository are not reachable from the sandbox). DB-less, from `bench/conf/kong.yml` (one service, one route, no plugins), one nginx worker, no access log, no admin API or status listener, keep-alive to the upstream (Kong's default), `nginx_http_client_body_buffer_size 64k` as for nginx (the default 8k spools a 16 KiB POST to a temp file and shows the 23 ms stall the nginx config showed). Kong's other settings are in `bench/run.py` (`proxy_cmd`). Kong adds `Via` and three `X-Kong-*` headers to every response and runs more than a proxy (a Lua runtime, a router, a plugin chain that is empty here): this is the "does more" caveat of section 6, stated for it too. Kong runs on core 0 with the rest.
+- **The gateway is measured against its own earlier build in the same rounds.** The first run's numbers cannot be compared with a later run's: between the first run and a quick second one every proxy was 12 to 31% slower (a shared machine). So the second run includes `lexsys-base`, the gateway built from `376e640` (what section 8 measured), as a seventh competitor, interleaved with the others; a change to the gateway is judged by `lexsys` ÷ `lexsys-base` in the same run, and by the ratios to the other proxies in the same run, never by absolute numbers across runs.
+- **A harness fix:** a proxy that is still shutting down keeps its port, and the next proxy in the rotation could see it "listening" and then lose the bind (found with Kong). The harness now waits for the port to be free after stopping a proxy.
+
+The second run is reported in section 10, added after it, without changing this section. **Left out:** Pingora (a library). The `lexsys` of the second run is `main` plus the commit that cut its syscalls per request from 15 to 11 (a single send for a response head and the body that came with it; no arm and disarm of write interest around a pooled write).
+
+
+## 10. Second run (measured 2026-10-07, after section 9's amendment; sections 1 to 9 are unchanged)
+
+**Measured:** `lexsys` = `main` (`376e640`) plus `2818de3` (15 to 11 syscalls per request); `lexsys-base` = `376e640`; seven others as in section 1 plus Kong 3.9.3
+(section 9). 5 interleaved rounds, 10 s after a 3 s warm-up, as before; raw numbers `bench/results/2026-10-07.json`. Every proxy answered the
+sanity requests; **0 non-2xx and 0 wrk socket errors in every run; no run CLIENT-BOUND (wrk used at most 78% of its two cores) or UPSTREAM-BOUND (at most 54%);
+the proxy used 95 to 99% of its core in every throughput cell.**
+
+### 10.1 What the change did (the gateway against its own earlier build, same rounds; per-round ratios, median and (min–max))
+
+| cell | `lexsys` ÷ `lexsys-base` |
+|---|---|
+| C1 | 1.26 (1.23–1.30) |
+| C1b | 1.17 (1.09–1.23) |
+| C2 | 1.24 (1.12–1.27) |
+| C3 | 1.16 (1.09–1.23) |
+| C4 | 1.10 (1.08–1.19) |
+
+The change is a gain in every cell, 10 to 26%, and every one of the 25 paired rounds is above 1. The largest gains are where there is most per-connection work to
+remove (C1, C2); the POST cell, bound by copying a 16 KiB body, gains least.
+
+### 10.2 Against the others (paired per-round ratios, `lexsys` ÷ other; below 1 is a loss)
+
+| cell | ÷ nginx | ÷ HAProxy | ÷ Envoy | ÷ Caddy | ÷ Traefik | ÷ Kong |
+|---|---|---|---|---|---|---|
+| C1 keep-alive 64 | 1.15 (1.10–1.21) | 0.92 (0.84–0.96) | 3.12 | 3.96 | 3.87 | 2.61 |
+| C1b keep-alive 8 | 0.85 (0.80–0.86) | 0.73 (0.70–0.76) | 2.17 | 2.35 | 2.36 | 1.61 |
+| C2 `Connection: close` | 2.08 (1.99–2.09) | 1.47 (1.40–1.48) | 3.73 | 5.70 | 5.34 | 2.69 |
+| C3 64 KiB response | 0.99 (0.94–1.02) | 0.54 (0.54–0.56) | 1.23 | 1.38 | 1.45 | 1.39 |
+| C4 16 KiB POST | **0.47 (0.45–0.48)** | **0.55 (0.50–0.55)** | 1.17 | 1.86 | 1.74 | **0.91 (0.87–0.95)** |
+
+**Read this with the drift in mind.** The machine was slower than in the first run (nginx's own C1 median went from 43k to 30k requests/s, HAProxy's from 57k to 38k), and
+the gateway's did not fall as far (34k to 34k). That is a larger swing than the gateway's gain, and it is **not explained**: so "the gateway is ahead of nginx on C1" is
+**not a stable finding** (it was 0.80 in the first run and 1.15 here), and no ratio to nginx on C1, C1b or C3 should be quoted without both runs. What is the same in both runs:
+**C4 is the gateway's worst cell against nginx and HAProxy** (0.42 then 0.47 and 0.55); **HAProxy is ahead on C3 by about 2×** (0.53 then 0.54); **the gateway is ahead of nginx and
+HAProxy on C2**; and it is ahead of Envoy, Caddy and Traefik on every cell.
+
+**Kong** (3.9.3, DB-less, one worker, no plugins): behind the gateway on every cell except **C4, where it is about 10% ahead** (0.91), at 6 to 13k requests/s elsewhere,
+the range of Envoy and Caddy, and it uses 160 MiB resident. It does more than a proxy (section 9).
+
+### 10.3 The tables
+
+
+#### C1
+
+| proxy | req/s median (min–max) | p50 ms | p99 ms | proxy CPU | upstream CPU | load CPU | marks |
+|---|---|---|---|---|---|---|---|
+| lexsys | 34,451 (32,909–35,351) | 1.64 | 4.03 | 96% | 36% | 76% |  |
+| nginx | 29,903 (29,065–29,991) | 2.10 | 3.88 | 99% | 43% | 21% |  |
+| haproxy | 38,426 (35,779–39,069) | 1.60 | 3.36 | 98% | 38% | 23% |  |
+| envoy | 11,312 (10,430–12,073) | 5.47 | 8.99 | 99% | 18% | 9% |  |
+| caddy | 8,416 (8,088–9,226) | 6.70 | 17.33 | 99% | 19% | 9% |  |
+| traefik | 8,939 (8,361–9,374) | 6.64 | 17.70 | 99% | 20% | 9% |  |
+| kong | 13,231 (13,117–13,562) | 4.56 | 9.12 | 98% | 27% | 12% |  |
+| lexsys-base | 27,070 (26,214–28,820) | 2.10 | 5.44 | 96% | 30% | 66% |  |
+
+#### C1b
+
+| proxy | req/s median (min–max) | p50 ms | p99 ms | proxy CPU | upstream CPU | load CPU | marks |
+|---|---|---|---|---|---|---|---|
+| lexsys | 21,924 (20,865–22,828) | 0.29 | 0.93 | 96% | 30% | 54% |  |
+| nginx | 26,396 (25,811–26,869) | 0.29 | 0.75 | 99% | 37% | 20% |  |
+| haproxy | 30,090 (29,570–30,562) | 0.25 | 0.72 | 98% | 36% | 20% |  |
+| envoy | 10,178 (10,089–10,426) | 0.72 | 1.93 | 98% | 15% | 8% |  |
+| caddy | 9,357 (9,239–9,707) | 0.67 | 2.87 | 99% | 20% | 9% |  |
+| traefik | 9,250 (9,025–9,655) | 0.70 | 2.61 | 99% | 19% | 9% |  |
+| kong | 13,615 (13,321–13,822) | 0.55 | 1.87 | 98% | 26% | 11% |  |
+| lexsys-base | 18,780 (18,066–19,923) | 0.34 | 1.16 | 96% | 28% | 51% |  |
+
+#### C2
+
+| proxy | req/s median (min–max) | p50 ms | p99 ms | proxy CPU | upstream CPU | load CPU | marks |
+|---|---|---|---|---|---|---|---|
+| lexsys | 33,230 (31,440–34,234) | 1.66 | 3.89 | 96% | 35% | 76% |  |
+| nginx | 16,124 (15,815–16,423) | 3.83 | 6.24 | 98% | 30% | 43% |  |
+| haproxy | 22,997 (22,356–23,188) | 2.62 | 4.83 | 98% | 28% | 55% |  |
+| envoy | 8,975 (8,304–9,167) | 6.76 | 11.44 | 99% | 11% | 23% |  |
+| caddy | 6,002 (5,375–6,576) | 10.11 | 22.88 | 99% | 18% | 17% |  |
+| traefik | 6,173 (5,470–6,540) | 9.73 | 22.17 | 99% | 14% | 18% |  |
+| kong | 12,657 (12,374–13,113) | 4.61 | 9.25 | 98% | 26% | 32% |  |
+| lexsys-base | 26,835 (26,716–27,965) | 2.16 | 5.05 | 97% | 29% | 65% |  |
+
+#### C3
+
+| proxy | req/s median (min–max) | p50 ms | p99 ms | proxy CPU | upstream CPU | load CPU | marks |
+|---|---|---|---|---|---|---|---|
+| lexsys | 8,754 (8,598–9,098) | 6.95 | 11.73 | 98% | 30% | 37% |  |
+| nginx | 8,939 (8,575–9,379) | 6.97 | 12.30 | 99% | 39% | 23% |  |
+| haproxy | 16,077 (15,885–16,227) | 3.85 | 6.96 | 99% | 52% | 25% |  |
+| envoy | 7,106 (7,020–8,181) | 8.52 | 15.57 | 99% | 28% | 13% |  |
+| caddy | 6,297 (5,960–6,630) | 9.57 | 22.00 | 99% | 31% | 15% |  |
+| traefik | 6,040 (5,714–6,254) | 10.01 | 24.74 | 99% | 29% | 14% |  |
+| kong | 6,329 (5,987–6,660) | 9.64 | 17.04 | 99% | 30% | 17% |  |
+| lexsys-base | 7,486 (7,110–8,003) | 8.02 | 14.43 | 98% | 25% | 33% |  |
+
+#### C4
+
+| proxy | req/s median (min–max) | p50 ms | p99 ms | proxy CPU | upstream CPU | load CPU | marks |
+|---|---|---|---|---|---|---|---|
+| lexsys | 10,839 (10,640–11,499) | 5.75 | 10.57 | 98% | 47% | 28% |  |
+| nginx | 23,459 (23,076–23,903) | 2.64 | 4.91 | 99% | 47% | 20% |  |
+| haproxy | 20,667 (19,234–21,384) | 3.02 | 5.62 | 98% | 44% | 14% |  |
+| envoy | 9,326 (8,888–9,961) | 6.50 | 11.54 | 99% | 20% | 10% |  |
+| caddy | 5,826 (5,797–6,131) | 9.85 | 23.56 | 99% | 22% | 8% |  |
+| traefik | 6,306 (6,017–6,370) | 9.44 | 23.77 | 99% | 23% | 8% |  |
+| kong | 12,002 (11,706–12,492) | 5.09 | 9.22 | 99% | 31% | 11% |  |
+| lexsys-base | 9,803 (9,337–10,196) | 6.47 | 11.81 | 98% | 42% | 27% |  |
+
+#### C5
+
+| proxy | req/s median (min–max) | p50 ms | p99 ms | proxy CPU | upstream CPU | load CPU | marks |
+|---|---|---|---|---|---|---|---|
+| lexsys | 625 (624–626) | 101.25 | 104.02 | 3% | 5% | 2% |  |
+| nginx | 625 (624–626) | 101.36 | 105.09 | 3% | 4% | 1% |  |
+| haproxy | 625 (621–625) | 101.57 | 105.57 | 3% | 4% | 1% |  |
+| envoy | 618 (615–620) | 102.43 | 110.85 | 9% | 5% | 1% |  |
+| caddy | 625 (624–626) | 101.28 | 111.15 | 10% | 7% | 1% |  |
+| traefik | 625 (624–625) | 101.37 | 111.94 | 11% | 7% | 1% |  |
+| kong | 625 (623–625) | 101.49 | 105.24 | 7% | 5% | 1% |  |
+| lexsys-base | 625 (624–625) | 101.22 | 103.53 | 3% | 5% | 2% |  |
+
+#### C6 memory
+
+| proxy | RSS before (MiB) | RSS with 100 idle connections (MiB) | connections still open |
+|---|---|---|---|
+| lexsys | 1.9 | 1.9 | 100 |
+| nginx | 11.8 | 11.8 | 100 |
+| haproxy | 14.9 | 14.9 | 100 |
+| envoy | 58.2 | 58.9 | 100 |
+| caddy | 31.9 | 32.4 | 100 |
+| traefik | 82.8 | 83.2 | 100 |
+| kong | 156.4 | 156.4 | 100 |
+| lexsys-base | 1.9 | 1.9 | 100 |
+
+### 10.4 Open-loop cross-check (oha, 6,000 requests/s, C1; all held the rate)
+
+| proxy | p50 ms | p99 ms median | p99 min–max |
+|---|---|---|---|
+| lexsys | 0.54 | 2.44 | 1.67–3.91 |
+| nginx | 0.35 | 1.78 | 1.29–1.96 |
+| haproxy | 0.39 | 1.44 | 1.03–2.46 |
+| envoy | 0.92 | 6.83 | 3.99–20.91 |
+| caddy | 1.27 | 22.13 | 13.49–48.30 |
+| traefik | 0.95 | 16.31 | 14.20–18.33 |
+| kong | 0.65 | 7.08 | 3.94–10.44 |
+| lexsys-base | 0.55 | 1.47 | 1.36–2.18 |
+
+At a rate every proxy sustains, nginx and HAProxy have the lowest p99 (about 1.4 to 1.8 ms), `lexsys-base` is level with them (1.5) and `lexsys` is at 2.4 (its range overlaps theirs; this cell
+was not repeated enough to rank them); Kong 7, Envoy 7, Traefik 16 and Caddy 22 ms. "Aborted due to deadline" counts (requests in flight when oha stopped) are not errors, as in 8.3.
+
+### 10.5 What is still open
+
+- **The remaining gap is per-connection work.** After the change the gateway makes 11 syscalls per request on C1 (accept4, setsockopt, fcntl ×2, epoll_ctl ×2, recvfrom ×2, sendto ×2, close),
+  against about 5 for nginx and 4 for HAProxy, which reuse the client connection. What is left is client keep-alive, which is a design decision (smuggling and framing across requests), not tuning.
+- **C4 (0.47 of nginx):** not yet profiled; the 16 KiB body moves through 16 KiB reads and 32 KiB queues and is copied twice; whether that explains a 2× gap is a hypothesis.
+- **The nginx and HAProxy swings between the two runs are unexplained**; a third run on a quieter machine would say whether they are the neighbours or the harness.
+- Memory (C6), unchanged by the change: gateway 1.9 MiB, nginx 11.8, HAProxy 14.9, Caddy 32, Envoy 59, Traefik 83, **Kong 156 MiB**, with 100 idle connections.
