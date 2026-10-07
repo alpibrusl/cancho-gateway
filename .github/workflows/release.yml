@@ -53,7 +53,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --prerelease \
+          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" \
             --notes "Alpha. The demo gateway (listens on 8080, one upstream on 127.0.0.1:9000), its authority report, the sources to build your own, and SHA256SUMS. See https://alpibrusl.github.io/cancho-gateway/"
 
       - name: Keep the assets when run by hand
