@@ -1,0 +1,29 @@
+# Used by docs/examples.html. Upstreams are on this machine so it runs anywhere: python3 scripts/demo_upstream.py 9000 9001
+# Examples 2, 4 and 6: one door for two services; static files are read-only.
+listen = 8080
+
+[[upstream]]
+name = "web"
+addr = "127.0.0.1:9000"
+
+[[upstream]]
+name = "api"
+addr = "127.0.0.1:9001"
+
+[[route]]
+name = "web-static"
+path_prefix = "/static"
+methods = ["GET", "HEAD"]
+upstream = "web"
+max_body = 0
+
+[[route]]
+name = "api"
+path_prefix = "/api"
+upstream = "api"
+
+[[route]]
+name = "web"
+path_prefix = "/"
+methods = ["GET", "HEAD"]   # a method no matching route allows is refused 405; one that another, shorter route allows falls through to it
+upstream = "web"

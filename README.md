@@ -20,7 +20,7 @@ header policy (`Via`, `X-Forwarded-Host/Proto`, a request id, untrusted forwardi
 access-log line per request to stdout (`docs/observability.md`) and echoes the request id in every response and error. It has been benchmarked
 against nginx, HAProxy, Envoy, Caddy, Traefik and Kong, and **is slower than HAProxy on most cells and than nginx on POST bodies** (`docs/bench.md`, sections 8 and 10; the two runs disagree about nginx on the other cells).
 It has **no client-side keep-alive, no active health checks, no authentication, no rate limiting, no metrics endpoint yet** (#10's second
-slice), no TLS and no `X-Forwarded-For` of its own (the compiler gives no peer address). The plan and its tasks are in the epic issue; the design
+slice), no TLS (see below: cancho has a TLS server now, the gateway does not use it yet) and no `X-Forwarded-For` of its own (the compiler gives no peer address). The plan and its tasks are in the epic issue; the design
 is `docs/design.md`.
 
 ## Intended scope (v1)
@@ -29,9 +29,16 @@ A route table to a fixed set of upstreams; header sanitising (hop-by-hop headers
 size and time limits; per-key rate limiting from the clock; API-key and HMAC/JWT verification (cancho has `std.hmac`,
 ed25519, RSA and ECDSA); upstream connection reuse; health checks; an access log. HTTP/1.1 over plain TCP.
 
-Not in v1: TLS (it needs foreign code today and would make the authority report unbounded: terminate it in front, as
-Caddy does for the services this is meant to sit before), HTTP/2 and gRPC, caching, response rewriting, dynamic upstream
+Not in v1: TLS in the gateway (terminate it in front, as Caddy does for the services this is meant to sit before; see the note below),
+HTTP/2 and gRPC, caching, response rewriting, dynamic upstream
 discovery, clustering. WebSockets (the OCPP use case) are a later stage built on cancho's WebSocket spike.
+
+**TLS, corrected 2026-10-07.** This file used to say TLS "needs foreign code and would make the authority report unbounded". That
+reason no longer holds: cancho has a TLS 1.3 server written in cancho, no foreign code (`packages/tls`, cancho #338 and #339; the example
+`examples/tls_echo`, #346; cancho's own notes say it has not been independently reviewed). **Using it here is not built.** It is a design
+decision for #16, because it changes what this program may do: the authority report would gain reading one certificate directory
+and 32 bytes of `/dev/urandom` (the gateway has no file access today), the engine takes about 350 KiB (cancho's figure) plus
+per-connection state, and every handshake costs a signature. Until that is decided and measured, terminate TLS in front.
 
 ## Why a repository of its own
 
