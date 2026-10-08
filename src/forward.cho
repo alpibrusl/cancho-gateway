@@ -205,9 +205,9 @@ pub fn put_generated_id[&o](out: &!o [byte], at: int, stamp: int, port: int, seq
 //
 // The header policy (docs/headers.md section 2): hop-by-hop headers and those a `Connection` header names are removed; unless
 // `trust` (the route trusts the party in front) the client's `Forwarded`, `X-Forwarded-*` and `X-Real-IP` are removed and
-// `X-Forwarded-Host` (the Host as received) and `X-Forwarded-Proto: http` are added; `Via` is appended; `X-Request-Id` is the client's
+// `X-Forwarded-Host` (the Host as received) and `X-Forwarded-Proto: http` (`https` when `secure`, the client spoke TLS) are added; `Via` is appended; `X-Request-Id` is the client's
 // own where `id_choice` says it is believed, else `id` (the one the proxy fixed for the session) is added.
-pub fn rewrite[&s, &t, &o, &d](src: &s [byte], table: &t [int], out: &!o [byte], keep_alive: bool, trust: bool, id: &d [byte]) -> [] int {
+pub fn rewrite[&s, &t, &o, &d](src: &s [byte], table: &t [int], out: &!o [byte], keep_alive: bool, trust: bool, secure: bool, id: &d [byte]) -> [] int {
     let count = http.header_count(table);
     if connection_lists(src, table, count, "content-length") || connection_lists(src, table, count, "transfer-encoding") || connection_lists(src, table, count, "host") {
         return 0 - 1;
@@ -239,7 +239,11 @@ pub fn rewrite[&s, &t, &o, &d](src: &s [byte], table: &t [int], out: &!o [byte],
     if !trust {
         k = out.put(out, k, "X-Forwarded-Host: ");
         k = out.put(out, k, http.header(src, table, "host"));
-        k = out.put(out, k, "\r\nX-Forwarded-Proto: http\r\n");
+        if secure {
+            k = out.put(out, k, "\r\nX-Forwarded-Proto: https\r\n");
+        } else {
+            k = out.put(out, k, "\r\nX-Forwarded-Proto: http\r\n");
+        }
     }
     if kept < 0 {
         k = out.put(out, k, "X-Request-Id: ");

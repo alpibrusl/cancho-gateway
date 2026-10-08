@@ -14,7 +14,7 @@ path = "packages/tls/.cancho-vcs/tls"
 
 [[bin]]
 name = "gateway"
-sources = ["generated/deploy.cho", "generated/routes.cho", "src/out.cho", "src/accesslog.cho", "src/problem.cho", "src/framing.cho", "src/chunked.cho", "src/route.cho", "src/response.cho", "src/forward.cho", "src/egress.cho", "src/admin.cho", "src/metrics.cho", "src/proxy.cho", "src/version.cho", "src/gateway.cho"]
+sources = ["generated/deploy.cho", "generated/routes.cho", "src/out.cho", "src/accesslog.cho", "src/problem.cho", "src/framing.cho", "src/chunked.cho", "src/route.cho", "src/response.cho", "src/forward.cho", "src/egress.cho", "src/admin.cho", "src/metrics.cho", "generated/tlsfiles.cho", "src/tlsids.cho", "src/tlsio.cho", "src/proxy.cho", "src/version.cho", "src/gateway.cho"]
 std = true
 out = "build/gateway"
 

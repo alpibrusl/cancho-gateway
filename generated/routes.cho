@@ -7,9 +7,9 @@ module gateway.routes_table;
 // PATCH 32, OPTIONS 64), upstream index, max body, trust_forwarded (0 or 1), name. Tab-separated, in file order; `gateway.route` reads it.
 
 pub fn count() -> [] int {
-    return 3;
+    return 1;
 }
 
 pub fn blob() -> [] &static [byte] {
-    return "api.example.com\t/\t127\t0\t1048576\t1\tapi\n*\t/static\t3\t1\t0\t0\tweb-static\n*\t/\t127\t1\t1048576\t0\tweb\n";
+    return "*\t/\t127\t0\t1048576\t0\tapp\n";
 }
