@@ -118,6 +118,18 @@ max_body = 16777216
             time.sleep(0.05)
         return self.lines()[n:]
 
+    def find(self, n, wait=4, **want):
+        """The first line after the first `n` whose keys have these values (`None`: the key is absent). Sessions of an earlier test can still be
+        ending, so the last line is not necessarily this test's."""
+        end = time.time() + wait
+        while True:
+            for l in self.lines()[n:]:
+                if all((k not in l) if v is None else l.get(k) == v for k, v in want.items()):
+                    return l
+            if time.time() > end:
+                raise AssertionError("no log line like %r among %r" % (want, self.lines()[n:][-3:]))
+            time.sleep(0.05)
+
     def metrics(self):
         c = socket.create_connection(("127.0.0.1", self.admin), timeout=5)
         c.sendall(b"GET /metrics HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
@@ -205,7 +217,7 @@ class T:
         head, body = get(gw)
         assert head.startswith(b"HTTP/1.1 200") and body == b"ok", (head, body)
         assert gw.metrics()["tls"]["handshakes"] == m0 + 1, "the handshake was not counted"
-        e = gw.since(n0)[-1]
+        e = gw.find(n0, path="/", status=200, tls=True)
         assert e["tls"] is True and e["status"] == 200 and e["outcome"] == "ok", e
         sent = up.heads[h0].decode()
         assert "X-Forwarded-Proto: https" in sent and "X-Forwarded-Proto: http\r" not in sent, sent
@@ -217,7 +229,7 @@ class T:
         head, body = read_response(s)
         s.close()
         assert head.startswith(b"HTTP/1.1 200") and body == b"ok"
-        e = gw.since(n0)[-1]
+        e = gw.find(n0, path="/", status=200, tls=None)
         assert "tls" not in e, e
         assert "X-Forwarded-Proto: http\r" in up.heads[h0].decode()
 
@@ -287,7 +299,7 @@ class T:
         s.sendall(b"POST /echo HTTP/1.1\r\nHost: api.example\r\nContent-Length: 100000\r\n\r\n" + b"x" * 4000)
         time.sleep(0.2)
         os.close(s.detach())  # the TCP connection ends with no close_notify
-        e = gw.since(n0)[-1]
+        e = gw.find(n0, outcome="aborted", tls=True)
         assert e["outcome"] == "aborted" and e["tls"] is True, e
 
     def silent_peers_delay_an_honest_one_and_are_dropped_at_the_handshake_deadline(gw, up):
@@ -398,7 +410,7 @@ class T:
         s = connect(gw)
         s.sendall(b"GET /big?n=50000000 HTTP/1.1\r\nHost: api.example\r\n\r\n")
         time.sleep(5.5)
-        e = gw.since(n0)[-1]
+        e = gw.find(n0, outcome="aborted")
         assert e["outcome"] == "aborted", e
         s.close()
         grown = gw.rss_kib() - rss0
@@ -530,7 +542,7 @@ class T:
         s.close()
         assert head.startswith(b"HTTP/1.1 408"), head
         assert 0.7 < waited < 1.4, waited
-        e = gw.since(n0)[-1]
+        e = gw.find(n0, rule="timeout.header", tls=True)
         assert e["status"] == 408 and e["rule"] == "timeout.header" and e["tls"] is True, e
 
     def the_server_closes_with_close_notify(gw, up):
