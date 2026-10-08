@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>cancho-gateway: examples and download</title>
-<meta name="description" content="Six situations where cancho-gateway fits, each with its deployment file and what it answers and logs, and a download of the demo binary. Alpha.">
+<meta name="description" content="Six situations where cancho-gateway fits, each with its deployment file, the terminal commands to run it and what it prints, and a download of the demo binary. Alpha.">
 <meta name="color-scheme" content="light dark">
 <meta property="og:title" content="cancho-gateway: examples and download">
 <meta property="og:image" content="https://alpibrusl.github.io/cancho-gateway/og.png">
@@ -119,6 +119,11 @@ table.fit.num td, table.fit.num th { white-space: nowrap; } table.fit.num td.n {
 .two { align-items: start; }
 table.fit.wide tbody th { white-space: nowrap; }
 pre code { padding: 0; background: none; }
+nav a[aria-current] { color: var(--fg); font-weight: 650; }
+nav a[aria-current] { color: var(--fg); font-weight: 650; }
+pre.out { background: var(--surface); border: 1px dashed var(--line); border-radius: 12px; padding: .8rem 1.1rem; font: .84rem/1.6 var(--mono); color: var(--muted); overflow-x: auto; margin: .5rem 0 0; }
+.step { margin: 1.4rem 0 0; font-weight: 650; }
+.step span { display: inline-block; min-width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; background: var(--accent); color: var(--accent-fg); font-size: .85rem; margin-right: .5rem; }
 </style>
 </head>
 <body>
@@ -126,8 +131,8 @@ pre code { padding: 0; background: none; }
 <header class="top"><div class="wrap">
   <a class="brand" href="index.html"><img class="mark" src="mark.png" alt="" width="30" height="30">cancho-gateway</a>
   <nav aria-label="Sections">
-    <a href="index.html" class="opt">Overview</a><a href="evidence.html" class="opt">Evidence</a><a href="#download">Download</a>
-    <a href="https://github.com/alpibrusl/cancho-gateway">GitHub</a>
+    <a href="index.html" class="opt">Overview</a><a href="examples.html" aria-current="page">Examples</a><a href="evidence.html" class="opt">Evidence</a><a href="index.html#numbers" class="opt">Numbers</a><a href="examples.html#download">Download</a>
+    <a href="https://github.com/alpibrusl/cancho-gateway" class="opt">GitHub</a>
   </nav>
 </div></header>
 
@@ -136,45 +141,124 @@ pre code { padding: 0; background: none; }
 <div style="padding-top:3.5rem">
   <a class="badge" href="index.html#status"><i></i>Alpha · only what is built is shown here</a>
   <h1>Where it earns its place.</h1>
-  <p class="lead">Six situations, each with the deployment file that makes it work and what the gateway answers and logs. Every refusal and field below is one the tests exercise; the list at the end is what it cannot do yet.</p>
+  <p class="lead">Six situations. Each has the deployment file, the commands to run it in a terminal, and what you should see. Every command and every line of output below was run against the real gateway.</p>
 </div>
 
 <section id="download">
   <h2>Download and try it</h2>
-  <p class="sub">The configuration is compiled into the binary, so a release carries a <strong>demo gateway</strong>: it listens on port 8080 and forwards to one upstream on <code>127.0.0.1:9000</code>. To point a gateway at your own upstreams you build your own, from the sources in the same release.</p>
+  <p class="sub">The configuration is compiled into the binary, so a release carries a <strong>demo gateway</strong>: it listens on port 8080 and forwards to one upstream on <code>127.0.0.1:9000</code>. To point a gateway at your own upstreams you build your own, from the sources in the same release (examples 1 to 6 do exactly that).</p>
   <div class="cta">
     <a class="btn primary" href="https://github.com/alpibrusl/cancho-gateway/releases/latest/download/cancho-gateway-demo-linux-x86_64" download>Download the binary (Linux x86-64)</a>
     <a class="btn ghost" href="https://github.com/alpibrusl/cancho-gateway/releases/latest">All assets and checksums</a>
   </div>
-  <pre class="code" tabindex="0"><code>chmod +x cancho-gateway-demo-linux-x86_64
-python3 -m http.server 9000 &amp;                  # any upstream will do
-./cancho-gateway-demo-linux-x86_64               # one JSON line per request on stdout
-curl -si localhost:8080/                         # Via and X-Request-Id added</code></pre>
-  <p class="note">Each release has the binary, <code>cancho-gateway-demo.authority.json</code> (what the compiler says the binary may do), <code>cancho-gateway-src.tar.gz</code> and <code>SHA256SUMS</code>; check with <code>sha256sum -c SHA256SUMS</code>. Built in CI at the pinned compiler by <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/scripts/release.sh"><code>scripts/release.sh</code></a>. It links only libc. If no release is listed yet, the first tag has not been pushed: <a href="index.html#start">build it from source</a>. Alpha: not for production.</p>
+<p class="step"><span>1</span>Download, check and start it (terminal 1), with any upstream on port 9000 (terminal 2):</p>
+  <pre class="code" tabindex="0"><code># terminal 2
+python3 -m http.server 9000
+
+# terminal 1
+chmod +x cancho-gateway-demo-linux-x86_64
+./cancho-gateway-demo-linux-x86_64                 # one JSON line per request appears here</code></pre>
+<p class="step"><span>2</span>In terminal 3, a normal request, then the smuggling shape:</p>
+  <pre class="code" tabindex="0"><code>curl -si localhost:8080/ | head -8
+curl -si localhost:8080/ -H 'Content-Length: 1' -H 'Transfer-Encoding: chunked' -d x</code></pre>
+  <pre class="out" tabindex="0"><code>HTTP/1.0 200 OK
+...
+Via: 1.1 cancho-gateway
+X-Request-Id: 594fe-1f90-00000001
+
+HTTP/1.1 400 Bad Request
+...
+{"type":"about:blank","title":"Bad Request","status":400,"rule":"framing.two-lengths","request_id":"594fe-1f90-00000002"}</code></pre>
+  <p class="note">Each release has the binary, <code>cancho-gateway-demo.authority.json</code> (what the compiler says the binary may do), <code>cancho-gateway-src.tar.gz</code> and <code>SHA256SUMS</code>; check with <code>sha256sum -c SHA256SUMS</code>. Built in CI at the pinned compiler by <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/scripts/release.sh"><code>scripts/release.sh</code></a>. It links only libc. If no release is listed yet, the first one has not been published: build from source below. Alpha: not for production.</p>
+</section>
+
+<section id="setup">
+  <h2>Build from source, once</h2>
+  <p class="sub">Examples 1 to 6 build a gateway for each deployment file. That needs the pinned cancho compiler and Python 3. Nothing is installed system-wide, and <code>scripts/try.sh</code> builds in a temporary copy, so your checkout stays clean.</p>
+  <pre class="code" tabindex="0"><code>git clone https://github.com/alpibrusl/cancho &amp;&amp; git clone https://github.com/alpibrusl/cancho-gateway
+git -C cancho checkout "$(sed -n 's/^cancho *= *"\([0-9a-f]*\)".*/\1/p' cancho-gateway/cancho.toml)"
+(cd cancho &amp;&amp; cargo build --release -p cancho)
+export PATH="$PWD/cancho/target/release:$PATH"
+cd cancho-gateway</code></pre>
+  <p class="note">Every example uses three terminals in <code>cancho-gateway/</code>: <strong>1</strong> an upstream (<code>scripts/demo_upstream.py</code>, which answers every request with the request it received, so you see exactly what the gateway forwarded), <strong>2</strong> the gateway (<code>scripts/try.sh &lt;deployment&gt;</code>, Ctrl-C stops it) and <strong>3</strong> <code>curl</code>. Request ids and times differ on your machine.</p>
 </section>
 
 <section id="front">
   <h2>1. Internal APIs behind a TLS front</h2>
-  <p class="sub">Caddy or nginx terminates TLS and sets <code>X-Forwarded-For</code>. The gateway sits behind it, believes that front, and gives every request an id the services and the audit log share.</p>
-  <pre class="code" tabindex="0"><code>listen = 8080
+  <p class="sub">Caddy or nginx terminates TLS and sets <code>X-Forwarded-For</code>. The gateway sits behind it. For the host that front serves it believes the forwarding headers; for any other host it does not. Every request gets an id the services and the audit log share.</p>
+  <p class="note" style="margin-bottom:0">Deployment: <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/deploy/examples/front.toml"><code>deploy/examples/front.toml</code></a></p>
+  <pre class="code" tabindex="0"><code># Example 1: behind a TLS-terminating front that sets the forwarding headers.
+listen = 8080
 
 [[upstream]]
 name = "orders"
-addr = "10.0.1.5:9000"
+addr = "127.0.0.1:9000"
 
 [[route]]
 name = "orders"
 host = "api.example.com"
 path_prefix = "/"
 upstream = "orders"
-trust_forwarded = true     # the party in front is mine: pass its headers on</code></pre>
-  <p class="note">With <code>trust_forwarded = false</code> (the default) a client&rsquo;s own <code>X-Forwarded-For</code>, <code>Forwarded</code> and <code>X-Real-IP</code> are removed, so a caller cannot choose what the service believes about forwarding. A client&rsquo;s <code>X-Request-Id</code> is kept only when it is 1 to 64 safe characters. <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/docs/headers.md">The table</a>.</p>
+trust_forwarded = true     # the party in front is mine: pass its forwarding headers on
+
+[[route]]
+name = "public"
+path_prefix = "/"
+upstream = "orders"        # any other host: forwarding claims are not believed</code></pre>
+  <p class="step"><span>1</span>In terminal 1, start the upstream. It answers every request with the request it received.</p>
+  <pre class="code" tabindex="0"><code>python3 scripts/demo_upstream.py 9000 9001</code></pre>
+  <pre class="out" tabindex="0"><code>listening on 127.0.0.1:9000, 127.0.0.1:9001</code></pre>
+  <p class="step"><span>2</span>In terminal 2, build this deployment and run it (from the repository root).</p>
+  <pre class="code" tabindex="0"><code>scripts/try.sh deploy/examples/front.toml</code></pre>
+  <pre class="out" tabindex="0"><code>gateway built from deploy/examples/front.toml; listening, one JSON line per request below (Ctrl-C stops it)</code></pre>
+  <p class="step"><span>3</span>In terminal 3, send a request as the trusted front would, claiming a client address and an id:</p>
+  <pre class="code" tabindex="0"><code>curl -si localhost:8080/orders/7 -H 'Host: api.example.com' \
+  -H 'X-Forwarded-For: 203.0.113.9' -H 'X-Request-Id: abc-123'</code></pre>
+  <pre class="out" tabindex="0"><code>HTTP/1.1 200 OK
+Via: 1.1 cancho-gateway
+X-Request-Id: abc-123
+...
+upstream :9000 saw
+GET /orders/7
+Host: api.example.com
+X-Forwarded-For: 203.0.113.9      &lt;- passed on: this route trusts its front
+X-Request-Id: abc-123
+Via: 1.1 cancho-gateway</code></pre>
+  <p class="step"><span>4</span>Now the same claims from a host this gateway does not trust:</p>
+  <pre class="code" tabindex="0"><code>curl -si localhost:8080/orders/7 -H 'Host: other.example.com' \
+  -H 'X-Forwarded-For: 203.0.113.9' -H 'X-Request-Id: abc-123'</code></pre>
+  <pre class="out" tabindex="0"><code>X-Request-Id: 81fb4-1f90-00000003      &lt;- the claimed id was replaced
+...
+upstream :9000 saw
+GET /orders/7
+Host: other.example.com
+Via: 1.1 cancho-gateway               &lt;- no X-Forwarded-For: it was removed
+X-Forwarded-Host: other.example.com
+X-Forwarded-Proto: http
+X-Request-Id: 81fb4-1f90-00000003</code></pre>
+  <p class="step"><span>5</span>Terminal 2 has one JSON line for each request, with the route that took it:</p>
+  <pre class="code" tabindex="0"><code># terminal 2, as it happens</code></pre>
+  <pre class="out" tabindex="0"><code>{"id":"abc-123","method":"GET","path":"/orders/7","route":"orders","upstream":"orders","status":200,"rule":"","outcome":"ok","ms":42,...}
+{"id":"81fb4-1f90-00000003","method":"GET","path":"/orders/7","route":"public","upstream":"orders","status":200,...}</code></pre>
+  <p class="note">A client&rsquo;s <code>X-Request-Id</code> is kept only on a trusted route, and only if it is 1 to 64 characters of letters, digits, <code>.</code>, <code>_</code> and <code>-</code>. <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/docs/headers.md">The full table</a>.</p>
 </section>
 
 <section id="door">
   <h2>2. One door for a few services</h2>
-  <p class="sub">Route by host, then by the longest path prefix, and by method. Static files are read-only; a wrong method is refused at the door, not discovered at the service.</p>
-  <pre class="code" tabindex="0"><code>[[route]]
+  <p class="sub">Route by host, then by the longest path prefix, and by method. Static files are read-only; a method no route allows is refused at the door, not discovered at the service.</p>
+  <p class="note" style="margin-bottom:0">Deployment: <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/deploy/examples/door.toml"><code>deploy/examples/door.toml</code></a></p>
+  <pre class="code" tabindex="0"><code># Examples 2, 4 and 6: one door for two services; static files are read-only.
+listen = 8080
+
+[[upstream]]
+name = "web"
+addr = "127.0.0.1:9000"
+
+[[upstream]]
+name = "api"
+addr = "127.0.0.1:9001"
+
+[[route]]
 name = "web-static"
 path_prefix = "/static"
 methods = ["GET", "HEAD"]
@@ -182,75 +266,169 @@ upstream = "web"
 max_body = 0
 
 [[route]]
+name = "api"
+path_prefix = "/api"
+upstream = "api"
+
+[[route]]
 name = "web"
 path_prefix = "/"
+methods = ["GET", "HEAD"]   # a method no matching route allows is refused 405; one that another, shorter route allows falls through to it
 upstream = "web"</code></pre>
-  <pre class="code" tabindex="0"><code>POST /static/app.js  -> 405  {"rule":"route.method", ...}
-GET  /static/app.js  -> served by "web-static"
-GET  /anything-else  -> served by "web" (the longest prefix that matches)
-                        (with no "/" route at all: 404 {"rule":"route.none", ...})</code></pre>
-  <p class="note">Ties between two routes are a configuration error, found when the deployment is generated, not at 3 a.m.</p>
+  <p class="step"><span>1</span>Terminal 1: <code>python3 scripts/demo_upstream.py 9000 9001</code> (two upstreams, ports 9000 for the web and 9001 for the API). Terminal 2: <code>scripts/try.sh deploy/examples/door.toml</code>.</p>
+  <pre class="code" tabindex="0"><code># terminal 3: where each request goes
+curl -s localhost:8080/index.html | head -2
+curl -s localhost:8080/api/orders | head -2</code></pre>
+  <pre class="out" tabindex="0"><code>upstream :9000 saw
+GET /index.html
+upstream :9001 saw
+GET /api/orders</code></pre>
+  <p class="step"><span>2</span>A method the matching routes do not allow:</p>
+  <pre class="code" tabindex="0"><code>curl -si -X POST localhost:8080/static/app.js</code></pre>
+  <pre class="out" tabindex="0"><code>HTTP/1.1 405 Method Not Allowed
+Content-Type: application/problem+json
+X-Request-Id: 9af94-1f90-00000002
+...
+{"type":"about:blank","title":"Method Not Allowed","status":405,"rule":"route.method","request_id":"9af94-1f90-00000002"}</code></pre>
+  <p class="step"><span>3</span>The same method on a route that allows it:</p>
+  <pre class="code" tabindex="0"><code>curl -si -X POST localhost:8080/api/x -d hi | head -1
+curl -s -X POST localhost:8080/api/x -d hi | grep -E 'saw|body'</code></pre>
+  <pre class="out" tabindex="0"><code>HTTP/1.1 200 OK
+upstream :9001 saw
+body bytes: 2</code></pre>
+  <p class="note">If a shorter route does allow the method, the request falls through to it instead of being refused: the longest prefix that allows the method wins. Ties between two routes are a configuration error, found when the deployment is generated.</p>
 </section>
 
 <section id="uploads">
   <h2>3. Upload limits that are enforced</h2>
   <p class="sub">A route sets the largest body it accepts. The declared length is checked before a byte is forwarded; a chunked body is counted as it arrives.</p>
-  <pre class="code" tabindex="0"><code>[[route]]
+  <p class="note" style="margin-bottom:0">Deployment: <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/deploy/examples/uploads.toml"><code>deploy/examples/uploads.toml</code></a></p>
+  <pre class="code" tabindex="0"><code># Example 3: a route sets the largest body it accepts.
+listen = 8080
+
+[[upstream]]
+name = "reports"
+addr = "127.0.0.1:9000"
+
+[[route]]
 name = "reports"
 path_prefix = "/reports"
 methods = ["POST"]
 upstream = "reports"
-max_body = 5242880          # 5 MiB</code></pre>
-  <pre class="code" tabindex="0"><code>HTTP/1.1 413 Payload Too Large
-{"status":413,"rule":"limit.body","request_id":"19b3c2a1f00-1f90-0000002c"}</code></pre>
-  <p class="note">The default is 1 MiB. A chunked body over the limit is cut off after part of it may already have gone upstream; the <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/docs/proxy.md">proxy notes</a> say so.</p>
+max_body = 1024            # 1 KiB here, so the example is quick; 5242880 would be 5 MiB</code></pre>
+  <p class="step"><span>1</span>Terminal 1: <code>python3 scripts/demo_upstream.py 9000 9001</code>. Terminal 2: <code>scripts/try.sh deploy/examples/uploads.toml</code>. Terminal 3, a body inside the limit (1 KiB here):</p>
+  <pre class="code" tabindex="0"><code>head -c 100 /dev/zero | curl -si localhost:8080/reports -X POST --data-binary @- | grep -E '^HTTP|body'</code></pre>
+  <pre class="out" tabindex="0"><code>HTTP/1.1 200 OK
+body bytes: 100</code></pre>
+  <p class="step"><span>2</span>A body over it:</p>
+  <pre class="code" tabindex="0"><code>head -c 5000 /dev/zero | curl -si localhost:8080/reports -X POST --data-binary @-</code></pre>
+  <pre class="out" tabindex="0"><code>HTTP/1.1 413 Content Too Large
+Content-Type: application/problem+json
+...
+{"type":"about:blank","title":"Content Too Large","status":413,"rule":"limit.body","request_id":"9bcf6-1f90-00000003"}</code></pre>
+  <p class="step"><span>3</span>Terminal 2 shows the refusal as data, and that nothing was forwarded (<code>upstream_ms</code> and <code>bytes_in</code> are 0):</p>
+  <pre class="code" tabindex="0"><code># terminal 2</code></pre>
+  <pre class="out" tabindex="0"><code>{"id":"9bcf6-1f90-00000003","method":"POST","path":"/reports","route":"reports","upstream":"reports","status":413,"rule":"limit.body","outcome":"refused","ms":0,"upstream_ms":0,"bytes_in":0,"bytes_out":267}</code></pre>
+  <p class="note">The default limit is 1 MiB. A chunked body over the limit is cut off after part of it may already have gone upstream; the <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/docs/proxy.md">proxy notes</a> say so.</p>
 </section>
 
 <section id="legacy">
   <h2>4. A strict door in front of a lenient server</h2>
-  <p class="sub">Old application servers and hand-written backends often disagree with a front proxy about where a request ends. That disagreement is request smuggling. The gateway refuses the ambiguous shapes and closes the connection, so the backend never sees them.</p>
-  <pre class="code" tabindex="0"><code>Content-Length and Transfer-Encoding together    -> 400 framing.two-lengths
-two different Content-Length headers             -> 400 framing.length
-obsolete header line folding                     -> 400 framing.fold
-a bare LF as a line ending                       -> 400 framing.line-ending
-CONNECT, or an absolute-form target              -> refused, own rule each</code></pre>
-  <p class="note">Tested against a corpus, split at every byte and mutated; <a href="evidence.html">the evidence page</a> lists what that found.</p>
+  <p class="sub">Old application servers and hand-written backends often disagree with a front proxy about where a request ends. That disagreement is request smuggling. The gateway refuses the ambiguous shapes, closes the connection, and the backend never sees them. Use any deployment above; this one needs the upstream running to prove nothing reaches it.</p>
+  <p class="note" style="margin-bottom:0">With the gateway of example 2 (or the downloaded demo binary) running, in terminal 3:</p>
+<p class="step"><span>1</span>Two body lengths, the classic smuggling shape:</p>
+  <pre class="code" tabindex="0"><code>printf 'POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n' | nc -q1 localhost 8080</code></pre>
+  <pre class="out" tabindex="0"><code>HTTP/1.1 400 Bad Request
+Content-Type: application/problem+json
+...
+{"type":"about:blank","title":"Bad Request","status":400,"rule":"framing.two-lengths","request_id":"848cc-1f90-00000006"}</code></pre>
+<p class="step"><span>2</span>Two different lengths:</p>
+  <pre class="code" tabindex="0"><code>printf 'GET / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\n' | nc -q1 localhost 8080 | tail -1</code></pre>
+  <pre class="out" tabindex="0"><code>{"type":"about:blank","title":"Bad Request","status":400,"rule":"framing.length","request_id":"848cc-1f90-00000007"}</code></pre>
+<p class="step"><span>3</span>A <code>CONNECT</code> tunnel:</p>
+  <pre class="code" tabindex="0"><code>printf 'CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n' | nc -q1 localhost 8080 | tail -1</code></pre>
+  <pre class="out" tabindex="0"><code>{"type":"about:blank","title":"Not Implemented","status":501,"rule":"framing.method-unsupported","request_id":"848cc-1f90-00000008"}</code></pre>
+  <p class="note">Others refused with their own rule: obsolete header line folding (<code>framing.fold</code>), a bare LF line ending (<code>framing.line-ending</code>), an absolute-form target (<code>framing.target-form</code>). Tested against a corpus, split at every byte and mutated; <a href="evidence.html">the evidence page</a> lists what that found. <code>nc</code> is netcat; any tool that sends raw bytes does.</p>
 </section>
 
 <section id="flaky">
   <h2>5. A flaky upstream that should not take everything down</h2>
-  <p class="sub">After a run of failures the gateway stops sending requests to that upstream for a while, answers at once, and lets one trial request through to see if it is back.</p>
-  <pre class="code" tabindex="0"><code># in the deployment file
-circuit_threshold = 5       # consecutive failures that open the circuit (0 turns it off)
-circuit_open_ms   = 10000   # how long it stays open
-connect_timeout_ms = 2000
-upstream_timeout_ms = 15000</code></pre>
-  <pre class="code" tabindex="0"><code>HTTP/1.1 503 Service Unavailable
-{"status":503,"rule":"proxy.circuit-open","request_id":"..."}</code></pre>
-  <p class="note">Other upstream failures keep their own tags: <code>proxy.connect</code>, <code>proxy.upstream-closed</code>, <code>proxy.head</code> (all 502) and <code>timeout.*</code>. A dead idle connection is retried once, and only for a request with no body that is safe to repeat.</p>
+  <p class="sub">After a run of failures the gateway stops sending requests to that upstream for a while, answers at once, and lets one trial request through to see whether it is back. Here the upstream is simply not running.</p>
+  <p class="note" style="margin-bottom:0">Deployment: <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/deploy/examples/flaky.toml"><code>deploy/examples/flaky.toml</code></a></p>
+  <pre class="code" tabindex="0"><code># Example 5: an upstream that is down. Do not start it, then watch the circuit open.
+listen = 8080
+circuit_threshold = 3       # consecutive failures that open the circuit
+circuit_open_ms = 5000      # how long it stays open
+connect_timeout_ms = 1000
+
+[[upstream]]
+name = "orders"
+addr = "127.0.0.1:9000"
+
+[[route]]
+name = "orders"
+path_prefix = "/"
+upstream = "orders"</code></pre>
+  <p class="step"><span>1</span>Do <strong>not</strong> start an upstream. Terminal 2: <code>scripts/try.sh deploy/examples/flaky.toml</code>. Terminal 3, five requests:</p>
+  <pre class="code" tabindex="0"><code>for i in 1 2 3 4 5; do curl -s -o /dev/null -w '%{http_code} ' localhost:8080/x; done; echo</code></pre>
+  <pre class="out" tabindex="0"><code>502 502 502 503 503</code></pre>
+  <p class="step"><span>2</span>The first three fail to connect (502, <code>proxy.connect</code>); the circuit opens; the rest are refused at once (503):</p>
+  <pre class="code" tabindex="0"><code>curl -si localhost:8080/x</code></pre>
+  <pre class="out" tabindex="0"><code>HTTP/1.1 503 Service Unavailable
+...
+{"type":"about:blank","title":"Service Unavailable","status":503,"rule":"proxy.circuit-open","request_id":"9cc2c-1f90-00000006"}</code></pre>
+  <p class="step"><span>3</span>Start the upstream in terminal 1 (<code>python3 scripts/demo_upstream.py 9000</code>) and wait more than 5 seconds. The next request is the trial; if it succeeds the circuit closes:</p>
+  <pre class="code" tabindex="0"><code>sleep 6; curl -si localhost:8080/x | head -1</code></pre>
+  <pre class="out" tabindex="0"><code>HTTP/1.1 200 OK</code></pre>
+  <p class="note">Other upstream failures keep their own tags: <code>proxy.upstream-closed</code> and <code>proxy.head</code> (502) and <code>timeout.*</code>. A dead idle connection is retried once, and only for a request with no body that is safe to repeat.</p>
 </section>
 
 <section id="audit">
-  <h2>6. An audit trail and a capability report</h2>
-  <p class="sub">When someone asks &ldquo;what happened to request X&rdquo; or &ldquo;what can this process touch&rdquo;, there is an answer for each.</p>
-  <pre class="code" tabindex="0"><code>{"t":1791376430841,"id":"594fe-1f90-00000001","method":"GET","path":"/orders/7",
- "route":"orders","upstream":"orders","status":200,"rule":"","outcome":"ok",
- "ms":12,"upstream_ms":11,"bytes_in":0,"bytes_out":1834}
+  <h2>6. An audit trail, health and metrics</h2>
+  <p class="sub">When someone asks &ldquo;what happened to request X&rdquo;, &ldquo;is it healthy&rdquo; or &ldquo;what can this process touch&rdquo;, there is an answer for each. Health and metrics are on a second port, <code>admin_listen</code> in the deployment (example 2&rsquo;s file has it, on 9090).</p>
+<p class="step"><span>1</span>Keep the access log: redirect the gateway&rsquo;s output to a file (or to journald), send some requests, then ask it questions:</p>
+  <pre class="code" tabindex="0"><code>scripts/try.sh deploy/examples/door.toml &gt; access.log     # terminal 2; terminal 1 runs the upstream, as in example 2
 
-{"id":"594fe-1f90-00000002","status":400,"rule":"framing.two-lengths",
- "outcome":"refused", ...}</code></pre>
-  <p class="sub">The same id is in the response header and in a refusal&rsquo;s body. The log goes to stdout, so journald, a file or a collector can take it; if that reader stops, so does the gateway (see the alpha notes).</p>
-  <pre class="code" tabindex="0"><code>gateway  args, clock, conn_accept, conn_read, conn_write, heap,
+# terminal 3
+curl -s localhost:8080/index.html &gt;/dev/null; curl -s -X POST localhost:8080/static/a &gt;/dev/null
+grep '"status":4' access.log                        # what was refused
+grep '&lt;an id from a response&gt;' access.log           # one request, by the id the client was given</code></pre>
+  <pre class="out" tabindex="0"><code>{"t":1791402183873,"id":"848cc-1f90-00000002","method":"POST","path":"/static/a","route":"","upstream":"","status":405,"rule":"route.method","outcome":"refused","ms":0,...}</code></pre>
+<p class="step"><span>2</span>Is it alive, and is it ready to take traffic? <code>/readyz</code> says why not, as data:</p>
+  <pre class="code" tabindex="0"><code>curl -si localhost:9090/healthz
+curl -si localhost:9090/readyz</code></pre>
+  <pre class="out" tabindex="0"><code>HTTP/1.1 200 OK
+Content-Type: application/json
+...
+{"alive":true}
+
+HTTP/1.1 200 OK
+...
+{"ready":true}
+
+# with an upstream's circuit open (example 5):
+HTTP/1.1 503 Service Unavailable
+{"ready":false,"why":["upstream orders: circuit open"]}</code></pre>
+<p class="step"><span>3</span>Counters by route, status class and rule, and latency histograms, as JSON or as Prometheus text:</p>
+  <pre class="code" tabindex="0"><code>curl -s localhost:9090/metrics | python3 -m json.tool | head -30
+curl -s 'localhost:9090/metrics?format=prometheus' | grep -E 'requests_total|refusals_total'</code></pre>
+  <pre class="out" tabindex="0"><code>cancho_gateway_requests_total{route="web",class="2xx"} 1
+cancho_gateway_requests_total{route="web",class="4xx"} 0
+cancho_gateway_refusals_total{rule="route.method"} 1</code></pre>
+<p class="step"><span>4</span>Ask the compiler what the program may do (the gateway&rsquo;s report is committed and CI checks it):</p>
+  <pre class="code" tabindex="0"><code>python3 scripts/authority.py --check        # derives it with the compiler, fails if it differs from the recorded one
+cat manifests/gateway.authority.json              # the recorded report</code></pre>
+  <pre class="out" tabindex="0"><code>gateway  args, clock, conn_accept, conn_read, conn_write, heap,
          io_write, net_in(""), net_out(""), poll        # no files, no foreign calls</code></pre>
-  <p class="note">That report is derived by the compiler and checked in CI: a build that gained a capability fails. The network bound is not narrowed (one bound covers listening and connecting), so the upstream set is enforced in code and tested.</p>
+  <p class="note">The id is also in the response header and in a refusal&rsquo;s body. The log goes to stdout, so journald, a file or a collector can take it; if that reader stops, so does the gateway (see the alpha notes). <strong>The admin port listens on every interface</strong> (the compiler offers no loopback-only bind): it shows route and upstream names and counters, no request data, but firewall it. The network bound is not narrowed (one bound covers listening and connecting), so the upstream set is enforced in code and tested.</p>
 </section>
 
 <aside class="status" id="not-yet">
   <h2>What these cases do not cover yet</h2>
   <ul>
     <li><strong>Authentication</strong> and <strong>rate limiting</strong>: planned, not built. Do the check at the TLS front for now.</li>
-    <li><strong>TLS</strong> in the gateway itself, and <strong>WebSocket</strong> (for example OCPP between chargers and a back office): planned, not built.</li>
-    <li><strong>Metrics and health endpoints</strong>: the access log exists; counters and an admin listener do not.</li>
+    <li><strong>TLS</strong> in the gateway itself: not built. cancho has a TLS 1.3 server now (<code>packages/tls</code>), so nothing in the language blocks it; wiring it in is planned and would let the gateway read one certificate directory, which its report does not allow today. <strong>WebSocket</strong> (for example OCPP between chargers and a back office): planned, not built.</li>
+    <li><strong>The admin port</strong> (metrics, health) binds every interface and has no authentication: firewall it. No alerting, no tracing.</li>
     <li><strong>Client addresses</strong> in logs and headers: the compiler does not provide one yet.</li>
     <li><strong>Changing a route</strong> means a new binary; there is no hot reload.</li>
   </ul>

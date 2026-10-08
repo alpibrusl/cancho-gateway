@@ -1,0 +1,82 @@
+edition 5;
+
+import std.test;
+import gateway.admin;
+
+fn code_of(head: &static [byte]) -> [] int {
+    return admin.parse(head);
+}
+
+fn test_the_four_things_it_serves() -> [] int {
+    test.assert_eq(code_of("GET /metrics HTTP/1.1\r\nHost: a\r\n\r\n"), admin.metrics_json());
+    test.assert_eq(code_of("GET /metrics?format=json HTTP/1.1\r\n\r\n"), admin.metrics_json());
+    test.assert_eq(code_of("GET /metrics?format=prometheus HTTP/1.1\r\n\r\n"), admin.metrics_prometheus());
+    test.assert_eq(code_of("GET /healthz HTTP/1.1\r\n\r\n"), admin.healthz());
+    test.assert_eq(code_of("GET /readyz HTTP/1.0\r\n\r\n"), admin.readyz());
+    test.assert_eq(code_of("GET /healthz?x=1 HTTP/1.1\r\n\r\n"), admin.healthz());
+    return 0;
+}
+
+fn test_anything_but_get_is_a_method_refusal() -> [] int {
+    test.assert_eq(code_of("POST /metrics HTTP/1.1\r\n\r\n"), admin.bad_method());
+    test.assert_eq(code_of("HEAD /metrics HTTP/1.1\r\n\r\n"), admin.bad_method());
+    test.assert_eq(code_of("get /metrics HTTP/1.1\r\n\r\n"), admin.bad_method());
+    test.assert_eq(code_of("DELETE / HTTP/1.1\r\n\r\n"), admin.bad_method());
+    test.assert_eq(admin.status(admin.bad_method()), 405);
+    return 0;
+}
+
+fn test_an_unknown_path_is_a_404() -> [] int {
+    test.assert_eq(code_of("GET / HTTP/1.1\r\n\r\n"), admin.bad_path());
+    test.assert_eq(code_of("GET /metrics/ HTTP/1.1\r\n\r\n"), admin.bad_path());
+    test.assert_eq(code_of("GET /Metrics HTTP/1.1\r\n\r\n"), admin.bad_path());
+    test.assert_eq(code_of("GET /metricsx HTTP/1.1\r\n\r\n"), admin.bad_path());
+    test.assert_eq(code_of("GET http://a/metrics HTTP/1.1\r\n\r\n"), admin.bad_path());
+    test.assert_eq(code_of("GET * HTTP/1.1\r\n\r\n"), admin.bad_path());
+    test.assert_eq(admin.status(admin.bad_path()), 404);
+    return 0;
+}
+
+fn test_a_body_header_is_refused_whatever_its_case() -> [] int {
+    test.assert_eq(code_of("GET /metrics HTTP/1.1\r\nContent-Length: 0\r\n\r\n"), admin.has_body());
+    test.assert_eq(code_of("GET /metrics HTTP/1.1\r\ncontent-length: 5\r\n\r\n"), admin.has_body());
+    test.assert_eq(code_of("GET /readyz HTTP/1.1\r\nHost: a\r\nTRANSFER-ENCODING: chunked\r\n\r\n"), admin.has_body());
+    test.assert_eq(code_of("GET /healthz HTTP/1.1\r\nX-Content-Length: 1\r\n\r\n"), admin.healthz());
+    test.assert_eq(code_of("GET /healthz HTTP/1.1\r\nContent-Lengths: 1\r\n\r\n"), admin.healthz());
+    return 0;
+}
+
+fn test_a_version_it_cannot_serve_and_a_malformed_line() -> [] int {
+    test.assert_eq(code_of("GET /metrics HTTP/2.0\r\n\r\n"), admin.bad_version());
+    test.assert_eq(code_of("GET /metrics HTTP/1.2\r\n\r\n"), admin.bad_version());
+    test.assert_eq(admin.status(admin.bad_version()), 505);
+    test.assert_eq(code_of("GET /metrics\r\n\r\n"), admin.bad_request());
+    test.assert_eq(code_of("GET\r\n\r\n"), admin.bad_request());
+    test.assert_eq(code_of("\r\n\r\n"), admin.bad_request());
+    test.assert_eq(code_of("GET /metrics FTP/1.1\r\n\r\n"), admin.bad_request());
+    test.assert_eq(code_of("GET /metrics?format=xml HTTP/1.1\r\n\r\n"), admin.bad_request());
+    test.assert_eq(code_of("GET /metrics?format=prometheus&x=1 HTTP/1.1\r\n\r\n"), admin.bad_request());
+    test.assert_eq(code_of("no line ending"), admin.bad_request());
+    test.assert_eq(admin.status(admin.bad_request()), 400);
+    return 0;
+}
+
+fn test_every_refusal_has_a_tag() -> [] int {
+    var c = 10;
+    while c <= 14 {
+        test.assert(len(admin.tag(c)) > 0);
+        c = c + 1;
+    }
+    test.assert_eq(len(admin.tag(0)), 0);
+    return 0;
+}
+
+fn test_where_the_head_ends() -> [] int {
+    test.assert_eq(admin.head_end("GET / HTTP/1.1\r\n\r\n"), 18);
+    test.assert_eq(admin.head_end("GET / HTTP/1.1\r\n\r\nxx"), 18);
+    test.assert_eq(admin.head_end("GET / HTTP/1.1\r\n"), 0 - 1);
+    test.assert_eq(admin.head_end("GET / HTTP/1.1\r\n\r"), 0 - 1);
+    test.assert_eq(admin.head_end(""), 0 - 1);
+    test.assert_eq(admin.head_end("\r\n\r\n"), 4);
+    return 0;
+}

@@ -7,7 +7,7 @@ cancho = "a4572ea3b506e4bcec1c4be43deda1043c11ba9f"   # the compiler these sourc
 
 [[bin]]
 name = "gateway"
-sources = ["generated/deploy.cho", "generated/routes.cho", "src/out.cho", "src/accesslog.cho", "src/problem.cho", "src/framing.cho", "src/chunked.cho", "src/route.cho", "src/response.cho", "src/forward.cho", "src/egress.cho", "src/proxy.cho", "src/version.cho", "src/gateway.cho"]
+sources = ["generated/deploy.cho", "generated/routes.cho", "src/out.cho", "src/accesslog.cho", "src/problem.cho", "src/framing.cho", "src/chunked.cho", "src/route.cho", "src/response.cho", "src/forward.cho", "src/egress.cho", "src/admin.cho", "src/metrics.cho", "src/proxy.cho", "src/version.cho", "src/gateway.cho"]
 std = true
 out = "build/gateway"
 
@@ -52,4 +52,24 @@ std = true
 [[test]]
 name = "accesslog"
 sources = ["src/out.cho", "src/accesslog.cho", "tests/accesslog_test.cho"]
+std = true
+
+[[test]]
+name = "metrics"
+sources = ["generated/deploy.cho", "generated/routes.cho", "src/out.cho", "src/route.cho", "src/metrics.cho", "tests/metrics_test.cho"]
+std = true
+
+[[test]]
+name = "admin"
+sources = ["src/admin.cho", "tests/admin_test.cho"]
+std = true
+
+[[test]]
+name = "metrics_bound"
+sources = ["generated/deploy.cho", "generated/routes.cho", "src/out.cho", "src/route.cho", "src/metrics.cho", "tests/metrics_bound_test.cho"]
+std = true
+
+[[test]]
+name = "metrics_bound_long"
+sources = ["tests/fixtures/long/deploy.cho", "tests/fixtures/long/routes.cho", "src/out.cho", "src/route.cho", "src/metrics.cho", "tests/metrics_bound_test.cho"]
 std = true

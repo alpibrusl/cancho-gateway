@@ -1,0 +1,83 @@
+edition 5;
+
+import std.test;
+import gateway.metrics;
+
+// The largest metrics answer, for the deployment these are built with (the example deployment, and `tests/fixtures/long`, whose names are 32
+// bytes): the buffer a scrape is built in is `metrics.worst_case()`, and it must hold the answer with every counter at its brim and be
+// within a tenth of it.
+
+// Every counter and gauge at 10^17 (so that a histogram's total, fourteen of them, is the 18 digits the formatter allows), and every rule table entry at its longest: both formats must fit
+// `worst_case()` (the buffer a scrape is built in), and a buffer one byte short must be refused, not overrun.
+
+// Every counter and gauge at 10^17 (so that a histogram's total, fourteen of them, is the 18 digits the formatter allows) and every rule
+// table entry at its longest: both formats must fit `worst_case()` (the buffer a scrape is built in), and a buffer one byte short must be
+// refused, not overrun. (A region holds about 64 KiB, so each buffer has its own.)
+fn fill[&s, &n, &g](stats: &!s [int], names: &!n [byte], gauge: &!g [int]) -> [] int {
+    var i = 0;
+    while i < len(stats) {
+        stats[i] = 100000000000000000;
+        i = i + 1;
+    }
+    i = 0;
+    while i < len(gauge) {
+        gauge[i] = 100000000000000000;
+        i = i + 1;
+    }
+    i = 0;
+    while i < len(names) {
+        names[i] = byte_of('x');
+        i = i + 1;
+    }
+    let rules = metrics.stats_len() - 194;
+    i = 0;
+    while i < 96 {
+        stats[rules + 96 + i] = 40;
+        i = i + 1;
+    }
+    stats[rules + 193] = 96;
+    return 0;
+}
+
+fn test_the_worst_case_json_fits_the_bound() -> [] int {
+    region a {
+        let stats = alloc_slice[a](metrics.stats_len(), 0);
+        let names = alloc_slice[a](metrics.names_len(), byte_of(0));
+        let g = alloc_slice[a](metrics.gauge_len(), 0);
+        fill(stats, names, g);
+        var size = 0;
+        region b {
+            let buf = alloc_slice[b](metrics.worst_case(), byte_of(0));
+            size = metrics.json(buf, metrics.head_room(), stats, names, g);
+            test.assert(size > 0);
+            test.assert(size <= metrics.worst_case());
+        }
+        region c {
+            let tight = alloc_slice[c](size - 1, byte_of(0));
+            test.assert_eq(metrics.json(tight, metrics.head_room(), stats, names, g), 0 - 1);
+        }
+    }
+    return 0;
+}
+
+fn test_the_worst_case_prometheus_fits_the_bound() -> [] int {
+    region a {
+        let stats = alloc_slice[a](metrics.stats_len(), 0);
+        let names = alloc_slice[a](metrics.names_len(), byte_of(0));
+        let g = alloc_slice[a](metrics.gauge_len(), 0);
+        fill(stats, names, g);
+        var size = 0;
+        region b {
+            let buf = alloc_slice[b](metrics.worst_case(), byte_of(0));
+            size = metrics.prometheus(buf, metrics.head_room(), stats, names, g);
+            test.assert(size > 0);
+            test.assert(size <= metrics.worst_case());
+            test.assert(metrics.worst_case() <= size + size / 10);
+        }
+        region c {
+            let tight = alloc_slice[c](size - 1, byte_of(0));
+            test.assert_eq(metrics.prometheus(tight, metrics.head_room(), stats, names, g), 0 - 1);
+        }
+    }
+    return 0;
+}

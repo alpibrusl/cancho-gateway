@@ -1,0 +1,248 @@
+edition 5;
+
+import std.bytes;
+import std.test;
+import gateway.metrics;
+import gateway.out;
+
+fn contains[&h](hay: &h [byte], needle: &static [byte]) -> [] bool {
+    var i = 0;
+    while i + len(needle) <= len(hay) {
+        if bytes.equal(hay[i..i + len(needle)], needle) {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn test_the_bucket_bounds() -> [] int {
+    test.assert_eq(metrics.bucket_of(0), 0);
+    test.assert_eq(metrics.bucket_of(1), 0);
+    test.assert_eq(metrics.bucket_of(2), 1);
+    test.assert_eq(metrics.bucket_of(3), 2);
+    test.assert_eq(metrics.bucket_of(5), 2);
+    test.assert_eq(metrics.bucket_of(6), 3);
+    test.assert_eq(metrics.bucket_of(10), 3);
+    test.assert_eq(metrics.bucket_of(25), 4);
+    test.assert_eq(metrics.bucket_of(26), 5);
+    test.assert_eq(metrics.bucket_of(100), 6);
+    test.assert_eq(metrics.bucket_of(250), 7);
+    test.assert_eq(metrics.bucket_of(500), 8);
+    test.assert_eq(metrics.bucket_of(1000), 9);
+    test.assert_eq(metrics.bucket_of(2500), 10);
+    test.assert_eq(metrics.bucket_of(5000), 11);
+    test.assert_eq(metrics.bucket_of(10000), 12);
+    test.assert_eq(metrics.bucket_of(10001), 13);
+    test.assert_eq(metrics.bucket_of(99999999), 13);
+    return 0;
+}
+
+// Route 0 is `api`, 1 `web-static`, 2 `web`; upstream 0 is `api`, 1 `web` (deploy/example.toml).
+fn test_a_request_is_counted_by_route_class_and_bucket() -> [] int {
+    region a {
+        let stats = alloc_slice[a](metrics.stats_len(), 0);
+        let names = alloc_slice[a](metrics.names_len(), byte_of(0));
+        metrics.record(stats, names, 200, 0, 0, 12, 7, 100, 2000, "", false);
+        metrics.record(stats, names, 404, 0, 0, 1, 0 - 1, 0, 300, "", false);
+        metrics.record(stats, names, 0, 0, 0, 10001, 0 - 1, 5, 5, "", true);
+        metrics.record(stats, names, 599, 1, 1, 3, 3, 0, 0, "", false);
+        metrics.record(stats, names, 600, 1, 1, 3, 3, 0, 0, "", false);
+        // route 0: classes none, 1xx..5xx at 0..5
+        test.assert_eq(stats[0], 1);
+        test.assert_eq(stats[2], 1);
+        test.assert_eq(stats[4], 1);
+        test.assert_eq(stats[6], 105);
+        test.assert_eq(stats[7], 2305);
+        // durations 12, 1, 10001 -> buckets 4, 0, 13; sum 10014
+        test.assert_eq(stats[8 + 4], 1);
+        test.assert_eq(stats[8 + 0], 1);
+        test.assert_eq(stats[8 + 13], 1);
+        test.assert_eq(stats[22], 10014);
+        // route 1: 599 is 5xx, 600 is none
+        test.assert_eq(stats[32 + 5], 1);
+        test.assert_eq(stats[32 + 0], 1);
+        // upstream 0 (after the three routes): one response with a wait of 7 (bucket 3), one retry; the two with no wait count none
+        test.assert_eq(stats[96], 1);
+        test.assert_eq(stats[96 + 1], 1);
+        test.assert_eq(stats[96 + 3 + 3], 1);
+        test.assert_eq(stats[96 + 17], 7);
+        // upstream 1: two responses
+        test.assert_eq(stats[96 + 24], 2);
+    }
+    return 0;
+}
+
+fn test_a_request_with_no_route_counts_only_its_rule() -> [] int {
+    region a {
+        let stats = alloc_slice[a](metrics.stats_len(), 0);
+        let names = alloc_slice[a](metrics.names_len(), byte_of(0));
+        metrics.record(stats, names, 400, 0 - 1, 0 - 1, 1, 0 - 1, 0, 264, "framing.two-lengths", false);
+        metrics.record(stats, names, 400, 0 - 1, 0 - 1, 1, 0 - 1, 0, 264, "framing.two-lengths", false);
+        metrics.record(stats, names, 404, 0 - 1, 0 - 1, 1, 0 - 1, 0, 264, "route.none", false);
+        var i = 0;
+        var any = 0;
+        while i < 96 + 48 {
+            any = any + stats[i];
+            i = i + 1;
+        }
+        test.assert_eq(any, 0);
+        let g = alloc_slice[a](metrics.gauge_len(), 0);
+        let buf = alloc_slice[a](metrics.worst_case(), byte_of(0));
+        let n = metrics.json(buf, 0, stats, names, g);
+        test.assert(n > 0);
+        test.assert(contains(buf[0..n], "\"refusals\":{\"framing.two-lengths\":2,\"route.none\":1,\"other\":0}"));
+    }
+    return 0;
+}
+
+fn test_the_rule_table_fills_and_then_counts_other() -> [] int {
+    region a {
+        let stats = alloc_slice[a](metrics.stats_len(), 0);
+        let names = alloc_slice[a](metrics.names_len(), byte_of(0));
+        let tag = alloc_slice[a](8, byte_of(0));
+        var i = 0;
+        while i < 100 {
+            tag[0] = byte_of('a' + i / 26);
+            tag[1] = byte_of('a' + i % 26);
+            metrics.record(stats, names, 400, 0 - 1, 0 - 1, 1, 0 - 1, 0, 0, tag[0..2], false);
+            i = i + 1;
+        }
+        // 96 tags in the table, four more went to `other`; a tag already in the table is still counted after it is full
+        metrics.record(stats, names, 400, 0 - 1, 0 - 1, 1, 0 - 1, 0, 0, "aa", false);
+        let base = 96;
+        let rules = 3 * 32 + 2 * 24;
+        test.assert_eq(stats[rules + 0], 2);
+        test.assert_eq(stats[rules + 96], 2);
+        test.assert_eq(stats[rules + 192], 4);
+        test.assert_eq(stats[rules + 193], 96);
+    }
+    return 0;
+}
+
+fn test_a_long_tag_is_other_not_a_trap() -> [] int {
+    region a {
+        let stats = alloc_slice[a](metrics.stats_len(), 0);
+        let names = alloc_slice[a](metrics.names_len(), byte_of(0));
+        let tag = alloc_slice[a](64, byte_of('x'));
+        metrics.record(stats, names, 400, 0 - 1, 0 - 1, 1, 0 - 1, 0, 0, tag, false);
+        test.assert_eq(stats[3 * 32 + 2 * 24 + 192], 1);
+        test.assert_eq(stats[3 * 32 + 2 * 24 + 193], 0);
+    }
+    return 0;
+}
+
+fn test_upstream_failures_are_counted() -> [] int {
+    region a {
+        let stats = alloc_slice[a](metrics.stats_len(), 0);
+        metrics.upstream_failed(stats, 1);
+        metrics.upstream_failed(stats, 1);
+        metrics.upstream_failed(stats, 7);
+        metrics.upstream_failed(stats, 0 - 1);
+        test.assert_eq(stats[96 + 24 + 2], 2);
+        test.assert_eq(stats[96 + 2], 0);
+    }
+    return 0;
+}
+
+fn test_json_names_every_family() -> [] int {
+    region a {
+        let stats = alloc_slice[a](metrics.stats_len(), 0);
+        let names = alloc_slice[a](metrics.names_len(), byte_of(0));
+        let g = alloc_slice[a](metrics.gauge_len(), 0);
+        g[0] = 5000;
+        g[1] = 3;
+        g[3] = 9;
+        g[4] = 2;
+        g[5 + 2] = 4;
+        g[6 + 2] = 1;
+        metrics.record(stats, names, 200, 0, 0, 12, 7, 100, 2000, "", false);
+        let buf = alloc_slice[a](metrics.worst_case(), byte_of(0));
+        let n = metrics.json(buf, 0, stats, names, g);
+        test.assert(n > 0);
+        let s = buf[0..n];
+        test.assert(contains(s, "{\"v\":1,\"uptime_ms\":5000,\"sessions_active\":3,\"le_ms\":[1,2,5,10,25,50,100,250,500,1000,2500,5000,10000],\"routes\":[{\"name\":\"api\",\"requests\":{\"none\":0,\"1xx\":0,\"2xx\":1,"));
+        test.assert(contains(s, "\"bytes_in\":100,\"bytes_out\":2000,\"duration_ms\":{\"buckets\":[0,0,0,0,1,0,0,0,0,0,0,0,0,0],\"sum\":12,\"count\":1}"));
+        test.assert(contains(s, "{\"name\":\"web\",\"responses\":0,\"retries\":0,\"failures\":0,\"pool_idle\":4,\"circuit_open\":true,"));
+        test.assert(contains(s, "\"log\":{\"dropped\":9,\"write_failures\":2}}\n"));
+    }
+    return 0;
+}
+
+fn test_prometheus_text_has_cumulative_buckets_and_a_type_for_every_family() -> [] int {
+    region a {
+        let stats = alloc_slice[a](metrics.stats_len(), 0);
+        let names = alloc_slice[a](metrics.names_len(), byte_of(0));
+        let g = alloc_slice[a](metrics.gauge_len(), 0);
+        metrics.record(stats, names, 200, 0, 0, 3, 3, 0, 0, "", false);
+        metrics.record(stats, names, 200, 0, 0, 30, 3, 0, 0, "", false);
+        metrics.record(stats, names, 502, 0, 0, 20000, 0 - 1, 0, 0, "proxy.connect", false);
+        let buf = alloc_slice[a](metrics.worst_case(), byte_of(0));
+        let n = metrics.prometheus(buf, 0, stats, names, g);
+        test.assert(n > 0);
+        let s = buf[0..n];
+        test.assert(contains(s, "# TYPE cancho_gateway_request_duration_ms histogram\n"));
+        test.assert(contains(s, "cancho_gateway_request_duration_ms_bucket{route=\"api\",le=\"2\"} 0\n"));
+        test.assert(contains(s, "cancho_gateway_request_duration_ms_bucket{route=\"api\",le=\"5\"} 1\n"));
+        test.assert(contains(s, "cancho_gateway_request_duration_ms_bucket{route=\"api\",le=\"50\"} 2\n"));
+        test.assert(contains(s, "cancho_gateway_request_duration_ms_bucket{route=\"api\",le=\"10000\"} 2\n"));
+        test.assert(contains(s, "cancho_gateway_request_duration_ms_bucket{route=\"api\",le=\"+Inf\"} 3\n"));
+        test.assert(contains(s, "cancho_gateway_request_duration_ms_sum{route=\"api\"} 20033\n"));
+        test.assert(contains(s, "cancho_gateway_request_duration_ms_count{route=\"api\"} 3\n"));
+        test.assert(contains(s, "cancho_gateway_requests_total{route=\"api\",class=\"2xx\"} 2\n"));
+        test.assert(contains(s, "cancho_gateway_requests_total{route=\"api\",class=\"5xx\"} 1\n"));
+        test.assert(contains(s, "cancho_gateway_refusals_total{rule=\"proxy.connect\"} 1\n"));
+        test.assert(contains(s, "# TYPE cancho_gateway_circuit_open gauge\n"));
+    }
+    return 0;
+}
+
+fn test_readiness_names_its_causes() -> [] int {
+    region a {
+        let g = alloc_slice[a](metrics.gauge_len(), 0);
+        let buf = alloc_slice[a](256, byte_of(0));
+        test.assert_eq(metrics.is_ready(g), 1);
+        var n = metrics.ready_body(buf, 0, g);
+        test.assert(bytes.equal(buf[0..n], "{\"ready\":true}\n"));
+        g[6] = 1;
+        test.assert_eq(metrics.is_ready(g), 0);
+        n = metrics.ready_body(buf, 0, g);
+        test.assert(bytes.equal(buf[0..n], "{\"ready\":false,\"why\":[\"upstream api: circuit open\"]}\n"));
+        g[8] = 1;
+        g[2] = 1;
+        n = metrics.ready_body(buf, 0, g);
+        test.assert(bytes.equal(buf[0..n], "{\"ready\":false,\"why\":[\"upstream api: circuit open\",\"upstream web: circuit open\",\"log: a write failed in the last 10 s\"]}\n"));
+        g[6] = 0;
+        g[8] = 0;
+        n = metrics.ready_body(buf, 0, g);
+        test.assert(bytes.equal(buf[0..n], "{\"ready\":false,\"why\":[\"log: a write failed in the last 10 s\"]}\n"));
+    }
+    return 0;
+}
+
+fn test_a_response_is_framed_in_front_of_its_body() -> [] int {
+    region a {
+        let buf = alloc_slice[a](512, byte_of(0));
+        let end = out.put(buf, metrics.head_room(), "{\"ready\":true}\n");
+        let start = metrics.frame(buf, 200, "application/json", end);
+        test.assert(start > 0);
+        test.assert(bytes.equal(buf[start..end], "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"ready\":true}\n"));
+        let start503 = metrics.frame(buf, 503, "application/json", end);
+        test.assert(bytes.equal(buf[start503..end], "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"ready\":true}\n"));
+        test.assert_eq(metrics.frame(buf, 200, "application/json", 100), 0 - 1 + 0);
+    }
+    return 0;
+}
+
+fn test_a_counter_past_the_cap_is_written_saturated() -> [] int {
+    region a {
+        let stats = alloc_slice[a](metrics.stats_len(), 0);
+        let names = alloc_slice[a](metrics.names_len(), byte_of(0));
+        let g = alloc_slice[a](metrics.gauge_len(), 0);
+        stats[6] = 9223372036854775807;
+        let buf = alloc_slice[a](metrics.worst_case(), byte_of(0));
+        let n = metrics.json(buf, 0, stats, names, g);
+        test.assert(contains(buf[0..n], "\"bytes_in\":999999999999999999,"));
+    }
+    return 0;
+}

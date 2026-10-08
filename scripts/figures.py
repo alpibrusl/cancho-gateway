@@ -23,35 +23,35 @@ STYLE = """<style>
 </style>"""
 
 
-def ratios(path, key, other, cell):
-    """Per-round ratios key / other for one cell, from one results file (the rounds are interleaved, so they are paired)."""
+BENCH_ORDER = [("lexsys", "cancho-gateway"), ("nginx", "nginx"), ("haproxy", "HAProxy"), ("envoy", "Envoy"), ("caddy", "Caddy"), ("traefik", "Traefik"), ("kong", "Kong")]
+
+
+def medians(path, cell):
+    """Requests per second, median of the rounds, for every proxy in one cell of one results file."""
     data = json.loads(path.read_text())["cells"][cell]
-    a = {r["run"]: r["rps"] for r in data[key]}
-    b = {r["run"]: r["rps"] for r in data[other]}
-    return statistics.median(a[i] / b[i] for i in a)
+    return {key: statistics.median(r["rps"] for r in data[key]) for key, _ in BENCH_ORDER}
 
 
 def bench_svg():
-    first, second = RESULTS / "2026-10-06.json", RESULTS / "2026-10-07.json"
-    x0, scale, row = 210, 190, 74
-    lines = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 %d" role="img" aria-label="Throughput of cancho-gateway divided by nginx and by HAProxy in five benchmark cells, from two runs: it is above nginx only with Connection: close, and below HAProxy except there.">' % (60 + row * len(CELLS)), STYLE]
-    lines.append('<text class="t" x="0" y="18">cancho-gateway ÷ the other proxy, requests per second</text>')
-    lines.append('<text class="s" x="0" y="36">bar: second run, 2026-10-07 · tick: first run, 2026-10-06 · right of the dashed line, the gateway is faster</text>')
-    ref = x0 + scale
-    for i in range(1, 12):
-        gx = x0 + scale * i * 0.2
-        lines.append('<line class="grid" x1="%.1f" y1="48" x2="%.1f" y2="%d"/>' % (gx, gx, 48 + row * len(CELLS) - 6))
-    lines.append('<line class="ref" x1="%d" y1="46" x2="%d" y2="%d"/>' % (ref, ref, 52 + row * len(CELLS) - 10))
+    """One block per cell: every proxy's requests per second as a bar, fastest first, cancho-gateway in blue. One run, so every bar was measured in the same rounds."""
+    second = RESULTS / "2026-10-07.json"
+    x0, width, bar, gap, head = 100, 470, 15, 4, 34
+    block = head + len(BENCH_ORDER) * (bar + gap) + 14
+    names = dict(BENCH_ORDER)
+    lines = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 %d" role="img" aria-label="Requests per second of seven proxies in five benchmark cells, one run, fastest first. cancho-gateway is slower than HAProxy in four cells, slower than nginx in three of them in this run, and faster than both with Connection: close.">' % (22 + block * len(CELLS)), STYLE]
+    lines.append('<text class="t" x="0" y="16">Requests per second, one core each, higher is better (the run of 2026-10-07, median of five rounds)</text>')
     for n, (cell, label) in enumerate(CELLS):
-        y = 56 + n * row
-        lines.append('<text class="t" x="0" y="%d">%s</text><text class="s" x="0" y="%d">%s</text>' % (y + 14, cell, y + 30, label))
-        for k, (other, cls, name) in enumerate((("nginx", "a", "nginx"), ("haproxy", "b", "HAProxy"))):
-            r2 = ratios(second, "lexsys", other, cell)
-            r1 = ratios(first, "lexsys", other, cell)
-            by = y + k * 26
-            lines.append('<rect class="%s" x="%d" y="%d" width="%.1f" height="18" rx="3"/>' % (cls, x0, by, scale * r2))
-            lines.append('<line class="tick" x1="%.1f" y1="%d" x2="%.1f" y2="%d"/>' % (x0 + scale * r1, by - 3, x0 + scale * r1, by + 21))
-            lines.append('<text class="v" x="%.1f" y="%d">%.2f</text><text class="s" x="%.1f" y="%d">÷ %s</text>' % (x0 + scale * max(r1, r2) + 8, by + 14, r2, x0 + scale * max(r1, r2) + 46, by + 14, name))
+        y0 = 30 + n * block
+        rps = medians(second, cell)
+        top = max(rps.values())
+        lines.append('<text class="t" x="0" y="%d">%s</text><text class="s" x="%d" y="%d">%s</text>' % (y0 + 14, cell, 34 if len(cell) < 3 else 38, y0 + 14, label))
+        for i, key in enumerate(sorted(rps, key=lambda k: -rps[k])):
+            y = y0 + head - 10 + i * (bar + gap)
+            w = max(2.0, width * rps[key] / top)
+            us = key == "lexsys"
+            lines.append('<text class="%s" x="%d" y="%d" text-anchor="end">%s</text>' % ("t" if us else "s", x0 - 8, y + 12, names[key]))
+            lines.append('<rect class="%s" x="%d" y="%d" width="%.1f" height="%d" rx="2"/>' % ("a" if us else "b", x0, y, w, bar))
+            lines.append('<text class="v" x="%.1f" y="%d">%s</text>' % (x0 + w + 6, y + 12, format(round(rps[key]), ",")))
     lines.append("</svg>")
     return "\n".join(lines) + "\n"
 

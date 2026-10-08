@@ -1,0 +1,14 @@
+# Used by docs/examples.html. Upstreams are on this machine so it runs anywhere: python3 scripts/demo_upstream.py 9000 9001
+# Example 3: a route sets the largest body it accepts.
+listen = 8080
+
+[[upstream]]
+name = "reports"
+addr = "127.0.0.1:9000"
+
+[[route]]
+name = "reports"
+path_prefix = "/reports"
+methods = ["POST"]
+upstream = "reports"
+max_body = 1024            # 1 KiB here, so the example is quick; 5242880 would be 5 MiB

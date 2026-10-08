@@ -1,56 +1,118 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 430" role="img" aria-label="Throughput of cancho-gateway divided by nginx and by HAProxy in five benchmark cells, from two runs: it is above nginx only with Connection: close, and below HAProxy except there.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 927" role="img" aria-label="Requests per second of seven proxies in five benchmark cells, one run, fastest first. cancho-gateway is slower than HAProxy in four cells, slower than nginx in three of them in this run, and faster than both with Connection: close.">
 <style>
 .t{fill:#14171c;font:600 13px system-ui,sans-serif}.s{fill:#5b6573;font:12px system-ui,sans-serif}.v{fill:#14171c;font:600 12px system-ui,sans-serif}.v,.s{paint-order:stroke;stroke:#fbfbfc;stroke-width:4px;stroke-linejoin:round}
 .a{fill:#265e8d}.b{fill:#a89f8f}.ref{stroke:#5b6573;stroke-width:1.4;stroke-dasharray:4 3}.tick{stroke:#14171c;stroke-width:2}.grid{stroke:#e1e4ea;stroke-width:1}
 @media (prefers-color-scheme:dark){.v,.s{stroke:#0d1217}.t,.v{fill:#e8eaee}.s{fill:#9ba5b3}.a{fill:#6fa3d6}.b{fill:#8c8576}.ref{stroke:#9ba5b3}.tick{stroke:#e8eaee}.grid{stroke:#232932}}
 </style>
-<text class="t" x="0" y="18">cancho-gateway ÷ the other proxy, requests per second</text>
-<text class="s" x="0" y="36">bar: second run, 2026-10-07 · tick: first run, 2026-10-06 · right of the dashed line, the gateway is faster</text>
-<line class="grid" x1="248.0" y1="48" x2="248.0" y2="412"/>
-<line class="grid" x1="286.0" y1="48" x2="286.0" y2="412"/>
-<line class="grid" x1="324.0" y1="48" x2="324.0" y2="412"/>
-<line class="grid" x1="362.0" y1="48" x2="362.0" y2="412"/>
-<line class="grid" x1="400.0" y1="48" x2="400.0" y2="412"/>
-<line class="grid" x1="438.0" y1="48" x2="438.0" y2="412"/>
-<line class="grid" x1="476.0" y1="48" x2="476.0" y2="412"/>
-<line class="grid" x1="514.0" y1="48" x2="514.0" y2="412"/>
-<line class="grid" x1="552.0" y1="48" x2="552.0" y2="412"/>
-<line class="grid" x1="590.0" y1="48" x2="590.0" y2="412"/>
-<line class="grid" x1="628.0" y1="48" x2="628.0" y2="412"/>
-<line class="ref" x1="400" y1="46" x2="400" y2="412"/>
-<text class="t" x="0" y="70">C1</text><text class="s" x="0" y="86">keep-alive, 64 connections</text>
-<rect class="a" x="210" y="56" width="219.3" height="18" rx="3"/>
-<line class="tick" x1="364.2" y1="53" x2="364.2" y2="77"/>
-<text class="v" x="437.3" y="70">1.15</text><text class="s" x="475.3" y="70">÷ nginx</text>
-<rect class="b" x="210" y="82" width="174.0" height="18" rx="3"/>
-<line class="tick" x1="324.7" y1="79" x2="324.7" y2="103"/>
-<text class="v" x="392.0" y="96">0.92</text><text class="s" x="430.0" y="96">÷ HAProxy</text>
-<text class="t" x="0" y="144">C1b</text><text class="s" x="0" y="160">keep-alive, 8 connections</text>
-<rect class="a" x="210" y="130" width="161.3" height="18" rx="3"/>
-<line class="tick" x1="342.2" y1="127" x2="342.2" y2="151"/>
-<text class="v" x="379.3" y="144">0.85</text><text class="s" x="417.3" y="144">÷ nginx</text>
-<rect class="b" x="210" y="156" width="139.6" height="18" rx="3"/>
-<line class="tick" x1="332.0" y1="153" x2="332.0" y2="177"/>
-<text class="v" x="357.6" y="170">0.73</text><text class="s" x="395.6" y="170">÷ HAProxy</text>
-<text class="t" x="0" y="218">C2</text><text class="s" x="0" y="234">Connection: close</text>
-<rect class="a" x="210" y="204" width="395.5" height="18" rx="3"/>
-<line class="tick" x1="491.4" y1="201" x2="491.4" y2="225"/>
-<text class="v" x="613.5" y="218">2.08</text><text class="s" x="651.5" y="218">÷ nginx</text>
-<rect class="b" x="210" y="230" width="278.8" height="18" rx="3"/>
-<line class="tick" x1="418.8" y1="227" x2="418.8" y2="251"/>
-<text class="v" x="496.8" y="244">1.47</text><text class="s" x="534.8" y="244">÷ HAProxy</text>
-<text class="t" x="0" y="292">C3</text><text class="s" x="0" y="308">64 KiB response</text>
-<rect class="a" x="210" y="278" width="188.3" height="18" rx="3"/>
-<line class="tick" x1="370.6" y1="275" x2="370.6" y2="299"/>
-<text class="v" x="406.3" y="292">0.99</text><text class="s" x="444.3" y="292">÷ nginx</text>
-<rect class="b" x="210" y="304" width="103.2" height="18" rx="3"/>
-<line class="tick" x1="309.7" y1="301" x2="309.7" y2="325"/>
-<text class="v" x="321.2" y="318">0.54</text><text class="s" x="359.2" y="318">÷ HAProxy</text>
-<text class="t" x="0" y="366">C4</text><text class="s" x="0" y="382">16 KiB POST</text>
-<rect class="a" x="210" y="352" width="88.7" height="18" rx="3"/>
-<line class="tick" x1="290.1" y1="349" x2="290.1" y2="373"/>
-<text class="v" x="306.7" y="366">0.47</text><text class="s" x="344.7" y="366">÷ nginx</text>
-<rect class="b" x="210" y="378" width="104.4" height="18" rx="3"/>
-<line class="tick" x1="313.1" y1="375" x2="313.1" y2="399"/>
-<text class="v" x="322.4" y="392">0.55</text><text class="s" x="360.4" y="392">÷ HAProxy</text>
+<text class="t" x="0" y="16">Requests per second, one core each, higher is better (the run of 2026-10-07, median of five rounds)</text>
+<text class="t" x="0" y="44">C1</text><text class="s" x="34" y="44">keep-alive, 64 connections</text>
+<text class="s" x="92" y="66" text-anchor="end">HAProxy</text>
+<rect class="b" x="100" y="54" width="470.0" height="15" rx="2"/>
+<text class="v" x="576.0" y="66">38,426</text>
+<text class="t" x="92" y="85" text-anchor="end">cancho-gateway</text>
+<rect class="a" x="100" y="73" width="421.4" height="15" rx="2"/>
+<text class="v" x="527.4" y="85">34,451</text>
+<text class="s" x="92" y="104" text-anchor="end">nginx</text>
+<rect class="b" x="100" y="92" width="365.7" height="15" rx="2"/>
+<text class="v" x="471.7" y="104">29,903</text>
+<text class="s" x="92" y="123" text-anchor="end">Kong</text>
+<rect class="b" x="100" y="111" width="161.8" height="15" rx="2"/>
+<text class="v" x="267.8" y="123">13,231</text>
+<text class="s" x="92" y="142" text-anchor="end">Envoy</text>
+<rect class="b" x="100" y="130" width="138.4" height="15" rx="2"/>
+<text class="v" x="244.4" y="142">11,312</text>
+<text class="s" x="92" y="161" text-anchor="end">Traefik</text>
+<rect class="b" x="100" y="149" width="109.3" height="15" rx="2"/>
+<text class="v" x="215.3" y="161">8,939</text>
+<text class="s" x="92" y="180" text-anchor="end">Caddy</text>
+<rect class="b" x="100" y="168" width="102.9" height="15" rx="2"/>
+<text class="v" x="208.9" y="180">8,416</text>
+<text class="t" x="0" y="225">C1b</text><text class="s" x="38" y="225">keep-alive, 8 connections</text>
+<text class="s" x="92" y="247" text-anchor="end">HAProxy</text>
+<rect class="b" x="100" y="235" width="470.0" height="15" rx="2"/>
+<text class="v" x="576.0" y="247">30,090</text>
+<text class="s" x="92" y="266" text-anchor="end">nginx</text>
+<rect class="b" x="100" y="254" width="412.3" height="15" rx="2"/>
+<text class="v" x="518.3" y="266">26,396</text>
+<text class="t" x="92" y="285" text-anchor="end">cancho-gateway</text>
+<rect class="a" x="100" y="273" width="342.4" height="15" rx="2"/>
+<text class="v" x="448.4" y="285">21,924</text>
+<text class="s" x="92" y="304" text-anchor="end">Kong</text>
+<rect class="b" x="100" y="292" width="212.7" height="15" rx="2"/>
+<text class="v" x="318.7" y="304">13,615</text>
+<text class="s" x="92" y="323" text-anchor="end">Envoy</text>
+<rect class="b" x="100" y="311" width="159.0" height="15" rx="2"/>
+<text class="v" x="265.0" y="323">10,178</text>
+<text class="s" x="92" y="342" text-anchor="end">Caddy</text>
+<rect class="b" x="100" y="330" width="146.1" height="15" rx="2"/>
+<text class="v" x="252.1" y="342">9,357</text>
+<text class="s" x="92" y="361" text-anchor="end">Traefik</text>
+<rect class="b" x="100" y="349" width="144.5" height="15" rx="2"/>
+<text class="v" x="250.5" y="361">9,250</text>
+<text class="t" x="0" y="406">C2</text><text class="s" x="34" y="406">Connection: close</text>
+<text class="t" x="92" y="428" text-anchor="end">cancho-gateway</text>
+<rect class="a" x="100" y="416" width="470.0" height="15" rx="2"/>
+<text class="v" x="576.0" y="428">33,230</text>
+<text class="s" x="92" y="447" text-anchor="end">HAProxy</text>
+<rect class="b" x="100" y="435" width="325.3" height="15" rx="2"/>
+<text class="v" x="431.3" y="447">22,997</text>
+<text class="s" x="92" y="466" text-anchor="end">nginx</text>
+<rect class="b" x="100" y="454" width="228.1" height="15" rx="2"/>
+<text class="v" x="334.1" y="466">16,124</text>
+<text class="s" x="92" y="485" text-anchor="end">Kong</text>
+<rect class="b" x="100" y="473" width="179.0" height="15" rx="2"/>
+<text class="v" x="285.0" y="485">12,657</text>
+<text class="s" x="92" y="504" text-anchor="end">Envoy</text>
+<rect class="b" x="100" y="492" width="126.9" height="15" rx="2"/>
+<text class="v" x="232.9" y="504">8,975</text>
+<text class="s" x="92" y="523" text-anchor="end">Traefik</text>
+<rect class="b" x="100" y="511" width="87.3" height="15" rx="2"/>
+<text class="v" x="193.3" y="523">6,173</text>
+<text class="s" x="92" y="542" text-anchor="end">Caddy</text>
+<rect class="b" x="100" y="530" width="84.9" height="15" rx="2"/>
+<text class="v" x="190.9" y="542">6,002</text>
+<text class="t" x="0" y="587">C3</text><text class="s" x="34" y="587">64 KiB response</text>
+<text class="s" x="92" y="609" text-anchor="end">HAProxy</text>
+<rect class="b" x="100" y="597" width="470.0" height="15" rx="2"/>
+<text class="v" x="576.0" y="609">16,077</text>
+<text class="s" x="92" y="628" text-anchor="end">nginx</text>
+<rect class="b" x="100" y="616" width="261.3" height="15" rx="2"/>
+<text class="v" x="367.3" y="628">8,939</text>
+<text class="t" x="92" y="647" text-anchor="end">cancho-gateway</text>
+<rect class="a" x="100" y="635" width="255.9" height="15" rx="2"/>
+<text class="v" x="361.9" y="647">8,754</text>
+<text class="s" x="92" y="666" text-anchor="end">Envoy</text>
+<rect class="b" x="100" y="654" width="207.7" height="15" rx="2"/>
+<text class="v" x="313.7" y="666">7,106</text>
+<text class="s" x="92" y="685" text-anchor="end">Kong</text>
+<rect class="b" x="100" y="673" width="185.0" height="15" rx="2"/>
+<text class="v" x="291.0" y="685">6,329</text>
+<text class="s" x="92" y="704" text-anchor="end">Caddy</text>
+<rect class="b" x="100" y="692" width="184.1" height="15" rx="2"/>
+<text class="v" x="290.1" y="704">6,297</text>
+<text class="s" x="92" y="723" text-anchor="end">Traefik</text>
+<rect class="b" x="100" y="711" width="176.6" height="15" rx="2"/>
+<text class="v" x="282.6" y="723">6,040</text>
+<text class="t" x="0" y="768">C4</text><text class="s" x="34" y="768">16 KiB POST</text>
+<text class="s" x="92" y="790" text-anchor="end">nginx</text>
+<rect class="b" x="100" y="778" width="470.0" height="15" rx="2"/>
+<text class="v" x="576.0" y="790">23,459</text>
+<text class="s" x="92" y="809" text-anchor="end">HAProxy</text>
+<rect class="b" x="100" y="797" width="414.1" height="15" rx="2"/>
+<text class="v" x="520.1" y="809">20,667</text>
+<text class="s" x="92" y="828" text-anchor="end">Kong</text>
+<rect class="b" x="100" y="816" width="240.5" height="15" rx="2"/>
+<text class="v" x="346.5" y="828">12,002</text>
+<text class="t" x="92" y="847" text-anchor="end">cancho-gateway</text>
+<rect class="a" x="100" y="835" width="217.2" height="15" rx="2"/>
+<text class="v" x="323.2" y="847">10,839</text>
+<text class="s" x="92" y="866" text-anchor="end">Envoy</text>
+<rect class="b" x="100" y="854" width="186.9" height="15" rx="2"/>
+<text class="v" x="292.9" y="866">9,326</text>
+<text class="s" x="92" y="885" text-anchor="end">Traefik</text>
+<rect class="b" x="100" y="873" width="126.3" height="15" rx="2"/>
+<text class="v" x="232.3" y="885">6,306</text>
+<text class="s" x="92" y="904" text-anchor="end">Caddy</text>
+<rect class="b" x="100" y="892" width="116.7" height="15" rx="2"/>
+<text class="v" x="222.7" y="904">5,826</text>
 </svg>

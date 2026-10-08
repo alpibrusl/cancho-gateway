@@ -1,0 +1,19 @@
+# Used by docs/examples.html. Upstreams are on this machine so it runs anywhere: python3 scripts/demo_upstream.py 9000 9001
+# Example 1: behind a TLS-terminating front that sets the forwarding headers.
+listen = 8080
+
+[[upstream]]
+name = "orders"
+addr = "127.0.0.1:9000"
+
+[[route]]
+name = "orders"
+host = "api.example.com"
+path_prefix = "/"
+upstream = "orders"
+trust_forwarded = true     # the party in front is mine: pass its forwarding headers on
+
+[[route]]
+name = "public"
+path_prefix = "/"
+upstream = "orders"        # any other host: forwarding claims are not believed

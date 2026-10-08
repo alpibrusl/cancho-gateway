@@ -1,6 +1,6 @@
 # The access log and metrics (task #10)
 
-Status: **10a built (section 9); 10b (sections 6 and 7) not yet.** The design was written before the code and the gates in section 8 were fixed then. It is built in two slices, each its
+Status: **10a built (section 9); 10b (sections 6, 7 and gates 8 to 12) designed, being built.** The design was written before the code and the gates in section 8 were fixed then. It is built in two slices, each its
 own PR: **10a** (sections 2 to 5: the access log, and the request id completed) and **10b** (sections 6 and 7: counters, the histogram, the admin
 listener). Claims below are about the pinned compiler (`cancho.toml`); where a later commit finds one false, it is corrected here, in place.
 
@@ -77,35 +77,38 @@ becomes the id at routing time. The id's bytes live in a per-slot area (64 bytes
 
 ## 6. Counters and the histogram (10b)
 
-Kept in a fixed block sized at start, updated by `session_end` (an addition per request, no allocation):
+Kept in one block of integers sized at start from the compiled-in counts (`routes x 32 + upstreams x 24 + 96 rules x 2` ints, about 1 KiB for a small deployment), updated by `log_end` (the one place a request ends: an addition per request, no allocation):
 
 | metric | labels | kind |
 |---|---|---|
-| `requests_total` | `route`, `class` (`1xx`..`5xx`, `none` for status 0) | counter |
-| `refusals_total` | `rule` (every tag in the tag tables, ~60) | counter |
-| `request_duration_ms` | `route` | histogram, buckets 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, +Inf, with `_sum` and `_count` |
-| `upstream_wait_ms` | `upstream` | the same buckets |
-| `bytes_in_total`, `bytes_out_total` | `route` | counters |
-| `upstream_requests_total`, `upstream_retries_total`, `upstream_failures_total` | `upstream` | counters |
-| `sessions_active`, `pool_idle`, `circuit_open` | (`upstream` for the last two) | gauges |
+| `requests_total` | `route`, `class` (`none` for status 0, then `1xx`..`5xx`) | counter |
+| `refusals_total` | `rule` | counter |
+| `request_duration_ms` | `route` | histogram: buckets 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, +Inf (**14**, not the 15 first written here), `_sum`, `_count` |
+| `upstream_wait_ms` | `upstream` | the same buckets: the wait for the response head, as the log's `upstream_ms` |
+| `bytes_in_total`, `bytes_out_total` | `route` | counters, as the log's `bytes_in`, `bytes_out` |
+| `upstream_responses_total`, `upstream_retries_total`, `upstream_failures_total` | `upstream` | counters: requests whose response head arrived; requests sent again on a fresh connection; failures as the circuit counts them (counted even when the circuit is off) |
+| `sessions_active`, `pool_idle`, `circuit_open` | (`upstream` for the last two) | gauges, read when scraped |
 | `log_dropped_total`, `log_write_failures_total` | | counters |
 
-Bounded by construction: at most 256 routes x 5 classes, ~60 rules, 256 upstreams, 15 buckets; a client cannot create a label (a label is a route, an upstream, a rule or a class, all compiled in).
+**Labels are bounded by construction.** A route, an upstream and a class are compiled in. A rule is one of the tags the code can emit, but the tags live in several modules and there is no single table, so the rule counters sit in a small table filled as tags are first seen (at most 96 entries of 40 bytes; a tag past the 96th is counted under `other`, which cannot happen while the code has about 60). A client cannot make a label: it can only reach a tag the code already has. The table is searched linearly (96 comparisons) on a refusal, which is not the hot path.
+
+**A request with no route** (refused before routing: framing, route selection) counts under no route's `requests_total` (it has none) and under its `rule` in `refusals_total`; `requests_total` per route therefore sums to the requests that were routed, and the gate says so.
 
 ## 7. The admin listener (10b)
 
-`admin_listen = <port>` in the deployment (default **off**; refused if equal to `listen`; a different port, not a path on the proxy's: the proxy's port is the public one). It serves, read only, with no
-request body accepted and a 2 KiB head limit, at most 8 connections at a time, each closed after one response (a 2 s deadline):
+`admin_listen = <port>` in the deployment (default **0: off**; refused if equal to `listen`). A different port, not a path on the proxy's: the proxy's port is the public one. Read only: a `GET` with no body, a 2 KiB head, at most **8** connections at a time (a ninth is closed at once), each closed after one response, a 2 s deadline for the whole exchange.
 
 | path | answer |
 |---|---|
-| `GET /metrics` | the section 6 metrics as JSON (byte-stable key order); `?format=prometheus` for the Prometheus text exposition |
-| `GET /healthz` | `200 {"alive":true}` if the loop is turning (it is answering) |
-| `GET /readyz` | `200` if at least one upstream's circuit is closed and the log is not failing, else `503 {"ready":false,"why":["upstream api: circuit open", ...]}`: the *why* is data |
+| `GET /metrics` | the section 6 metrics as JSON, keys in a fixed order; `?format=prometheus` for the Prometheus text exposition (`# HELP`, `# TYPE`, cumulative `le` buckets) |
+| `GET /healthz` | `200 {"alive":true}`: the loop is turning, since it is answering |
+| `GET /readyz` | `200 {"ready":true}`, or `503 {"ready":false,"why":["upstream api: circuit open","log: a write failed in the last 10 s"]}`: the reasons are data. Ready means no circuit is open and the log is not failing |
 
-**The exposure, stated first because the compiler forces it:** the admin port binds every interface (section 1). What it reveals is topology and volume (route and upstream names, counters), no
-request data and no secret. That is still not for the internet. The deployment's production profile (the operator bundle, a later task) must firewall it or run the gateway where the admin
-port is not routed; a loopback-only bind is the clean fix and is a request to cancho (`tcp_listen` flag, bit 2). Until then the README says the admin port is "as public as its firewall lets it be".
+Anything else is a problem+json refusal with its own rule, and the refusal's `request_id` is `admin`: `admin.method` (405: not `GET`), `admin.path` (404), `admin.body` (400: a `Content-Length` or `Transfer-Encoding` header), `admin.head` (431: no complete head in 2 KiB), `admin.version` (505: `HTTP/` but not 1.0 or 1.1), `admin.request` (400: a request line that is not `METHOD target HTTP/x.y`, or a `/metrics` query other than none, `format=json` or `format=prometheus`), `admin.busy` (503: the response buffer stayed taken for the whole deadline), `admin.size` (500: the answer did not fit the buffer, which the unit test says cannot happen). An admin connection has no access-log line (it is not a proxied request) and counts in none of the metrics.
+
+**How it runs, in the same loop.** The admin listener is a second listener on the same poller; its connections take slots of the same table (kind 4), so the table's bound covers them. The metrics response is built into one buffer, sized at start to the worst case the formatter can produce for this deployment (`metrics.worst_case()`, computed from the compiled-in names, and about 25 KiB for a small one; allocated only if the admin port is on), and **only one connection owns that buffer at a time**: a connection with a complete head waits, unwatched, until the buffer is free. Serving one at a time is invisible at this size (a scrape is a few milliseconds) and keeps the memory bound independent of the connection count.
+
+**The exposure, stated first because the compiler forces it:** the admin port binds every interface (section 1). What it reveals is topology and volume (route and upstream names, counters), no request data and no secret. That is still not for the internet. The deployment's production profile (the operator bundle, a later task) must firewall it or run the gateway where the admin port is not routed; a loopback-only bind is the clean fix and is a request to cancho (`tcp_listen` flag, bit 2). Until then the README says the admin port is "as public as its firewall lets it be".
 
 ## 8. Gates, fixed before the code
 
@@ -122,36 +125,36 @@ port is not routed; a loopback-only bind is the clean fix and is a request to ca
 6. **Mutants** of the new code, all killed or explained (each field, the escaping, the cut, the queue's full case and its announcement, the id echo, the strip of the upstream's id).
 7. **No new effect:** `scripts/authority.py --check` passes with the capability rows unchanged; the 2,000-line gate; the cost measured against the previous build in the same rounds (the log's price per
    request is a number in this document, not a claim).
-8. (10b) **Counters equal an independent count** over a scripted run (the log's own lines, parsed, summed by route, class and rule, against `/metrics`); the histogram's `_count` equals the sum of its buckets;
-   the admin port refuses a body, a long head, a ninth connection; `/readyz` says why for each cause.
+8. (10b) **Counters equal an independent count:** the log's own lines over a scripted run (every status class, a refusal of each kind, a retry, an upstream failure), parsed and summed by route, class and rule, against `/metrics`; the histogram's `_count` equals its bucket total, and the cumulative Prometheus buckets are non-decreasing and end at `_count`; the Prometheus text parses (every sample line is `name{labels} value`, every family has a `# TYPE`).
+9. (10b) **The admin port is what section 7 says:** off by default (nothing listens); refuses `POST`, a body, a 2 KiB head, an unknown path, an HTTP/1.0-or-other version it cannot serve, and a ninth connection; `/readyz` says why for each cause (an open circuit, a failing log) and is `200` when neither; a slow reader of the metrics does not stall the proxy port, and two scrapes at once are both answered; the generator refuses `admin_listen` equal to `listen` or out of range.
+10. (10b) **The formatter cannot overrun its buffer:** a unit test fills every counter with the largest values the formatter accepts and checks that the output of both formats fits `metrics.worst_case()`, byte for byte on small known cases.
+11. (10b) **Mutants** of the new code, all killed or explained (class boundaries, each bucket bound, the sum, the retry and failure counts, the rule table's lookup and its overflow, the readiness causes, the 8-connection cap, the one-owner buffer, each refusal's status).
+12. (10b) **No new capability and a measured cost:** `scripts/authority.py --check` unchanged (the second listener is `net_in("")` and `conn_accept`, both already in the row); the 2,000-line gate; the counters' price per request against the build before, in the same rounds.
 
-## 9. What 10a built, and what checked it
+## 10. What 10b built, and what checked it
 
-- **`src/accesslog.cho`** (the pure line builder) and `out.put_json` (the escaper): 10 unit tests, including every byte value 0..255 coming out as printable ASCII that is valid JSON, the
-  path cuts at 128 input and 256 output bytes, and the worst line. **Measured:** the worst line (every field at its cap, 16-digit counters, a path of 128 control bytes) is **676 bytes**;
-  the bound is 768 (section 2 first said 640 before it was measured; corrected).
-- **The proxy**: 32 state ints and a 256-byte meta area per slot; `session_begin` at accept (the connection's own id), the route and its upstream recorded as soon as they are known (so a 413
-  names them), `log_end` building the line when the client's session ends, `run` writing the queue once per turn and exiting with status 6 when the write fails (`log_failure`, default `exit`).
-  The request id in the response (`X-Request-Id`, an upstream's own removed) and in every refusal (header and `"request_id"` member).
-- **End to end** (`tests/proxy_test.py`, now 75 tests with the gateway's stdout captured): one line per request and every field, `bytes_out` equal to the bytes the client received, `bytes_in`, the four
-  refusal kinds with their rules and the id in the body, a timeout, a client that leaves with a half head and one that leaves mid-response, a trusted route's kept id logged and echoed, the upstream's
-  own id not passed on, the upstream's own status, `upstream_ms` as the wait for the first byte (a 0.3 s upstream), hostile paths (quotes, backslashes, controls, DEL, high bytes, 16 KiB, a 65-byte id)
-  all parsing within the bound, forty concurrent requests giving forty lines, `/dev/full` as stdout stopping the gateway with status 6, and `log_failure = "continue"` keeping it serving.
-- **A full pipe, measured (gate 5):** stdout a pipe nobody reads: **320 to 336 requests** were answered before the loop blocked in its write (the 64 KiB pipe plus the 4 KiB stdio buffer, about 200 bytes
-  a line); the next request waited. When the reader started, every line arrived, in order, none twice, none dropped (the loop had waited, not dropped), and the gateway served again.
-- **The full queue (a build whose queue is 1,600 bytes, because the real one is 256 KiB and a turn would need over a thousand lines to fill it, which a 128-event turn cannot produce):** a hundred clients
-  leaving together dropped lines, the count was announced in the log, and `lines + announced == requests` exactly. At the real size the drop path is **defensive and unreachable in practice**; the
-  test is what keeps it honest.
-- **Mutants:** 32 of the new code (each field, the escaping, each cap, the truncation marker, the flags, every byte count, the first-byte time, the status, the method and path, the route known early, the
-  kept id, the queue reset, the announcement reset, the wall offset, the exit status, the inverted `log_failure`, the sequence): **31 killed**. One survives as **equivalent**: the guard that writes a
-  client's line once (`flag 4`): every path that could write it twice frees the slot first, so no reachable input shows the difference; it stays as an invariant, not as tested behaviour. Two survived
-  the first tests and were killed by new ones (the status always 200: a test with an upstream 404; the first-byte time: a 0.3 s upstream). A dead branch (writing the *peer's* line in `drop_session`,
-  reachable only when the client was already gone) was removed instead of tested.
-- **Cost, measured:** `cancho` against the build before this change (`4bac430`), 5 interleaved rounds, one core, stdout to a file: **C1 0.95 (0.86 to 0.97), C4 0.97 (0.93 to 1.03)**. The log costs about
-  3 to 5% of throughput on these cells.
-- **The authority report is unchanged** in its capability row (`args, clock, conn_accept, conn_read, conn_write, heap, io_write, net_in(""), net_out(""), poll`): only the pure-function list and counts moved.
-- **Corrections to the design found while building:** a closed stdout raises `SIGPIPE` before `flush_out` can answer (`docs/checked-output.md`), so for a closed pipe the process dies rather than exits
-  with 6 (not tested here; `/dev/full` is the tested failure); the readiness probe a test starts with is itself a connection and gets a line (`"aborted"`, no method), which is accurate: the gateway
-  logs every connection it accepts, including one that never sends a byte.
+**Built.** `src/metrics.cho` (the counters, the histograms, the JSON and Prometheus text, the readiness body, the response framing and the size bound), `src/admin.cho` (what an admin request asks for), and in `src/proxy.cho` the admin
+sessions (kind 4 of the slot table), the second listener (matched in place as a `Listening`, so a gateway without one runs the same loop), the record in `log_end`, the failure count in `health_fail` and the release of the metrics buffer in `drop_session`.
+The deployment key is `admin_listen` (0, off, by default; the generator refuses a value equal to `listen`). Nothing else in the gateway changed; the proxy path is the same code.
 
-**Not done in 10a:** counters, the histogram, the admin listener (10b); the client address (no peer address in the compiler).
+**Where building corrected the design above** (each is corrected in sections 6 and 7 where it was wrong):
+- The histogram has **14** buckets, not 15; `upstream_requests_total` became `upstream_responses_total` (it counts requests whose response head arrived; "requests" would have counted ones that never reached an upstream).
+- Rule counters live in a small table filled as tags are first seen, since the tags are spread over several modules and there is no single list to index (section 6).
+- Two more refusal tags, `admin.request` and `admin.size`; and an admin refusal's `request_id` is the literal `admin`.
+- **The size bound.** The first `worst_case()` was a generous constant per route and upstream, about 50% above the largest answer; a mutant that halved a term survived it. The bound is now the exact line count and length per family
+  (the comment in `metrics.worst_case` gives the arithmetic) and the unit tests require both `answer <= bound` and `bound <= answer + answer / 10`, on two deployments: the example (names of 3 to 10 bytes) and one whose names are 32 bytes
+  (`tests/fixtures/long`, generated and checked in), because a name is counted in 24 lines of a route and 21 of an upstream and the short names hide a wrong multiplier.
+- **Readiness.** An upstream whose circuit period has run out is **not** reported open: a trial is then allowed, and a gateway that reported itself not ready would be sent no traffic to take the trial with (a load balancer would never put it back).
+- A unit test of the largest answer allocated more than a region holds (about 64 KiB) and trapped; it is the test's allocation, not the gateway's (the gateway's buffer is a heap box), and each buffer now has its own region.
+
+**What checked it.**
+- **Unit tests:** `tests/metrics_test.cho` (11: every bucket edge, the class boundaries, counting by route, class and bucket, a request with no route, the rule table filling and then counting `other`, a long tag, upstream failures, the JSON byte for byte at its start and its parts, the Prometheus text with cumulative buckets, the readiness causes, the framing, saturation), `tests/admin_test.cho` (7: the four things it serves, each refusal, headers in any case, versions and malformed lines, where a head ends), and `tests/metrics_bound_test.cho` (2, run on both deployments).
+- **End to end:** `tests/admin_test.py`, 16 tests against the built gateway, now a CI step. The one that matters most: **the counters equal an independent count** made from the gateway's own access-log lines over a varied run (every status class, every refusal kind, a dead upstream, a body over the limit): per route and class, bytes in and out, the duration histogram's buckets, sum and count, and the refusals by rule all agree exactly. Others: one request moves exactly the counters it should; a retried request is counted as a retry; a dead upstream's failures are counted; the Prometheus text parses and its histograms are cumulative and end at `_count`; every refusal of section 7 (a `POST`, a body header, a 3 KB head, an unknown path, a version, a malformed line, a head that never ends and is dropped at 2 s); a ninth connection is closed and a freed slot is reused; six scrapes at once are all answered; an unread scrape does not stall the proxy; `/readyz` says why for an open circuit and for a failing log, and is `200` again after the circuit closes; a 125-route deployment's 230 KB answer fits its buffer and arrives whole; the admin port is open only when asked (the listening sockets of the process are read from `/proc`).
+- **Mutants:** 42 single edits of the new code (bucket bounds and edges, the class range, the sum, the byte counts, the retry and failure counts, the rule table's lookup and cap, the `other` slot, the readiness causes, the framing, saturation, the size bound's terms, each admin refusal, the 8-connection cap, the buffer's release, the deadline, the watch). **40 killed, 2 survive, both argued:**
+  (1) *the metrics buffer given to two connections at once.* The protection matters only when an answer is written in more than one piece, which needs an answer larger than the kernel will take in one write; a 230 KB answer through a client with a 1 KiB receive buffer was taken whole by the loopback socket, so it cannot be provoked here (the largest answer a deployment can give is about 0.5 MB). The rule stays, untested, and this paragraph is where that is said.
+  (2) *the phase-0 branch of `admin_settle` wants nothing instead of input.* Nothing calls `admin_settle` in phase 0 (the connection is watched for input when it is accepted); the branch is correct and unreachable.
+  A first round of the size-bound mutants left one standing (a name multiplier); the long-names deployment was added for it.
+- **No new capability:** `scripts/authority.py --check` against the regenerated manifest; the capability row is unchanged (the second listener is `net_in("")` and `conn_accept`, already there); only the pure-function lists and counts moved. The 2,000-line gate holds (`proxy.cho` is 1,865 lines now; the admin tests moved out of `proxy_test.py` into their own file, which was at 1,969).
+- **Cost of the counters** (the admin port off, so this is the record in `log_end` and the failure count, not the listener), against the build just before it, five interleaved rounds on one core, paired per round (`bench/results/2026-10-07-metrics.json`): **C1 1.02 (0.96 to 1.18), C4 0.97 (0.93 to 1.08)**. The median on C4 is 3.5% below 1 and the range includes 1: no cost the noise does not hide, and no gain either. The earlier build's own rounds differ from each other by up to 10%.
+
+**Not done.** A loopback-only bind (the compiler offers none: the admin port is on every interface, and has no authentication); alerting; per-upstream or per-rule histograms; the metrics in the agent-facing `introspect` (#18); a metric for the circuit's state changes beyond the gauge.

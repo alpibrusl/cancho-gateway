@@ -1,0 +1,15 @@
+# Used by docs/examples.html. Upstreams are on this machine so it runs anywhere: python3 scripts/demo_upstream.py 9000 9001
+# Example 5: an upstream that is down. Do not start it, then watch the circuit open.
+listen = 8080
+circuit_threshold = 3       # consecutive failures that open the circuit
+circuit_open_ms = 5000      # how long it stays open
+connect_timeout_ms = 1000
+
+[[upstream]]
+name = "orders"
+addr = "127.0.0.1:9000"
+
+[[route]]
+name = "orders"
+path_prefix = "/"
+upstream = "orders"

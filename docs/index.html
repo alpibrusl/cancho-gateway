@@ -126,15 +126,16 @@ table.fit.num td, table.fit.num th { white-space: nowrap; } table.fit.num td.n {
 .two { align-items: start; }
 table.fit.wide tbody th { white-space: nowrap; }
 pre code { padding: 0; background: none; }
+nav a[aria-current] { color: var(--fg); font-weight: 650; }
 </style>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
 <header class="top"><div class="wrap">
-  <a class="brand" href="#top"><img class="mark" src="mark.png" alt="" width="30" height="30">cancho-gateway</a>
+  <a class="brand" href="index.html"><img class="mark" src="mark.png" alt="" width="30" height="30">cancho-gateway</a>
   <nav aria-label="Sections">
-    <a href="#why" class="opt">Why</a><a href="#proof" class="opt">Evidence</a><a href="#numbers" class="opt">Numbers</a><a href="#fit" class="opt">Where it fits</a><a href="examples.html" class="opt">Examples</a><a href="#start">Try it</a>
-    <a href="https://github.com/alpibrusl/cancho-gateway">GitHub</a>
+    <a href="index.html" aria-current="page" class="opt">Overview</a><a href="examples.html">Examples</a><a href="evidence.html" class="opt">Evidence</a><a href="index.html#numbers" class="opt">Numbers</a><a href="examples.html#download">Download</a>
+    <a href="https://github.com/alpibrusl/cancho-gateway" class="opt">GitHub</a>
   </nav>
 </div></header>
 
@@ -262,7 +263,7 @@ trust_forwarded = true  # a TLS front is in front</code></pre>
   <h2>Against nginx and HAProxy, honestly.</h2>
   <p class="sub">One core each, loopback, a shared 4-core VM, five interleaved rounds, the configurations published. The gateway is <strong>slower than HAProxy on four of five cells</strong>, and slower than nginx on a 16 KiB POST and with eight connections; on the others the two runs disagree about nginx. It wins where it has nothing to lose: when every client connection is closed after one request, as it closes them anyway.</p>
   <div class="two" style="grid-template-columns:1fr">
-    <figure class="figure"><img src="figures/bench.svg" width="700" height="430" alt="cancho-gateway divided by nginx and by HAProxy in five cells, from two runs."><figcaption>The machine drifted between the two runs (nginx&rsquo;s own throughput moved by 30%), so only the gaps that held in both are findings: the 16 KiB POST against nginx and HAProxy, the 64 KiB response against HAProxy, and the win with <code>Connection: close</code>. Kong, Envoy, Caddy and Traefik are in the <a href="evidence.html#bench">tables</a>.</figcaption></figure>
+    <figure class="figure"><img src="figures/bench.svg" width="700" height="927" alt="Requests per second of seven proxies in five benchmark cells, fastest first. cancho-gateway is slower than HAProxy in four cells and faster than both HAProxy and nginx with Connection: close."><figcaption>One run, every proxy in the same interleaved rounds. The machine drifted between this run and the first (nginx&rsquo;s own throughput moved by 30%), so only the gaps that held in both are findings: the 16 KiB POST against nginx and HAProxy, the 64 KiB response against HAProxy, and the win with <code>Connection: close</code>. The first run, the latencies and the CPU of each proxy are in the <a href="evidence.html#bench">tables</a>.</figcaption></figure>
     <figure class="figure"><img src="figures/memory.svg" width="560" height="258" alt="Resident memory with 100 idle connections: cancho-gateway 1.9 MiB, nginx 11.8, HAProxy 14.9, Caddy 33, Envoy 59, Traefik 83, Kong 156."><figcaption>Memory is allocated at start, so this says little about memory under load. The gateway holds about 127 sessions at once today.</figcaption></figure>
   </div>
   <div class="stats">
@@ -275,7 +276,7 @@ trust_forwarded = true  # a TLS front is in front</code></pre>
 
 <section id="fit">
   <h2>Where it fits</h2>
-  <p class="sub">For a few services behind your own TLS front, where you would rather read the list of limits than trust them. Not for the public edge, yet.</p>
+  <p class="sub">For a few services behind your own TLS front, where you would rather read the list of limits than trust them. Not for the public edge until TLS is built in.</p>
   <div class="fitwrap"><table class="fit wide">
     <thead><tr><th></th><th>You run</th><th>You get</th><th>You give up</th></tr></thead>
     <tbody>
@@ -286,7 +287,7 @@ trust_forwarded = true  # a TLS front is in front</code></pre>
   </table></div>
   <div class="cols">
     <div><h3>Built for</h3><ul><li>Internal APIs behind a TLS-terminating front</li><li>A small, fixed set of upstreams</li><li>Places where a refusal must say why, as data</li></ul></div>
-    <div class="no"><h3>Not for</h3><ul><li>The public edge, until TLS and HTTP/2</li><li>Throughput: use nginx or HAProxy</li><li>Dynamic discovery or hot reload</li></ul></div>
+    <div class="no"><h3>Not for</h3><ul><li>The public edge, until it has TLS (cancho&rsquo;s server exists; the gateway does not use it yet) and HTTP/2</li><li>Throughput: use nginx or HAProxy</li><li>Dynamic discovery or hot reload</li></ul></div>
   </div>
 </section>
 
@@ -340,7 +341,7 @@ build/gateway</code></pre>
   <h2>Alpha: we are trying to break it before you deploy it</h2>
   <p class="note" style="margin:.2rem 0 .6rem">Alpha means the interfaces may change and nothing here is certified for production.</p>
   <ul>
-    <li><strong>Not built yet:</strong> authentication, rate limiting, a metrics and health endpoint, TLS, WebSocket (the OCPP case).</li>
+    <li><strong>Not built yet:</strong> authentication, rate limiting, WebSocket (the OCPP case), and <strong>TLS in the gateway</strong>. cancho now has a TLS 1.3 server, so the old reason (it needed foreign code) is gone; using it here is planned, and it would add file reads to the report below.</li>
     <li><strong>Slower than HAProxy</strong> on most cells, and than nginx on a POST body; no client-side keep-alive, which is most of the gap.</li>
     <li>About 127 concurrent sessions, one core, no hot reload; a changed route is a new binary.</li>
     <li>No client address: the compiler gives none, so there is no <code>X-Forwarded-For</code> of the gateway&rsquo;s own and no client in the log.</li>

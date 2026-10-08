@@ -13,8 +13,9 @@
 - Routes: the host selects the route set, then the longest segment-boundary path prefix that allows the method; a tie is a config error. A route may set `max_body` and `trust_forwarded`.
 - Every refusal is `application/problem+json` with a `rule` tag (for example `framing.two-lengths`, `limit.body`, `proxy.connect`, `timeout.upstream`) and a `request_id`. The same id is in the `X-Request-Id` response header and the access log.
 - The access log is JSON lines on stdout: `t, id, method, path (no query string), route, upstream, status, rule, outcome, ms, upstream_ms, bytes_in, bytes_out`. A stdout reader that stops stalls the gateway.
+- Optional admin port (`admin_listen`): `/metrics` (JSON, or Prometheus text with `?format=prometheus`), `/healthz`, `/readyz` (503 with the reasons as data). It binds every interface and has no authentication: firewall it.
 - Headers: hop-by-hop headers are removed; `Via`, `X-Forwarded-Host` and `X-Forwarded-Proto` are added; a client's `Forwarded`, `X-Forwarded-*`, `X-Real-IP` and `X-Request-Id` are not believed unless the route sets `trust_forwarded = true`. There is no `X-Forwarded-For` of the gateway's own: the compiler gives no client address.
 - The authority report (files: none, foreign calls: none) is committed in `manifests/` and checked in CI. The network bound is not narrowed: the upstream set is enforced in code and tested, not proved by the compiler.
 
 ## Not built
-Authentication, rate limiting, a metrics and health endpoint, TLS, WebSocket, client keep-alive, hot reload.
+Authentication, rate limiting, TLS (designed in docs/tls.md, not built), WebSocket, client keep-alive, hot reload.

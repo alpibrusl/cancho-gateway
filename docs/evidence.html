@@ -119,6 +119,7 @@ pre code { padding: 0; background: none; }
 .two { align-items: start; }
 h3[id] { margin-top: 2rem; }
 table.fit.wide tbody th { white-space: nowrap; }
+nav a[aria-current] { color: var(--fg); font-weight: 650; }
 </style>
 </head>
 <body>
@@ -126,8 +127,8 @@ table.fit.wide tbody th { white-space: nowrap; }
 <header class="top"><div class="wrap">
   <a class="brand" href="index.html"><img class="mark" src="mark.png" alt="" width="30" height="30">cancho-gateway</a>
   <nav aria-label="Sections">
-    <a href="#claims" class="opt">Claims</a><a href="#framing" class="opt">Framing</a><a href="#bench" class="opt">Benchmark</a><a href="#found">Found</a>
-    <a href="https://github.com/alpibrusl/cancho-gateway">GitHub</a>
+    <a href="index.html" class="opt">Overview</a><a href="examples.html">Examples</a><a href="evidence.html" aria-current="page" class="opt">Evidence</a><a href="index.html#numbers" class="opt">Numbers</a><a href="examples.html#download">Download</a>
+    <a href="https://github.com/alpibrusl/cancho-gateway" class="opt">GitHub</a>
   </nav>
 </div></header>
 
@@ -218,6 +219,17 @@ table.fit.wide tbody th { white-space: nowrap; }
     <li>A hundred clients leaving together overflow a 1,600-byte queue (the real one is 256 KiB, which a turn cannot fill): lines are dropped, counted, and the count is announced in the log, with <code>lines + announced == requests</code> exactly.</li>
     <li>With stdout on <code>/dev/full</code> the gateway stops with status 6 (<code>log_failure = "exit"</code>, the default) or keeps serving (<code>"continue"</code>).</li>
     <li>Cost, paired against the build before: <strong>3&ndash;5%</strong> of throughput (C1 0.95, C4 0.97).</li>
+  </ul>
+</section>
+
+<section id="admin">
+  <h2>Metrics and health</h2>
+  <ul>
+    <li>An optional second port (<code>admin_listen</code>): <code>/metrics</code> (JSON, or Prometheus text with <code>?format=prometheus</code>), <code>/healthz</code> and <code>/readyz</code>, which says <em>why</em> it is not ready (an upstream&rsquo;s open circuit, a failing log) as data. Read only, a 2 KiB head, at most 8 connections, 2 s for the whole exchange; everything else is a refusal with its own rule.</li>
+    <li><strong>The counters equal an independent count:</strong> over a varied run, the route, status class, bytes, duration histogram and refusals-by-rule in <code>/metrics</code> are exactly what the gateway&rsquo;s own access-log lines add up to.</li>
+    <li>The largest answer a deployment can give has a stated size (<code>metrics.worst_case()</code>), the buffer is that size, and a unit test fills every counter to its brim and checks the answer fits and the bound is within 10% of it, on a deployment with 3-byte names and one with 32-byte names.</li>
+    <li>Cost of the counters, paired against the build before in the same rounds: C1 1.02 (0.96&ndash;1.18), C4 0.97 (0.93&ndash;1.08): nothing the noise does not hide.</li>
+    <li>42 mutants of the new code: 40 killed, 2 argued (one needs a partial write that a loopback socket cannot be made to give; one is an unreachable branch). <strong>The admin port listens on every interface</strong> (the compiler offers no loopback-only bind) and has no authentication: it shows route and upstream names and counters, nothing about a request, but firewall it.</li>
   </ul>
 </section>
 
@@ -345,7 +357,7 @@ table.fit.wide tbody th { white-space: nowrap; }
   <ul>
     <li>No soak: a long run with faults has not been done. Short-lived tests are all there is.</li>
     <li>No independent review of the parsing; the corpus is the authors&rsquo;.</li>
-    <li>Not built: authentication, rate limiting, a metrics and health endpoint, TLS, WebSocket.</li>
+    <li>Not built: authentication, rate limiting, TLS (designed, not built: <code>docs/tls.md</code>), WebSocket.</li>
     <li>One core, about 127 concurrent sessions, no client keep-alive.</li>
   </ul>
   <p class="note"><a href="index.html">Back to the overview</a> · <a href="https://github.com/alpibrusl/cancho-gateway/tree/main/docs">All design documents</a></p>

@@ -6,6 +6,7 @@
 Links to other repositories and to the web are not fetched (CI has no business depending on them).
 """
 
+import html
 import html.parser
 import pathlib
 import re
@@ -37,6 +38,15 @@ def parse(path):
     return p
 
 
+def check_examples(bad):
+    """Every deployment shown on the examples page is the file in deploy/examples/, line for line, so the page cannot drift from what runs."""
+    page = (DOCS / "examples.html").read_text()
+    for f in sorted((ROOT / "deploy" / "examples").glob("*.toml")):
+        body = "\n".join(l for l in f.read_text().splitlines() if not l.startswith("# Used by"))
+        if html.escape(body, quote=False) not in page:
+            bad.append("examples.html: the deployment shown for %s is not the file's content" % f.name)
+
+
 def main():
     pages = {p.name: parse(p) for p in sorted(DOCS.glob("*.html"))}
     bad = []
@@ -58,6 +68,7 @@ def main():
                 bad.append("%s: %s (no such file in docs/)" % (name, link))
             elif anchor and target in pages and anchor not in pages[target].ids:
                 bad.append("%s: %s (no such id in %s)" % (name, link, target))
+    check_examples(bad)
     for b in bad:
         print("BROKEN " + b)
     print("%d pages, %d links checked, %d broken" % (len(pages), sum(len(p.links) for p in pages.values()), len(bad)))

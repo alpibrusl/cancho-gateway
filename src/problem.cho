@@ -35,6 +35,9 @@ pub fn reason(status: int) -> [] &static [byte] {
     if status == 431 {
         return "Request Header Fields Too Large";
     }
+    if status == 500 {
+        return "Internal Server Error";
+    }
     if status == 501 {
         return "Not Implemented";
     }
