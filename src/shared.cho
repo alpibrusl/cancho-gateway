@@ -106,6 +106,11 @@ pub fn tls_token() -> [] int {
     return slot_limit() + 2;
 }
 
+// The signals' token (`SIGHUP`, `SIGINT`, `SIGTERM`: docs/tls.md section 11).
+pub fn signal_token() -> [] int {
+    return slot_limit() + 3;
+}
+
 pub fn admin_max() -> [] int {
     return 8;
 }
@@ -216,7 +221,11 @@ pub fn session_begin[&c](core: &!c Core, k: int, now: int) -> [] int {
     m[base + 1] = byte_of(0);
     m[base + 2] = byte_of(0);
     m[base + 3] = byte_of(0);
-    let n = forward.put_generated_id(m[base + 4..base + 4 + 64], 0, ids[0], deploy.listen_port(), ids[1]);
+    var port = deploy.listen_port();
+    if port == 0 {
+        port = deploy.tls_port();
+    }
+    let n = forward.put_generated_id(m[base + 4..base + 4 + 64], 0, ids[0], port, ids[1]);
     m[base] = byte_of(n);
     return 0;
 }

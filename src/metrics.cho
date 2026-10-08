@@ -116,13 +116,14 @@ fn rule_base() -> [] int {
     return routes() * route_block() + upstreams() * upstream_block();
 }
 
-// After the rule table: TLS handshakes completed, TLS connections the engine or a deadline ended before the handshake finished.
+// After the rule table: TLS handshakes completed, TLS connections the engine or a deadline ended before the handshake finished, identities a
+// reload replaced, identities a reload could not replace (the old one kept serving).
 fn tls_base() -> [] int {
     return rule_base() + 2 * rule_cap() + 2;
 }
 
 pub fn stats_len() -> [] int {
-    return tls_base() + 2;
+    return tls_base() + 4;
 }
 
 pub fn names_len() -> [] int {
@@ -237,6 +238,13 @@ pub fn record[&s, &n, &r](stats: &!s [int], names: &!n [byte], status: int, rout
 // A TLS handshake finished.
 pub fn tls_established[&s](stats: &!s [int]) -> [] int {
     stats[tls_base()] = stats[tls_base()] + 1;
+    return 0;
+}
+
+// A reload (`SIGHUP`) replaced `ok` identities and could not replace `failed` (docs/tls.md section 11).
+pub fn tls_reloaded[&s](stats: &!s [int], ok: int, failed: int) -> [] int {
+    stats[tls_base() + 2] = stats[tls_base() + 2] + ok;
+    stats[tls_base() + 3] = stats[tls_base() + 3] + failed;
     return 0;
 }
 
@@ -396,6 +404,10 @@ pub fn json[&o, &s, &n, &g](out: &!o [byte], at: int, stats: &s [int], names: &n
     k = jnum(out, k, "handshakes", stats[tls_base()]);
     k = out.put(out, k, ",");
     k = jnum(out, k, "failures", stats[tls_base() + 1]);
+    k = out.put(out, k, ",");
+    k = jnum(out, k, "reloads", stats[tls_base() + 2]);
+    k = out.put(out, k, ",");
+    k = jnum(out, k, "reload_failures", stats[tls_base() + 3]);
     k = out.put(out, k, "},\"log\":{");
     k = jnum(out, k, "dropped", gauge[3]);
     k = out.put(out, k, ",");
@@ -565,6 +577,10 @@ pub fn prometheus[&o, &s, &n, &g](out: &!o [byte], at: int, stats: &s [int], nam
     k = plain(out, k, "tls_handshakes_total", stats[tls_base()]);
     k = family(out, k, "tls_handshake_failures_total", "counter", "TLS connections ended before their handshake finished.");
     k = plain(out, k, "tls_handshake_failures_total", stats[tls_base() + 1]);
+    k = family(out, k, "tls_reloads_total", "counter", "TLS identities replaced by a reload (SIGHUP).");
+    k = plain(out, k, "tls_reloads_total", stats[tls_base() + 2]);
+    k = family(out, k, "tls_reload_failures_total", "counter", "TLS identities a reload could not replace; the old one kept serving.");
+    k = plain(out, k, "tls_reload_failures_total", stats[tls_base() + 3]);
     k = family(out, k, "log_dropped_total", "counter", "Access-log lines dropped because the queue was full.");
     k = plain(out, k, "log_dropped_total", gauge[3]);
     k = family(out, k, "log_write_failures_total", "counter", "Access-log writes that failed.");
@@ -653,11 +669,11 @@ pub fn frame[&o](out: &!o [byte], status: int, ctype: &static [byte], end: int) 
 }
 
 // An upper bound on the response to a scrape, for this deployment: what the buffer is sized to, and within a tenth of the largest answer there
-// can be (the unit test checks both). In the Prometheus text, which is the larger format: the families' comments and the four plain
-// lines (2,161 bytes, rounded up), a line for each rule and one for `other` (98 bytes: the name's 40 and an 18-digit number), per route
+// can be (the unit test checks both). In the Prometheus text, which is the larger format: the families' comments and the six plain
+// lines (2,580 bytes with the two reload counters, 419 of them, rounded up to 2,688), a line for each rule and one for `other` (98 bytes: the name's 40 and an 18-digit number), per route
 // 24 lines (1,836 bytes and its name 24 times), per upstream 21 lines (1,615 bytes and its name 21 times).
 pub fn worst_case() -> [] int {
-    var bytes = head_room() + 2304 + 384 + (rule_cap() + 1) * 98 + 64;
+    var bytes = head_room() + 2688 + 384 + (rule_cap() + 1) * 98 + 64;
     var i = 0;
     while i < routes() {
         bytes = bytes + 1836 + 24 * len(route.name(i));

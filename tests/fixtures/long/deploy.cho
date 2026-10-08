@@ -7,6 +7,7 @@ module gateway.deploy;
 // them (one Net, one bound shared by listen and connect: design section 2.1), so the gateway enforces
 // this list in code before every connect and `authority.toml` states the report is `net_out("")`.
 
+// The plain listener's port, 0 if the deployment is TLS only (docs/tls.md section 11).
 pub fn listen_port() -> [] int {
     return 8080;
 }

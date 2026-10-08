@@ -8,7 +8,8 @@ import gateway.tlsio;
 import gateway.version;
 
 // `gateway` -- the reverse proxy (docs/design.md, docs/proxy.md). `gateway --version` prints its name and version; any other
-// invocation serves on the port the deployment compiled in (`generated/deploy.cho`).
+// invocation serves on the ports the deployment compiled in (`generated/deploy.cho`) until `SIGINT` or `SIGTERM`; `SIGHUP` reads the TLS
+// certificates again (docs/tls.md section 11).
 
 fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
     var n = 0;
@@ -17,6 +18,14 @@ fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
         n = n + 1;
     }
     return len(s);
+}
+
+// The plain listener's `tcp_listen` answer, or a `Failed` for a deployment that is TLS only (`listen` absent: docs/tls.md section 11).
+fn plain_listening[&n](net: &n Net("")) -> [net_in("")] Listening {
+    if deploy.listen_port() == 0 {
+        return Listening::Failed(0);
+    }
+    return tcp_listen(net, deploy.listen_port(), 1024, 0);
 }
 
 // The admin listener's `tcp_listen` answer, or a `Failed` for a deployment that has none (`proxy.run` matches it as "no admin listener").
@@ -35,11 +44,52 @@ fn tls_listening[&n](net: &n Net("")) -> [net_in("")] Listening {
     return tcp_listen(net, deploy.tls_port(), 1024, 0);
 }
 
+// The claim on `SIGHUP`, `SIGINT` and `SIGTERM`: reload the certificates, and stop. Made before anything is served and before any thread
+// (cancho's rule; the gateway has none).
+fn claim_signals[&s](claim: &s Signals("HUP,INT,TERM")) -> [signals("HUP,INT,TERM")] Watching {
+    return signals_watch(claim);
+}
+
+// Did this listener's `tcp_listen` fail? (A deployment without the listener answers `Failed` too, so the caller asks only when it has one.)
+fn listen_failed[&l](l: &!l Listening) -> [] bool {
+    var failed = false;
+    match l {
+        Listening::Ok(x) => {
+        }
+        Listening::Failed(e) => {
+            failed = true;
+        }
+    }
+    return failed;
+}
+
+// Everything after the sockets and the signals are claimed: the TLS state (and the directory handle it keeps for reloads), the loop, and the end.
+fn serve[&h, &l, &a, &x, &w, &n, &k, &i](heap: &!h Heap, fs: Fs(""), listener: &!l Listening, admin: &!a Listening, secure: &!x Listening, watch: &!w SignalWatch, net: &n Net(""), clock: &k Clock, io: &!i Io) -> [heap, clock, io_write, err_write, conn_accept, conn_read, conn_write, poll, signals_read, net_out("")] int {
+    // TLS, if the deployment has `tls_listen`: the certificates are read and the engine made here, before the first connection is taken; a bad
+    // identity ends the process with its own status (docs/tls.md section 3).
+    let (made, dirs, how) = tlsio.start(heap, fs, clock, shared.slot_limit(), io);
+    var status = how;
+    if how != 0 {
+        tlsio.close(heap, made);
+    } else {
+        borrow dirs as &dr in {
+            status = proxy.run(heap, listener, admin, secure, made, dr, watch, net, clock, io);
+        }
+    }
+    match dirs {
+        DirOpened::Ok(d) => {
+            dir_close(d);
+        }
+        DirOpened::Failed(e) => {
+        }
+    }
+    return status;
+}
+
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args, net, clock, signals } = split(world);
-    release(signals);
     release(ffi);
-    var status = 0;
+    let claim = narrow(signals, "HUP,INT,TERM");
     var show_version = false;
     borrow args as &g in {
         show_version = arg_count(g) > 1;
@@ -57,59 +107,48 @@ fn main(world: World) -> [] int {
         release(heap);
         release(net);
         release(clock);
+        release(claim);
         return 0;
     }
     var served = 3;
     borrow net as &nn in {
-        match tcp_listen(nn, deploy.listen_port(), 1024, 0) {
-            Listening::Ok(l) => {
-                var listener = l;
-                // The admin listener, if the deployment has one (docs/observability.md section 7); else a `Failed` that `proxy.run` matches as "none".
-                var admin = admin_listening(nn);
-                var admin_failed = false;
-                if deploy.admin_port() != 0 {
-                    borrow mut admin as &!aw in {
-                        match aw {
-                            Listening::Ok(x) => {
-                            }
-                            Listening::Failed(e) => {
-                                admin_failed = true;
-                            }
-                        }
-                    }
+        borrow claim as &sc in {
+            var listener = plain_listening(nn);
+            var admin = admin_listening(nn);
+            var secure = tls_listening(nn);
+            var watching = claim_signals(sc);
+            var failed = false;
+            borrow mut listener as &!pw in {
+                if deploy.listen_port() != 0 && listen_failed(pw) {
+                    failed = true;
                 }
-                var secure = tls_listening(nn);
-                var secure_failed = false;
-                if deploy.tls_port() != 0 {
-                    borrow mut secure as &!sw in {
-                        match sw {
-                            Listening::Ok(x) => {
-                            }
-                            Listening::Failed(e) => {
-                                secure_failed = true;
-                            }
-                        }
-                    }
+            }
+            borrow mut admin as &!aw in {
+                if deploy.admin_port() != 0 && listen_failed(aw) {
+                    failed = true;
                 }
-                if admin_failed || secure_failed {
-                    served = 2;
-                    release(fs);
-                } else {
-                    borrow mut heap as &!h in {
-                        borrow mut listener as &!lh in {
-                            borrow mut admin as &!ah in {
-                                borrow mut secure as &!sh in {
-                                    listener_nonblocking(lh);
-                                    borrow clock as &ck in {
-                                        borrow mut io as &!ii in {
-                                            // TLS, if the deployment has `tls_listen`: the certificates are read and the engine made here, before the first
-                                            // connection is taken; a bad identity ends the process with its own status (docs/tls.md section 3).
-                                            let (made, how) = tlsio.start(h, fs, ck, shared.slot_limit(), ii);
-                                            if how != 0 {
-                                                tlsio.close(h, made);
-                                                served = how;
-                                            } else {
-                                                served = proxy.run(h, lh, ah, sh, made, nn, ck, ii);
+            }
+            borrow mut secure as &!sw in {
+                if deploy.tls_port() != 0 && listen_failed(sw) {
+                    failed = true;
+                }
+            }
+            match watching {
+                Watching::Ok(w) => {
+                    var watch = w;
+                    if failed {
+                        served = 2;
+                        release(fs);
+                    } else {
+                        borrow mut heap as &!h in {
+                            borrow mut listener as &!lh in {
+                                borrow mut admin as &!ah in {
+                                    borrow mut secure as &!sh in {
+                                        borrow mut watch as &!wh in {
+                                            borrow clock as &ck in {
+                                                borrow mut io as &!ii in {
+                                                    served = serve(h, fs, lh, ah, sh, wh, nn, ck, ii);
+                                                }
                                             }
                                         }
                                     }
@@ -117,33 +156,40 @@ fn main(world: World) -> [] int {
                             }
                         }
                     }
+                    signals_close(watch);
                 }
-                match admin {
-                    Listening::Ok(al) => {
-                        listener_close(al);
-                    }
-                    Listening::Failed(e) => {
-                    }
+                Watching::Failed(e) => {
+                    served = 7;
+                    release(fs);
                 }
-                match secure {
-                    Listening::Ok(sl) => {
-                        listener_close(sl);
-                    }
-                    Listening::Failed(e) => {
-                    }
-                }
-                listener_close(listener);
             }
-            Listening::Failed(e) => {
-                served = 2;
-                release(fs);
+            match admin {
+                Listening::Ok(al) => {
+                    listener_close(al);
+                }
+                Listening::Failed(e) => {
+                }
+            }
+            match secure {
+                Listening::Ok(sl) => {
+                    listener_close(sl);
+                }
+                Listening::Failed(e) => {
+                }
+            }
+            match listener {
+                Listening::Ok(pl) => {
+                    listener_close(pl);
+                }
+                Listening::Failed(e) => {
+                }
             }
         }
     }
+    release(claim);
     release(io);
     release(heap);
     release(net);
     release(clock);
-    status = served;
-    return status;
+    return served;
 }
