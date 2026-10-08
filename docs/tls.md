@@ -53,7 +53,7 @@ the same refusals, the same request id and log line over TLS as over plain TCP; 
    - the framing, routing, header policy, pool, circuit and log code see plaintext only and are not changed.
 5. **A new client phase, "handshaking",** before phase 0 (reading the head): the slot is watched for reading; bytes go to `feed`; when `tls.event` says established the phase becomes 0 and the
    header timeout starts then (a client that is slow in the handshake is not slow in the head). Bounds, from `tls_echo` and fixed here: at most `tls_handshakes` (default 32) in progress, at
-   most `tls_rate` (default 100) started a second, `tls_handshake_ms` (default 10,000) to finish. A connection over the bound is delayed (left unwatched, so its ClientHello waits in the
+   most `tls_rate` (default 50 *(corrected from 100)*) started a second, `tls_handshake_ms` (default 10,000) to finish. A connection over the bound is delayed (left unwatched, so its ClientHello waits in the
    kernel and costs nothing), not refused: the common case of "too many handshakes" is a burst of honest clients; the attacker's case is bounded by the same two numbers.
 6. **The end of a session.** When a client session ends in the gateway (a response relayed, a refusal sent), the engine's `finish` is called so that `close_notify` is queued, and the slot
    closes once it is written or after the flush deadline. A peer that closes without `close_notify` mid-request is an aborted request exactly as a plain reset is (the request is
@@ -104,7 +104,7 @@ the same refusals, the same request id and log line over TLS as over plain TCP; 
 | `cin` per slot | 16,384 + 5 + 256 = 16,645, rounded to 17,408 | one record of ciphertext at the engine's largest |
 | `cout` per slot | 34,816 (two records) | the engine writes a record at a time; two lets one be written while the next is made |
 | `tls_handshakes` | 32 | `tls_echo`'s default |
-| `tls_rate` | 100 a second | `tls_echo`'s default; the operator sets it from the machine's own handshake figure |
+| `tls_rate` | ~~100~~ **50** a second *(corrected: measured 12 ms a handshake, section 10)* | `tls_echo`'s default was 100; the operator sets it from the machine's own handshake figure |
 | `tls_handshake_ms` | 10,000 | `tls_echo`'s default |
 | identities | at most 16 | the engine's bound |
 | ALPN offered | `http/1.1` | the gateway speaks nothing else |
@@ -158,10 +158,10 @@ its handshake is dropped without an answer, since there is no HTTP to answer wit
 | 1 interop | **met** | `tests/tls_test.py`: Python `ssl`, `openssl s_client`, curl; a GET, a 3 MB POST echoed and a 6 MB response (byte for byte), 100 requests on separate connections, SNI picking the second identity and the default for an unknown name, ALPN `http/1.1` accepted and `h2` alone refused, TLS 1.2 refused; the log line has `"tls":true` and the upstream saw `X-Forwarded-Proto: https`. *(Not done: the log line's byte-for-byte check for every one of these; each checks the status, outcome and flag.)* |
 | 2 smuggling corpus | **met, as corrected above** | 60 framing cases and 39 chunked cases, the same verdict in the clear and over TLS |
 | 3 bounds | **met** | four silent peers at `tls_handshakes = 4` delay an honest one until they are dropped at `tls_handshake_ms`, and are counted as `tls.handshake-timeout`; 250 handshakes at `tls_rate = 50` take at least 3 s and are all served; a client that handshakes and stops reading is ended at its deadline with the gateway's RSS growing by under 4 MiB; a response longer than the kernel's buffers is delivered whole to a client that reads late (the session waits for the ciphertext still queued) |
-| 4 hostile TLS | **met, with the gap below** | the 91 cases of cancho's liar-client vectors that carry client bytes (`tests/vectors/tls/client_bytes.txt`, the client's writes only, taken from cancho `2fcf4cd`) replayed; the gateway stays up, every refusal is a `tls-*` tag in `refusals_total`, and the table is empty afterwards (`sessions_active` 0). *Gap:* the vectors' later flights are encrypted to the recording's server keys, so after the first flight they are noise to this server; cases decided on the ClientHello are exercised exactly, the rest are exercised as hostile bytes, not as the attack they were written to be |
+| 4 hostile TLS | **met, with the gap below** | the 91 cases of cancho's liar-client vectors that carry client bytes (`tests/vectors/tls/client_bytes.txt`, the client's writes only, taken from cancho `2fcf4cd`) replayed; the gateway stays up, every refusal is a `tls-*` tag in `refusals_total`, and the table is empty afterwards (`sessions_active` at most 1, the scrape's own client). *Gap:* the vectors' later flights are encrypted to the recording's server keys, so after the first flight they are noise to this server; cases decided on the ClientHello are exercised exactly, the rest are exercised as hostile bytes, not as the attack they were written to be |
 | 5 truncated request | **met** | a TLS peer that ends the TCP connection mid-body gives `"outcome":"aborted"` with `"tls":true` |
 | 6 the report | **met** | `scripts/authority.py --check` (CI) and `tests/authority_test.py`: a build whose directory is widened to `/etc` is refused by the ceiling, one narrowed to `/` is refused by the compiler (nested paths) |
-| 7 the 2,000-line gate, the existing tests | **met** | `proxy.cho` 1,334 lines, the largest 1,334; 75 + 16 tests pass with `tls_listen` unset (`example.toml`) |
+| 7 the 2,000-line gate, the existing tests | **met** | the largest source file is `proxy.cho`, 1,334 lines; 75 + 16 tests pass with `tls_listen` unset (`example.toml`) |
 | 8 mutants | **21 single edits of the new code: 16 killed, 5 survive, each argued** | below |
 | 9 cost in the benchmark harness | **not done** | the harness has no TLS-capable load tool; the informal numbers below are one machine, one connection, Python endpoints |
 
