@@ -368,3 +368,11 @@ pub fn admit[&t, &s](t: &!t Tls, st: &!s [int], stride: int, limit: int, now: in
     }
     return 0 - 1;
 }
+
+// Why the engine ended slot `k`'s connection, as the `tls-server-*` tag the refusal table counts it by; empty if the engine did not fail it.
+pub fn failed_tag[&t](t: &t Tls, k: int) -> [] &static [byte] {
+    if tls.event(t.engine, k) != tls.event_failed() {
+        return "";
+    }
+    return tls.refusal_tag(tls.failure(t.engine, k));
+}

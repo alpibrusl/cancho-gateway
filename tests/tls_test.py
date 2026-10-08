@@ -47,10 +47,11 @@ class Gateway:
         self.certs = pathlib.Path(tmp) / "certs"
         self.chain_api = make_identity(self.certs, "api", "api.example")
         self.chain_second = make_identity(self.certs, "second", "second.example")
-        self.port, self.tls_port = pt.free_port(), pt.free_port()
+        self.port, self.tls_port, self.admin = pt.free_port(), pt.free_port(), pt.free_port()
         deploy = pathlib.Path(tmp) / "deploy.toml"
         deploy.write_text("""listen = %d
 tls_listen = %d
+admin_listen = %d
 tls_dir = "%s"
 tls_identities = ["api", "second"]
 tls_handshakes = %d
@@ -70,7 +71,7 @@ name = "main"
 path_prefix = "/"
 upstream = "up"
 max_body = 16777216
-""" % (self.port, self.tls_port, self.certs, HANDSHAKES, HANDSHAKE_MS, up_port))
+""" % (self.port, self.tls_port, self.admin, self.certs, HANDSHAKES, HANDSHAKE_MS, up_port))
         out = pathlib.Path(tmp) / "gen"
         subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(deploy), "--out", str(out)], check=True)
         files = [str(out / n) for n in ("deploy.cho", "routes.cho", "tlsfiles.cho")] + pt.dependencies() + [str(ROOT / "src" / (n + ".cho")) for n in SOURCES]
@@ -114,6 +115,18 @@ max_body = 16777216
                 return got
             time.sleep(0.05)
         return self.lines()[n:]
+
+    def metrics(self):
+        c = socket.create_connection(("127.0.0.1", self.admin), timeout=5)
+        c.sendall(b"GET /metrics HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+        data = b""
+        while True:
+            d = c.recv(65536)
+            if not d:
+                break
+            data += d
+        c.close()
+        return json.loads(data.partition(b"\r\n\r\n")[2])
 
     def alive(self):
         return self.proc.poll() is None
@@ -332,6 +345,91 @@ class T:
         # No slot leaked: 300 refused connections did not leave the table full (256 slots).
         for _ in range(20):
             assert get(gw)[1] == b"ok"
+
+    def cancho_liar_client_vectors_leave_the_gateway_up_and_every_refusal_is_a_tag(gw, up):
+        cases = []
+        for line in open(ROOT / "tests" / "vectors" / "tls" / "client_bytes.txt"):
+            if not line.startswith("#"):
+                name, _, feeds = line.rstrip("\n").partition("\t")
+                cases.append((name, [bytes.fromhex(f) for f in feeds.split(",")]))
+        assert len(cases) >= 90, len(cases)
+        before = gw.metrics()
+        for name, feeds in cases:
+            s = socket.create_connection(("127.0.0.1", gw.tls_port), timeout=5)
+            try:
+                for f in feeds:
+                    s.sendall(f)
+                    s.settimeout(0.05)
+                    try:
+                        s.recv(65536)
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+            s.close()
+        time.sleep(1.0)
+        assert gw.alive()
+        after = gw.metrics()
+        assert after["tls"]["failures"] > before["tls"]["failures"], after["tls"]
+        tags = {k: v for k, v in after["refusals"].items() if k.startswith("tls")}
+        assert tags and all(k.startswith("tls-") or k.startswith("tls.") for k in tags), tags
+        assert any(k.startswith("tls-server-") for k in tags), tags
+        assert get(gw)[1] == b"ok"
+        # No slot leaks: the gauge of sessions in the table is back to the honest one.
+        time.sleep(0.5)
+        assert gw.metrics()["sessions_active"] <= 1, gw.metrics()["sessions_active"]
+
+    def the_smuggling_corpus_gets_the_same_verdict_over_tls_as_in_the_clear(gw, up):
+        sys.path.insert(0, str(ROOT / "tests" / "smuggling"))
+        from corpus import CASES
+        from chunked_corpus import CASES as CHUNKED
+
+        def verdict(sock, raw):
+            try:
+                sock.sendall(raw)
+            except OSError:
+                return "closed"
+            sock.settimeout(0.7)
+            got = b""
+            try:
+                while True:
+                    d = sock.recv(65536)
+                    if not d:
+                        break
+                    got += d
+                    if b"\r\n\r\n" in got and len(got) > 20 and b"HTTP/1.1 200" not in got[:12]:
+                        break
+                    if got.startswith(b"HTTP/1.1 200") and got.endswith(b"ok"):
+                        break
+            except (TimeoutError, socket.timeout):
+                return "waiting" if not got else got.split(b"\r\n")[0].decode("latin-1")
+            except (OSError, ssl.SSLError):
+                return "closed" if not got else got.split(b"\r\n")[0].decode("latin-1")
+            return got.split(b"\r\n")[0].decode("latin-1") if got else "closed"
+
+        def both(raw):
+            plain = socket.create_connection(("127.0.0.1", gw.port), timeout=5)
+            a = verdict(plain, raw)
+            plain.close()
+            secure = connect(gw)
+            b = verdict(secure, raw)
+            try:
+                secure.close()
+            except OSError:
+                pass
+            return a, b
+
+        n = 0
+        for cid, request, headers, must, status, source in CASES:
+            a, b = both(request)
+            assert a == b, "%s: plain %r, tls %r" % (cid, a, b)
+            n += 1
+        for case in CHUNKED:
+            cid, body = case[0], case[1]
+            a, b = both(b"POST /echo HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n" + body)
+            assert a == b, "%s: plain %r, tls %r" % (cid, a, b)
+            n += 1
+        assert n == len(CASES) + len(CHUNKED) and n >= 99, n
 
 
 def main():

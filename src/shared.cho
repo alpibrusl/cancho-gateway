@@ -333,6 +333,7 @@ pub fn tls_promote[&c](core: &!c Core, k: int, now: int) -> [] int {
     let done = tlsio.promote(core.tls, st, stride() * k, k);
     if done == 1 {
         st[stride() * k + 7] = now + header_ms();
+        metrics.tls_established(contents(core.stats));
     }
     return done;
 }
@@ -348,6 +349,14 @@ pub fn drop_session[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [co
     // already gone, and that client's line was written when it went.)
     log_end(core, k);
     admin_release(core, k);
+    if st[stride() * k + tlsio.f_mode()] == tlsio.m_queued() || st[stride() * k + tlsio.f_mode()] == tlsio.m_handshake() {
+        // Ended before the handshake did: counted, with the engine's reason, or the deadline's, or none if the peer simply left.
+        var why = tlsio.failed_tag(core.tls, k);
+        if len(why) == 0 && contents(core.ids)[3] >= st[stride() * k + 7] {
+            why = "tls.handshake-timeout";
+        }
+        metrics.tls_refused(contents(core.stats), contents(core.rnames), why);
+    }
     tlsio.end(core.tls, tab, contents(core.state), stride() * k, k);
     conns.close(tab, k);
     st[stride() * k] = 0;
