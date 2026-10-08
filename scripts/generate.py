@@ -36,9 +36,16 @@ CIRCUIT_THRESHOLD_RANGE = (0, 1000)
 CIRCUIT_OPEN_MS = 10000
 TIMEOUT_RANGE = (100, 600000)
 DEFAULT_BODY = 1 << 20
+# TLS (docs/tls.md): handshakes in progress at once, handshakes started a second, milliseconds to finish one; up to 16 identities.
+TLS_HANDSHAKES, TLS_HANDSHAKES_RANGE = 32, (1, 1000)
+TLS_RATE, TLS_RATE_RANGE = 100, (1, 100000)
+TLS_HANDSHAKE_MS = 10000
+MAX_IDENTITIES = 16
+ENTROPY_FILE = "/dev/urandom"
 METHODS = ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
 KEYS = {
-    "": ["listen", "header_timeout_ms", "connect_timeout_ms", "upstream_timeout_ms", "total_timeout_ms", "idle_timeout_ms", "pool_idle_max", "circuit_threshold", "circuit_open_ms", "log_failure", "admin_listen"],
+    "": ["listen", "header_timeout_ms", "connect_timeout_ms", "upstream_timeout_ms", "total_timeout_ms", "idle_timeout_ms", "pool_idle_max", "circuit_threshold", "circuit_open_ms", "log_failure", "admin_listen",
+           "tls_listen", "tls_dir", "tls_identities", "tls_handshakes", "tls_rate", "tls_handshake_ms"],
     "upstream": ["name", "addr"],
     "route": ["name", "host", "path_prefix", "methods", "upstream", "max_body", "trust_forwarded"],
 }
@@ -166,6 +173,35 @@ def load(path):
     if admin == listen:
         refuse("config.admin", "admin_listen must differ from listen: the proxy's port is the public one", key="admin_listen")
     timeouts["admin_port"] = admin
+    tls = None
+    tls_keys = [k for k in ("tls_listen", "tls_dir", "tls_identities", "tls_handshakes", "tls_rate", "tls_handshake_ms") if k in doc]
+    if tls_keys and "tls_listen" not in doc:
+        refuse("config.tls", "%s needs tls_listen (the port TLS is served on)" % tls_keys[0], key=tls_keys[0])
+    if "tls_listen" in doc:
+        port = doc["tls_listen"]
+        if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+            refuse("config.tls", "tls_listen must be a port in 1..65535", key="tls_listen")
+        if port == listen or port == admin:
+            refuse("config.tls", "tls_listen must differ from listen and admin_listen", key="tls_listen")
+        d = doc.get("tls_dir")
+        if d is None:
+            refuse("config.tls", "tls_listen needs tls_dir: the absolute directory the certificates are read from, compiled into the binary (docs/tls.md section 3)", key="tls_dir")
+        if (not isinstance(d, str) or not re.fullmatch(r"/[A-Za-z0-9._/-]*[A-Za-z0-9._-]", d) or "//" in d or ".." in d.split("/") or len(d) > 200):
+            refuse("config.tls", "tls_dir must be an absolute path of letters, digits and . _ - / (at most 200 bytes), with no .. component and no trailing /", key="tls_dir")
+        if d == ENTROPY_FILE or d.startswith(ENTROPY_FILE + "/") or ENTROPY_FILE.startswith(d + "/"):
+            refuse("config.tls", "tls_dir must be unrelated to %s: the program reads exactly those two paths and the compiler refuses nested ones" % ENTROPY_FILE, key="tls_dir")
+        ids = doc.get("tls_identities", [""])
+        if "tls_identities" in doc and (not isinstance(ids, list) or not 1 <= len(ids) <= MAX_IDENTITIES or len(set(ids)) != len(ids) or
+                not all(isinstance(i, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", i) for i in ids)):
+            refuse("config.tls", "tls_identities must be 1 to %d distinct subdirectory names of tls_dir (letters, digits, . _ -; the first is the default for a name no identity has)" % MAX_IDENTITIES, key="tls_identities")
+        tls = {"port": port, "dir": d, "identities": ids}
+        for key, name, default, bounds in (("tls_handshakes", "handshakes", TLS_HANDSHAKES, TLS_HANDSHAKES_RANGE), ("tls_rate", "rate", TLS_RATE, TLS_RATE_RANGE),
+                                           ("tls_handshake_ms", "handshake_ms", TLS_HANDSHAKE_MS, TIMEOUT_RANGE)):
+            v = doc.get(key, default)
+            if not isinstance(v, int) or isinstance(v, bool) or not bounds[0] <= v <= bounds[1]:
+                refuse("config.tls", "%s must be an integer in %d..%d" % ((key,) + bounds), key=key)
+            tls[name] = v
+    timeouts["tls"] = tls
     if not timeouts["header_timeout_ms"] <= timeouts["total_timeout_ms"] or not timeouts["connect_timeout_ms"] <= timeouts["total_timeout_ms"]:
         refuse("config.timeout", "total_timeout_ms must be at least the header and connect timeouts", key="total_timeout_ms")
     ups = doc.get("upstream", [])
@@ -238,6 +274,59 @@ def literal(text):
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t") + '"'
 
 
+def tls_identity_lines(tls):
+    lines = []
+    for n, name in enumerate(tls["identities"] if tls else []):
+        lines += ["    if i == %d {" % n, "        return %s;" % literal(name), "    }"]
+    return lines + ['    return "";']
+
+
+def render_tlsfiles(tls):
+    """The one module that holds the program's whole filesystem authority, written as data (docs/tls.md section 3, item 7)."""
+    head = ["edition 6;", "", "module gateway.tlsfiles;", "",
+            "// Generated by scripts/generate.py from a deployment file -- do not edit (docs/tls.md).", ""]
+    if not tls:
+        return "\n".join(head + [
+            "// No `tls_listen`: this deployment reads no file, and the authority report says so. The capability is released unread.",
+            "pub fn open_files[&e](fs: Fs(\"\"), entropy: &!e [byte]) -> [] DirOpened {", "    release(fs);", "    return DirOpened::Failed(2);", "}", ""])
+    d = literal(tls["dir"])
+    return "\n".join(head + [
+        "// The whole of the filesystem this program touches, written once: 32 bytes of entropy from %s and the directory the certificates are" % ENTROPY_FILE,
+        "// in. `narrow` takes literals, so the report names exactly these two paths and not `fs_read(\"\")` (cancho #364). Answers the directory handle",
+        "// (everything read afterwards is read through it), `DirOpened::Failed(0 - 1)` if the entropy could not be read, or `Failed(errno)` for the directory.",
+        "pub fn open_files[&e](fs: Fs(\"\"), entropy: &!e [byte]) -> [] DirOpened {",
+        "    let (urandom, certs) = narrow(fs, %s, %s);" % (literal(ENTROPY_FILE), d),
+        "    var got = 0;",
+        "    borrow urandom as &uf in {",
+        "        got = fs_read(uf, %s, entropy);" % literal(ENTROPY_FILE),
+        "    }",
+        "    var opened = DirOpened::Failed(2);",
+        "    borrow certs as &cf in {",
+        "        match opened {",
+        "            DirOpened::Ok(unused) => {",
+        "                dir_close(unused);",
+        "            }",
+        "            DirOpened::Failed(unused) => {",
+        "            }",
+        "        }",
+        "        opened = open_dir(cf, %s);" % d,
+        "    }",
+        "    release(urandom);",
+        "    release(certs);",
+        "    if got != 32 {",
+        "        match opened {",
+        "            DirOpened::Ok(unused) => {",
+        "                dir_close(unused);",
+        "            }",
+        "            DirOpened::Failed(unused) => {",
+        "            }",
+        "        }",
+        "        return DirOpened::Failed(0 - 1);",
+        "    }",
+        "    return opened;",
+        "}", ""])
+
+
 def render_deploy(listen, ups, timeouts):
     addrs = [a for _, a in ups]
     prefix = intended_prefix(addrs)
@@ -265,6 +354,14 @@ def render_deploy(listen, ups, timeouts):
         "pub fn log_failure_exit() -> [] int {", "    return %d;" % timeouts["log_failure_exit"], "}", "",
         "// The admin listener's port (metrics, health; docs/observability.md section 7), 0 if there is none.",
         "pub fn admin_port() -> [] int {", "    return %d;" % timeouts["admin_port"], "}", "",
+        "// TLS (docs/tls.md): the port, the handshake bounds, and the identities (subdirectories of the directory compiled into `gateway.tlsfiles`; an empty",
+        "// name is the directory itself). Port 0: no TLS.",
+        "pub fn tls_port() -> [] int {", "    return %d;" % (timeouts["tls"]["port"] if timeouts["tls"] else 0), "}", "",
+        "pub fn tls_handshakes() -> [] int {", "    return %d;" % (timeouts["tls"]["handshakes"] if timeouts["tls"] else TLS_HANDSHAKES), "}", "",
+        "pub fn tls_rate() -> [] int {", "    return %d;" % (timeouts["tls"]["rate"] if timeouts["tls"] else TLS_RATE), "}", "",
+        "pub fn tls_handshake_ms() -> [] int {", "    return %d;" % (timeouts["tls"]["handshake_ms"] if timeouts["tls"] else TLS_HANDSHAKE_MS), "}", "",
+        "pub fn tls_identity_count() -> [] int {", "    return %d;" % (len(timeouts["tls"]["identities"]) if timeouts["tls"] else 0), "}", "",
+        "pub fn tls_identity(i: int) -> [] &static [byte] {"] + tls_identity_lines(timeouts["tls"]) + ["}", "",
         "// The longest common prefix of the addresses, cut at a delimiter: what `narrow` would be given once",
         "// cancho has separate listen and connect bounds. Empty means no shared prefix.",
         "pub fn intended_egress_prefix() -> [] &static [byte] {", "    return %s;" % literal(prefix), "}", "",
@@ -317,12 +414,16 @@ def main():
         print(json.dumps({"file": args[0], "hint": r.hint, "key": r.key, "line": r.line, "message": str(r), "rule": r.rule},
                          sort_keys=True), file=sys.stderr)
         return 2
-    outputs = {"deploy.cho": render_deploy(listen, ups, timeouts), "routes.cho": render_routes(routes)}
+    outputs = {"deploy.cho": render_deploy(listen, ups, timeouts), "routes.cho": render_routes(routes), "tlsfiles.cho": render_tlsfiles(timeouts["tls"])}
     if "--explain" in flags:
         prefix = intended_prefix([a for _, a in ups])
         print("listen %d; %d upstream(s): %s" % (listen, len(ups), ", ".join(a for _, a in ups)))
         print("timeouts (ms): " + ", ".join("%s %d" % (k.replace("_timeout_ms", ""), v) for k, v in timeouts.items() if k.endswith("_ms")) +
               "; idle connections kept per upstream: %d; circuit: %d failures, open %d ms" % (timeouts["pool_idle_max"], timeouts["circuit_threshold"], timeouts["circuit_open_ms"]))
+        if timeouts["tls"]:
+            t = timeouts["tls"]
+            print("tls on port %d: certificates beneath %s (identities: %s); reads exactly %s and that directory; %d handshakes at once, %d a second, %d ms each" % (
+                t["port"], t["dir"], ", ".join(i or "(the directory itself)" for i in t["identities"]), ENTROPY_FILE, t["handshakes"], t["rate"], t["handshake_ms"]))
         print("intended egress prefix: %s" % (repr(prefix) if prefix else "none (no shared prefix)"))
         for n, r in enumerate(routes):
             print("route %d: %s %s -> %s (max body %d%s)" % (n, r["host"] or "*", r["prefix"], ups[r["upstream"]][0], r["max_body"], ", trusts forwarding headers" if r["trust"] else ""))

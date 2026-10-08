@@ -1,0 +1,15 @@
+# Used by docs/examples.html and docs/tls.md. HTTPS on port 8443 (and plain HTTP on 8080), certificates read at start from the directory below.
+# Example 7: the gateway as the edge for one internal service.
+listen = 8080
+tls_listen = 8443
+tls_dir = "/etc/cancho-gateway/tls"      # compiled into the binary: the program reads exactly this directory and /dev/urandom
+tls_identities = ["api"]                 # /etc/cancho-gateway/tls/api/{chain.pem,key.pem,names}
+
+[[upstream]]
+name = "app"
+addr = "127.0.0.1:9000"
+
+[[route]]
+name = "app"
+path_prefix = "/"
+upstream = "app"
