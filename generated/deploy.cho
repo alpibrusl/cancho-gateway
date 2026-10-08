@@ -8,11 +8,11 @@ module gateway.deploy;
 // this list in code before every connect and `authority.toml` states the report is `net_out("")`.
 
 pub fn listen_port() -> [] int {
-    return 18080;
+    return 8080;
 }
 
 pub fn upstream_count() -> [] int {
-    return 1;
+    return 2;
 }
 
 // Milliseconds: the head must arrive, the upstream must connect, the upstream must start answering, the whole request
@@ -64,7 +64,7 @@ pub fn admin_port() -> [] int {
 // TLS (docs/tls.md): the port, the handshake bounds, and the identities (subdirectories of the directory compiled into `gateway.tlsfiles`; an empty
 // name is the directory itself). Port 0: no TLS.
 pub fn tls_port() -> [] int {
-    return 18443;
+    return 0;
 }
 
 pub fn tls_handshakes() -> [] int {
@@ -80,33 +80,36 @@ pub fn tls_handshake_ms() -> [] int {
 }
 
 pub fn tls_identity_count() -> [] int {
-    return 1;
+    return 0;
 }
 
 pub fn tls_identity(i: int) -> [] &static [byte] {
-    if i == 0 {
-        return "api";
-    }
     return "";
 }
 
 // The longest common prefix of the addresses, cut at a delimiter: what `narrow` would be given once
 // cancho has separate listen and connect bounds. Empty means no shared prefix.
 pub fn intended_egress_prefix() -> [] &static [byte] {
-    return "127.0.0.1:19000";
+    return "10.0.1.";
 }
 
 // Upstream `i` (0-based), as host:port; the empty string past the end.
 pub fn upstream_addr(i: int) -> [] &static [byte] {
     if i == 0 {
-        return "127.0.0.1:19000";
+        return "10.0.1.5:9000";
+    }
+    if i == 1 {
+        return "10.0.1.6:9000";
     }
     return "";
 }
 
 pub fn upstream_name(i: int) -> [] &static [byte] {
     if i == 0 {
-        return "app";
+        return "api";
+    }
+    if i == 1 {
+        return "web";
     }
     return "";
 }

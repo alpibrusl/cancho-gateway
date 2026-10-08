@@ -51,7 +51,12 @@ pub fn f_noted() -> [] int {
 
 // How many ints of the record are the TLS fields' (the proxy's stride is at least this plus `f_mode()`).
 pub fn fields() -> [] int {
-    return 7;
+    return 8;
+}
+
+// Counts the ciphertext taken and the plaintext given, so that the loop can tell a read that moved something from one that did not.
+pub fn f_prog() -> [] int {
+    return 39;
 }
 
 // 1 while the connection may hold more plaintext or ciphertext than the proxy has taken (the proxy reads such a connection again without waiting for
@@ -143,6 +148,9 @@ pub fn close[&h](heap: &!h Heap, t: Tls) -> [heap] int {
 // Write what the engine has queued for the socket of slot `k` (its state record starting at `b`): 0 when all of it went or there was none,
 // 1 when the socket is full, `0 - 1` when it failed.
 pub fn drain[&t, &x, &s](t: &!t Tls, tab: &!x conns.Table, st: &!s [int], b: int, k: int) -> [conn_write] int {
+    if st[b + f_mode()] < m_handshake() {
+        return 0;
+    }
     let base = k * cout_cap();
     while true {
         if st[b + f_cs()] == st[b + f_ce()] {
@@ -169,6 +177,9 @@ pub fn drain[&t, &x, &s](t: &!t Tls, tab: &!x conns.Table, st: &!s [int], b: int
 
 // Is anything queued for the socket, in `cout` or in the engine? (A session must not end, and a slot must be watched for room, while it is.)
 pub fn pending[&t, &s](t: &t Tls, st: &s [int], b: int, k: int) -> [] bool {
+    if st[b + f_mode()] < m_handshake() {
+        return false;
+    }
     if st[b + f_cs()] != st[b + f_ce()] {
         return true;
     }
@@ -180,6 +191,9 @@ pub fn pending[&t, &s](t: &t Tls, st: &s [int], b: int, k: int) -> [] bool {
 // first, every time, so a handshake advances whenever this is called. The peer's end before its close_notify is `End`, as a plain socket's is:
 // a request is length-framed, so a truncated one is an aborted request either way (gate 5 of docs/tls.md).
 pub fn read[&t, &x, &s, &o](t: &!t Tls, tab: &!x conns.Table, st: &!s [int], b: int, k: int, into: &!o [byte]) -> [conn_read, conn_write] Received {
+    if st[b + f_mode()] == m_plain() {
+        return conns.read(tab, k, into);
+    }
     let ib = k * cin_cap();
     var rounds = 0;
     while rounds < 64 {
@@ -189,6 +203,7 @@ pub fn read[&t, &x, &s, &o](t: &!t Tls, tab: &!x conns.Table, st: &!s [int], b: 
         }
         let n = tls.recv(t.engine, k, into);
         if n > 0 {
+            st[b + f_prog()] = st[b + f_prog()] + 1;
             st[b + f_more()] = 0;
             if n == len(into) || st[b + f_cin()] > 0 {
                 st[b + f_more()] = 1;
@@ -212,6 +227,7 @@ pub fn read[&t, &x, &s, &o](t: &!t Tls, tab: &!x conns.Table, st: &!s [int], b: 
                 st[b + f_more()] = 1;
                 return Received::Again;
             } else {
+                st[b + f_prog()] = st[b + f_prog()] + 1;
                 copy_into(contents(t.cin)[ib..ib + st[b + f_cin()] - took], contents(t.cin)[ib + took..ib + st[b + f_cin()]]);
                 st[b + f_cin()] = st[b + f_cin()] - took;
             }
@@ -240,6 +256,9 @@ pub fn read[&t, &x, &s, &o](t: &!t Tls, tab: &!x conns.Table, st: &!s [int], b: 
 // Plaintext from the proxy: what `conns.write` would answer. Up to one record is given to the engine and written; `Again` when the engine or
 // the socket has no room (the proxy keeps the bytes in `pends[k]` and is told when there is). Only an established connection is written to.
 pub fn write[&t, &x, &s, &d](t: &!t Tls, tab: &!x conns.Table, st: &!s [int], b: int, k: int, data: &d [byte]) -> [conn_write] Sent {
+    if st[b + f_mode()] == m_plain() {
+        return conns.write(tab, k, data);
+    }
     let held = drain(t, tab, st, b, k);
     if held < 0 {
         return Sent::Failed(32);
@@ -272,6 +291,9 @@ pub fn promote[&t, &s](t: &t Tls, st: &!s [int], b: int, k: int) -> [] int {
 // The end of a session: close_notify queued and written if the socket takes it now (best effort: the session is over either way), then the
 // engine's secrets for this slot overwritten and the TLS fields cleared. Called by the proxy just before it closes the socket.
 pub fn end[&t, &x, &s](t: &!t Tls, tab: &!x conns.Table, st: &!s [int], b: int, k: int) -> [conn_write] int {
+    if st[b + f_mode()] == m_plain() {
+        return 0;
+    }
     if st[b + f_mode()] >= m_established() {
         tls.finish(t.engine, k);
         drain(t, tab, st, b, k);

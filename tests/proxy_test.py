@@ -9,6 +9,7 @@ A deployment with short timeouts is generated, the gateway built from it, and ea
 
 import hashlib
 import json
+import glob
 import os
 import pathlib
 import random
@@ -22,7 +23,15 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LEX = os.environ.get("CANCHO", "cancho")
-SOURCES = ["out", "accesslog", "problem", "framing", "chunked", "route", "response", "forward", "egress", "admin", "metrics", "proxy", "version", "gateway"]
+SOURCES = ["out", "accesslog", "problem", "framing", "chunked", "route", "response", "forward", "egress", "admin", "metrics", "tlsids", "tlsio", "shared", "adminloop", "proxy", "version", "gateway"]
+
+
+def dependencies():
+    """The TLS package and what it requires, as `cancho build` fetched them into build/deps (this harness builds loose files, not the project)."""
+    found = sorted(glob.glob(str(ROOT / "build" / "deps" / "*.cho")))
+    if not found:
+        raise SystemExit("build/deps is empty: run `cancho build` once first")
+    return found
 
 
 def free_port():
@@ -477,14 +486,14 @@ upstream = "up"
 max_body = 1048576
 """ % (port, pool, circuit, ('log_failure = "%s"\n' % log_failure if log_failure else "") + ("admin_listen = %d\n" % self.admin if admin else ""), up_port, dead_port, ka_port, flap_port, "".join('[[route]]\nname = "r%03d"\npath_prefix = "/r%03d"\nupstream = "up"\n\n' % (i, i) for i in range(routes))))
         subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(deploy), "--out", tmp], check=True)
-        files = [os.path.join(tmp, "deploy.cho"), os.path.join(tmp, "routes.cho")] + [str(ROOT / "src" / (n + ".cho")) for n in SOURCES]
+        files = [os.path.join(tmp, "deploy.cho"), os.path.join(tmp, "routes.cho"), os.path.join(tmp, "tlsfiles.cho")] + dependencies() + [str(ROOT / "src" / (n + ".cho")) for n in SOURCES]
         if logq:
             # A build whose access-log queue is `logq` bytes, to reach the full-queue case without a million requests.
-            source = (ROOT / "src" / "proxy.cho").read_text()
+            source = (ROOT / "src" / "shared.cho").read_text()
             assert "return 262144;" in source
-            patched = os.path.join(tmp, "proxy_small_queue.cho")
+            patched = os.path.join(tmp, "shared_small_queue.cho")
             pathlib.Path(patched).write_text(source.replace("return 262144;", "return %d;" % logq))
-            files = [patched if f.endswith("/src/proxy.cho") else f for f in files]
+            files = [patched if f.endswith("/src/shared.cho") else f for f in files]
         built = subprocess.run([LEX, "build", "--std", *files, "-o", os.path.join(tmp, "gateway")], capture_output=True, text=True)
         if built.returncode != 0:
             raise SystemExit("build failed: " + built.stderr[:400])

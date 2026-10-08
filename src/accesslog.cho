@@ -42,8 +42,8 @@ fn put_number[&o](out: &!o [byte], at: int, key: &static [byte], value: int) -> 
     return out.put_int(out, k, value);
 }
 
-// The line for one request, with its newline, from offset 0 of `out`; answers its length, or `0 - 1` if `out` is too small.
-pub fn line[&o, &i, &m, &p, &r, &u, &l](out: &!o [byte], t: int, id: &i [byte], method: &m [byte], path: &p [byte], route: &r [byte], upstream: &u [byte], status: int, rule: &l [byte], outcome: int, ms: int, upstream_ms: int, bytes_in: int, bytes_out: int) -> [] int {
+// The line for one request (`secure`: its client spoke TLS), with its newline, from offset 0 of `out`; answers its length, or `0 - 1` if `out` is too small.
+pub fn line[&o, &i, &m, &p, &r, &u, &l](out: &!o [byte], t: int, id: &i [byte], method: &m [byte], path: &p [byte], route: &r [byte], upstream: &u [byte], status: int, rule: &l [byte], outcome: int, ms: int, upstream_ms: int, bytes_in: int, bytes_out: int, secure: bool) -> [] int {
     var k = out.put(out, 0, "{\"t\":");
     k = out.put_int(out, k, t);
     k = put_field(out, k, "id", id, 64, 64);
@@ -63,6 +63,10 @@ pub fn line[&o, &i, &m, &p, &r, &u, &l](out: &!o [byte], t: int, id: &i [byte], 
     k = put_number(out, k, "upstream_ms", upstream_ms);
     k = put_number(out, k, "bytes_in", bytes_in);
     k = put_number(out, k, "bytes_out", bytes_out);
+    if secure {
+        // Only a connection that spoke TLS carries the field, so a deployment without `tls_listen` writes the lines it always wrote.
+        k = out.put(out, k, ",\"tls\":true");
+    }
     k = out.put(out, k, "}\n");
     return k;
 }

@@ -9,6 +9,7 @@
     "conn_write",
     "dir_read",
     "file_read",
+    "fs_read",
     "heap",
     "io_write",
     "net_in",
@@ -49,6 +50,16 @@
     {
       "name": "file_read",
       "argument": null,
+      "bounded": true
+    },
+    {
+      "name": "fs_read",
+      "argument": "/dev/urandom",
+      "bounded": true
+    },
+    {
+      "name": "fs_read",
+      "argument": "/etc/cancho-gateway/tls",
       "bounded": true
     },
     {
@@ -962,7 +973,7 @@
     "z_of",
     "z_of"
   ],
-  "folded_operators": 129,
+  "folded_operators": 130,
   "folded_calls": 337,
   "functions": 1317
 }

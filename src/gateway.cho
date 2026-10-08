@@ -3,6 +3,7 @@ edition 6;
 import std.io;
 import gateway.deploy;
 import gateway.proxy;
+import gateway.shared;
 import gateway.tlsio;
 import gateway.version;
 
@@ -103,7 +104,7 @@ fn main(world: World) -> [] int {
                                         borrow mut io as &!ii in {
                                             // TLS, if the deployment has `tls_listen`: the certificates are read and the engine made here, before the first
                                             // connection is taken; a bad identity ends the process with its own status (docs/tls.md section 3).
-                                            let (made, how) = tlsio.start(h, fs, ck, proxy.slot_limit(), ii);
+                                            let (made, how) = tlsio.start(h, fs, ck, shared.slot_limit(), ii);
                                             if how != 0 {
                                                 tlsio.close(h, made);
                                                 served = how;
