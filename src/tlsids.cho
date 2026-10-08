@@ -1,0 +1,205 @@
+edition 6;
+
+module gateway.tlsids;
+
+// COPIED from cancho's `examples/tls_echo/identity.cho` (cancho 2fcf4cd), which cancho's `tls-server.md` section 8 gives the broker and the
+// gateway to copy: it is the one piece of reading certificates that is the program's and not the package's (the engine never reads a
+// file, `docs/tls-server.md` section 4). The only changes are this header and the module name. If cancho changes the original, this file is
+// compared against it by hand when the pin moves (docs/tls.md section 3, item 7).
+//
+// `tls_echo`'s certificates: an identity's chain, key and names, read
+// beneath the directory the operator named (`docs/tls-server.md` §4: the
+// program reads the files, the engine never does).
+//
+// The directory is opened once, at start, with `open_dir`; everything after
+// that is read through the handle (`docs/directory-handles.md`), one
+// component at a time and following no link. So the code that runs while
+// the server faces the network, the reload included, holds `dir_read` and
+// no path authority at all: it can read what is beneath that directory and
+// nothing else. (A symbolic link there is refused, `ELOOP`: certbot's
+// `live/` directory is links into `archive/`, so a deploy hook copies the
+// files in, which is also how they get the permissions this process needs.)
+//
+// An identity is `chain.pem`, `key.pem` and `names` (the host names it
+// serves, separated by spaces or new lines, `*.` for one label) beneath the
+// directory, or beneath one subdirectory of it per identity (`--identity`).
+
+import std.bytes;
+import std.dirs;
+import tls;
+
+// The room for a chain as PEM: the engine takes at most 16 KiB of DER
+// (`docs/tls-server.md` §4), which is about 22 KiB of PEM.
+pub fn chain_cap() -> [] int {
+    return 65536;
+}
+
+pub fn key_cap() -> [] int {
+    return 8192;
+}
+
+pub fn names_cap() -> [] int {
+    return 1024;
+}
+
+// What `load` answers for a file it could not read, below every refusal
+// tag's code: `file_base() * which - errno`, `which` 1 for the chain, 2 the
+// key, 3 the names. `EFBIG` (27) is a file larger than its room.
+pub fn file_base() -> [] int {
+    return 0 - 10000;
+}
+
+pub fn efbig() -> [] int {
+    return 27;
+}
+
+// Which file a `load` answer below `file_base()` names, and its `errno`.
+pub fn failed_file(code: int) -> [] &static [byte] {
+    if code > file_base() * 2 {
+        return "chain.pem";
+    }
+    if code > file_base() * 3 {
+        return "key.pem";
+    }
+    return "names";
+}
+
+pub fn failed_errno(code: int) -> [] int {
+    var c = code;
+    while c <= file_base() {
+        c = c - file_base();
+    }
+    return 0 - c;
+}
+
+// `path` beneath `dir`, read into `into`: how many bytes, or `-errno`.
+fn read_beneath[&d, &p, &o](dir: &d Dir, path: &p [byte], into: &!o [byte]) -> [dir_read, file_read] int {
+    match dirs.open_file(dir, path) {
+        Opened::Ok(f) => {
+            var file = f;
+            var at = 0;
+            var code = 0;
+            var going = true;
+            borrow mut file as &!fh in {
+                while going {
+                    if at == len(into) {
+                        code = 0 - efbig();
+                        going = false;
+                    } else {
+                        match file_read(fh, into[at..len(into)]) {
+                            Read::Got(n) => {
+                                at = at + n;
+                            }
+                            Read::End => {
+                                going = false;
+                            }
+                            Read::Failed(e) => {
+                                code = 0 - e;
+                                going = false;
+                            }
+                        }
+                    }
+                }
+            }
+            file_close(file);
+            if code != 0 {
+                return code;
+            }
+            return at;
+        }
+        Opened::Failed(e) => {
+            return 0 - e;
+        }
+    }
+}
+
+// `sub/leaf`, or `leaf` when `sub` is empty, into `out`: its length.
+fn path_of[&s, &l, &o](sub: &s [byte], leaf: &l [byte], out: &!o [byte]) -> [] int {
+    var at = 0;
+    var k = 0;
+    while k < len(sub) {
+        out[at] = sub[k];
+        at = at + 1;
+        k = k + 1;
+    }
+    if len(sub) > 0 {
+        out[at] = byte_of('/');
+        at = at + 1;
+    }
+    k = 0;
+    while k < len(leaf) {
+        out[at] = leaf[k];
+        at = at + 1;
+        k = k + 1;
+    }
+    return at;
+}
+
+// The names file as the engine takes them: separated by single spaces,
+// with no space at either end. Its length.
+fn spaced[&b](text: &!b [byte], n: int) -> [] int {
+    var out = 0;
+    var k = 0;
+    var gap = false;
+    while k < n {
+        let c = int_of(text[k]);
+        if c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == ',' {
+            gap = out > 0;
+        } else {
+            if gap {
+                text[out] = byte_of(' ');
+                out = out + 1;
+                gap = false;
+            }
+            text[out] = text[k];
+            out = out + 1;
+        }
+        k = k + 1;
+    }
+    return out;
+}
+
+// Reads the identity beneath `dir` (in `sub`, or the directory itself) and
+// gives it to the engine: `tls.add_identity` when `id` is negative, else
+// `tls.replace_identity(id, ...)`, which keeps the names it was added with,
+// so `names` is read only by an add. Answers the engine's answer (an
+// identity's number or 0, or a refusal), or a file that could not be read
+// (`file_base()`). Nothing is changed in the engine unless every file was
+// read and the engine took them; a refused replacement leaves the old
+// identity serving (`tls.replace_identity`).
+pub fn load[&h, &d, &s, &e](heap: &!h Heap, dir: &d Dir, sub: &s [byte], engine: &!e tls.Engine, id: int, now_unix_ms: int) -> [heap, dir_read, file_read] int {
+    var answer = 0;
+    let chain = box_slice(heap, chain_cap(), byte_of(0));
+    let key = box_slice(heap, key_cap(), byte_of(0));
+    borrow mut chain as &!cw in {
+        borrow mut key as &!kw in {
+            region r {
+                let path = alloc_slice[r](len(sub) + 16, byte_of(0));
+                let names = alloc_slice[r](names_cap(), byte_of(0));
+                let cn = read_beneath(dir, path[0..path_of(sub, "chain.pem", path)], contents(cw));
+                let kn = read_beneath(dir, path[0..path_of(sub, "key.pem", path)], contents(kw));
+                var nn = 0;
+                if id < 0 {
+                    nn = read_beneath(dir, path[0..path_of(sub, "names", path)], names);
+                }
+                if cn < 0 {
+                    answer = file_base() + cn;
+                } else if kn < 0 {
+                    answer = file_base() * 2 + kn;
+                } else if nn < 0 {
+                    answer = file_base() * 3 + nn;
+                } else if id < 0 {
+                    answer = tls.add_identity(engine, contents(cw)[0..cn], contents(kw)[0..kn], names[0..spaced(names, nn)], now_unix_ms);
+                } else {
+                    answer = tls.replace_identity(engine, id, contents(cw)[0..cn], contents(kw)[0..kn], now_unix_ms);
+                }
+            }
+            // The key's copy overwritten (best effort, as `tls.drop` does:
+            // `docs/tls-pure.md` §7.3).
+            bytes.zero(contents(kw));
+        }
+    }
+    unbox_slice(heap, chain);
+    unbox_slice(heap, key);
+    return answer;
+}

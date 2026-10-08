@@ -5,7 +5,7 @@
 ## Read first
 - [Overview](https://alpibrusl.github.io/cancho-gateway/): what it is, where it fits, the numbers.
 - [Evidence](https://alpibrusl.github.io/cancho-gateway/evidence.html): what each test covers, what it found, how each number was measured, what is not claimed.
-- [Examples and download](https://alpibrusl.github.io/cancho-gateway/examples.html): six situations with their deployment files and what the gateway answers and logs; the demo binary from the latest release.
+- [Examples and download](https://alpibrusl.github.io/cancho-gateway/examples.html): seven situations with their deployment files and what the gateway answers and logs; the demo binary from the latest release.
 - [Design](https://github.com/alpibrusl/cancho-gateway/blob/main/docs/design.md): scope, the authority row, the bounds and their rule tags.
 
 ## Facts that matter when using it
@@ -15,7 +15,7 @@
 - The access log is JSON lines on stdout: `t, id, method, path (no query string), route, upstream, status, rule, outcome, ms, upstream_ms, bytes_in, bytes_out`. A stdout reader that stops stalls the gateway.
 - Optional admin port (`admin_listen`): `/metrics` (JSON, or Prometheus text with `?format=prometheus`), `/healthz`, `/readyz` (503 with the reasons as data). It binds every interface and has no authentication: firewall it.
 - Headers: hop-by-hop headers are removed; `Via`, `X-Forwarded-Host` and `X-Forwarded-Proto` are added; a client's `Forwarded`, `X-Forwarded-*`, `X-Real-IP` and `X-Request-Id` are not believed unless the route sets `trust_forwarded = true`. There is no `X-Forwarded-For` of the gateway's own: the compiler gives no client address.
-- The authority report (files: none, foreign calls: none) is committed in `manifests/` and checked in CI. The network bound is not narrowed: the upstream set is enforced in code and tested, not proved by the compiler.
+- The authority report (files: read-only, and only the TLS certificate directory and /dev/urandom when tls_listen is set; foreign calls: none) is committed in `manifests/` and checked in CI. The network bound is not narrowed: the upstream set is enforced in code and tested, not proved by the compiler.
 
 ## Not built
-Authentication, rate limiting, TLS (designed in docs/tls.md, not built), WebSocket, client keep-alive, hot reload.
+Authentication, rate limiting, TLS certificate reload (TLS 1.3 itself is built: docs/tls.md), WebSocket, client keep-alive, hot reload.

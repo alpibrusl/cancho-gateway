@@ -17,6 +17,9 @@ import gateway.out;
 import gateway.problem;
 import gateway.response;
 import gateway.route;
+import gateway.shared;
+import gateway.adminloop;
+import gateway.tlsio;
 
 // The proxy core, first slice (task #5, docs/proxy.md): one thread, one poller, memory sized at start.
 //
@@ -73,389 +76,63 @@ import gateway.route;
 // The id is the connection's own when it is accepted, and the client's if its route trusts one and it sent a valid one (docs/headers.md).
 // The access-log line is built from these when the session ends (docs/observability.md).
 
-fn slot_limit() -> [] int {
-    return 256;
-}
-
-fn buf_size() -> [] int {
-    return 16384;
-}
-
-fn pend_size() -> [] int {
-    return 32768;
-}
-
-fn stride() -> [] int {
-    return 32;
-}
-
-fn meta_size() -> [] int {
-    return 256;
-}
-
-// The access-log queue: lines wait here until the loop writes them (docs/observability.md section 3).
-fn logq_size() -> [] int {
-    return 262144;
-}
-
-// Idle upstream connections kept per upstream, and for how long; 0 keeps none (every request then uses its own connection).
-fn pool_max() -> [] int {
-    return deploy.pool_idle_max();
-}
-
-fn idle_ms() -> [] int {
-    return deploy.idle_ms();
-}
-
-// The passive circuit: this many consecutive failures to one upstream open it for `circuit_open_ms()`; 0 never opens it.
-fn circuit_threshold() -> [] int {
-    return deploy.circuit_threshold();
-}
-
-fn circuit_open_ms() -> [] int {
-    return deploy.circuit_open_ms();
-}
-
-// Milliseconds, from the deployment: the head must arrive, the upstream must connect and start answering, and the request must
-// end. (`flush_ms`: how long a refusal has to be written before the connection is dropped.)
-fn header_ms() -> [] int {
-    return deploy.header_ms();
-}
-
-fn connect_ms() -> [] int {
-    return deploy.connect_ms();
-}
-
-fn upstream_ms() -> [] int {
-    return deploy.upstream_ms();
-}
-
-fn total_ms() -> [] int {
-    return deploy.total_ms();
-}
-
-fn flush_ms() -> [] int {
-    return 5000;
-}
-
-// After a refusal has been written the connection is kept open until the client has been silent this long (and for at most three
-// seconds), its input read and thrown away: closing a socket with
-// unread request bytes in it sends a reset, which can destroy the response before the client has read it (RFC 9112 9.6).
-// cancho has no half-close, so the gateway lingers instead.
-fn linger_ms() -> [] int {
-    return 500;
-}
-
-// The admin listener (docs/observability.md section 7): its token on the poller (the slots use 1 to `slot_limit()`), how many connections it
-// serves at once, how long one exchange may take, and how much of a request head it reads.
-fn admin_token() -> [] int {
-    return slot_limit() + 1;
-}
-
-fn admin_max() -> [] int {
-    return 8;
-}
-
-fn admin_ms() -> [] int {
-    return 2000;
-}
-
-fn admin_head_max() -> [] int {
-    return 2048;
-}
-
-// The metrics buffer: the worst answer this deployment can give, or one byte if there is no admin listener.
-fn admin_buffer_len() -> [] int {
-    if deploy.admin_port() == 0 {
-        return 1;
-    }
-    return metrics.worst_case();
-}
-
-res struct Core {
-    poller: Poller,
-    // `poller_wait` fills these with (token, readiness) pairs.
-    events: Box[[int]],
-    state: Box[[int]],
-    bufs: Box[[byte]],
-    pends: Box[[byte]],
-    // The parse table of the head in hand.
-    table: Box[[int]],
-    // One chunked-body state per slot.
-    chunks: Box[[int]],
-    // Per upstream, four ints: consecutive failures, when the circuit is open until (0: closed), until when a half-open trial
-    // request is in flight (0: none), unused.
-    health: Box[[int]],
-    // Sixteen ints: 0 the clock at start, 1 the number of connections given an id so far, 2 the wall clock minus the monotonic one at
-    // start, 3 the clock of the turn in progress, 4 the bytes waiting in `logq`, 5 the lines dropped since the last announcement,
-    // 6 the lines dropped in all, 7 the log writes that failed, 8 the admin connection that owns `abuf` (slot + 1, 0 if none),
-    // 9 the clock of the last failed log write (0 if none).
-    ids: Box[[int]],
-    meta: Box[[byte]],
-    logq: Box[[byte]],
-    // The counters, the rule-name table and the gauges of `gateway.metrics`, and the one buffer a metrics answer is built in (owned by one admin
-    // connection at a time: `ids[8]` is its slot + 1, or 0).
-    stats: Box[[int]],
-    rnames: Box[[byte]],
-    gauge: Box[[int]],
-    abuf: Box[[byte]],
-}
-
-fn token_of(k: int) -> [] int {
-    return k + 1;
-}
-
-// Is bit `bit` set in the flags `v`?
-fn flag_has(v: int, bit: int) -> [] bool {
-    return v / bit % 2 == 1;
-}
-
-// Set `bit` in the flags of client slot `k`.
-fn flag_set[&c](core: &!c Core, k: int, bit: int) -> [] int {
-    let st = contents(core.state);
-    let p = stride() * k;
-    if !flag_has(st[p + 30], bit) {
-        st[p + 30] = st[p + 30] + bit;
-    }
-    return 0;
-}
-
-// Keep the first `cap` bytes of `value` in client `k`'s meta area at `at`, its length at `lenpos`.
-fn meta_put[&c, &s](core: &!c Core, k: int, at: int, cap: int, lenpos: int, value: &s [byte]) -> [] int {
-    let m = contents(core.meta);
-    var n = len(value);
-    if n > cap {
-        n = cap;
-    }
-    let base = k * meta_size();
-    copy_into(m[base + at..base + at + n], value[0..n]);
-    m[base + lenpos] = byte_of(n);
-    return n;
-}
-
-// The `n`-byte field of client `k`'s meta area at `at`, whose length is at `lenpos`.
-fn meta_get[&c](core: &c Core, k: int, at: int, lenpos: int) -> [] &c [byte] {
-    let m = contents(core.meta);
-    let base = k * meta_size();
-    return m[base + at..base + at + int_of(m[base + lenpos])];
-}
-
-// Client `k` has been accepted: its start, its own id (the next sequence number), and every field of the record cleared.
-fn session_begin[&c](core: &!c Core, k: int, now: int) -> [] int {
-    let st = contents(core.state);
-    let ids = contents(core.ids);
-    let m = contents(core.meta);
-    let p = stride() * k;
-    ids[1] = ids[1] + 1;
-    st[p + 23] = 2 * ids[1];
-    st[p + 24] = now;
-    st[p + 25] = 0;
-    st[p + 26] = 0;
-    st[p + 27] = 0;
-    st[p + 28] = 0;
-    st[p + 29] = 0;
-    st[p + 30] = 0;
-    st[p + 31] = 0;
-    let base = k * meta_size();
-    m[base + 1] = byte_of(0);
-    m[base + 2] = byte_of(0);
-    m[base + 3] = byte_of(0);
-    let n = forward.put_generated_id(m[base + 4..base + 4 + 64], 0, ids[0], deploy.listen_port(), ids[1]);
-    m[base] = byte_of(n);
-    return 0;
-}
-
-// Queue the access-log line of client `k`, once, when its session ends (docs/observability.md sections 2 and 3). Pure memory work: the
-// loop writes the queue. A line that does not fit is dropped and counted, and announced when there is room again.
-fn log_end[&c](core: &!c Core, k: int) -> [] int {
-    let st = contents(core.state);
-    let p = stride() * k;
-    if st[p] != 1 || st[p + 1] != 1 || flag_has(st[p + 30], 4) {
-        return 0;
-    }
-    flag_set(core, k, 4);
-    let ids = contents(core.ids);
-    let q = contents(core.logq);
-    let now = ids[3];
-    var outcome = 2;
-    if flag_has(st[p + 30], 1) {
-        outcome = 1;
-    } else if flag_has(st[p + 30], 2) {
-        outcome = 0;
-    }
-    var upstream_ms = 0;
-    if st[p + 26] > 0 && st[p + 25] > 0 {
-        upstream_ms = st[p + 26] - st[p + 25];
-    }
-    var route_name = "";
-    if st[p + 31] > 0 {
-        route_name = route.name(st[p + 31] - 1);
-    }
-    var upstream_name = "";
-    if st[p + 31] > 0 {
-        upstream_name = deploy.upstream_name(st[p + 11]);
-    }
-    var wait_ms = 0 - 1;
-    if st[p + 26] > 0 && st[p + 25] > 0 {
-        wait_ms = st[p + 26] - st[p + 25];
-    }
-    var route_index = 0 - 1;
-    if st[p + 31] > 0 {
-        route_index = st[p + 31] - 1;
-    }
-    metrics.record(contents(core.stats), contents(core.rnames), st[p + 29], route_index, st[p + 11], now - st[p + 24], wait_ms, st[p + 28], st[p + 27], meta_get(core, k, 68, 1), st[p + 17] == 1);
-    var at = ids[4];
-    if ids[5] > 0 && logq_size() - at >= accesslog.max_line() * 2 {
-        let announced = accesslog.dropped_line(q[at..at + accesslog.max_line()], ids[2] + now, ids[5]);
-        if announced > 0 {
-            at = at + announced;
-            ids[5] = 0;
-        }
-    }
-    var n = 0 - 1;
-    if logq_size() - at >= accesslog.max_line() {
-        n = accesslog.line(q[at..at + accesslog.max_line()], ids[2] + st[p + 24], meta_get(core, k, 4, 0), meta_get(core, k, 108, 2), meta_get(core, k, 124, 3), route_name, upstream_name, st[p + 29], meta_get(core, k, 68, 1), outcome, now - st[p + 24], upstream_ms, st[p + 28], st[p + 27]);
-    }
-    if n < 0 {
-        ids[5] = ids[5] + 1;
-        ids[6] = ids[6] + 1;
-    } else {
-        at = at + n;
-    }
-    ids[4] = at;
-    return 0;
-}
-
-// If client `k` was admitted as the half-open trial and the circuit has not yet heard its outcome, hand the trial back (its
-// request ended without a verdict: refused locally, or abandoned by its client). `st[24k+21]` is the trial's expiry as it was
-// issued; it only releases the trial if that is still the one outstanding.
-fn release_trial[&c](core: &!c Core, k: int) -> [] int {
-    let st = contents(core.state);
-    let p = stride() * k;
-    if st[p + 1] == 1 && st[p + 21] != 0 {
-        let h = contents(core.health);
-        if h[4 * st[p + 11] + 2] == st[p + 21] {
-            h[4 * st[p + 11] + 2] = 0;
-        }
-        st[p + 21] = 0;
-    }
-    return 0;
-}
-
-// Close slot `k` and its peer and forget both.
-// If admin connection `k` owns the metrics buffer, give it back.
-fn admin_release[&c](core: &!c Core, k: int) -> [] int {
-    let ids = contents(core.ids);
-    if ids[8] == k + 1 {
-        ids[8] = 0;
-    }
-    return 0;
-}
-
-fn drop_session[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [] int {
-    let st = contents(core.state);
-    let peer = st[stride() * k + 2];
-    release_trial(core, k);
-    if peer >= 0 {
-        release_trial(core, peer);
-    }
-    // The client's request ends here. (Every call but one passes the client; the one that passes an upstream does so because its client is
-    // already gone, and that client's line was written when it went.)
-    log_end(core, k);
-    admin_release(core, k);
-    conns.close(tab, k);
-    st[stride() * k] = 0;
-    if peer >= 0 && st[stride() * peer] == 1 {
-        conns.close(tab, peer);
-        st[stride() * peer] = 0;
-    }
-    return 0;
-}
-
-// What admin connection `k` is watched for: its head while it is being read, room to write while an answer is queued or being sent, nothing
-// while it waits for the buffer.
-fn admin_settle[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [poll] int {
-    let st = contents(core.state);
-    let p = stride() * k;
-    if st[p] != 1 {
-        return 0;
-    }
-    var want = 0;
-    if st[p + 3] == 0 {
-        want = 1;
-    } else if st[p + 3] == 2 || st[p + 3] == 3 {
-        want = 2;
-    }
-    if want != st[p + 6] {
-        conns.rewatch(tab, core.poller, k, token_of(k), want);
-        st[p + 6] = want;
-    }
-    return 0;
-}
-
 // What `k` is watched for now: room to write if output is queued, input if the phase wants it.
-fn settle[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [poll] int {
+fn settle[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> [poll] int {
     let st = contents(core.state);
-    let p = stride() * k;
+    let p = shared.stride() * k;
     if st[p] != 1 {
         return 0;
     }
     if st[p + 1] == 4 {
-        admin_settle(tab, core, k);
+        adminloop.admin_settle(tab, core, k);
+        return 0;
+    }
+    if st[p + 1] == 1 && st[p + tlsio.f_mode()] == tlsio.m_queued() {
+        // Accepted and waiting its turn for a handshake: not watched, its ClientHello waits in the kernel.
         return 0;
     }
     var want = 0;
-    if st[p + 5] > 0 {
+    if st[p + 5] > 0 || st[p + 1] == 1 && shared.tls_pending(core, k) {
         want = 2;
     }
     if st[p + 1] == 1 {
         // A client is read while its head or its body is arriving, or while it is lingering after a refusal; afterwards only a
         // hang-up matters, and the loop does not look for one (an HTTP client may half-close after its request).
-        if st[p + 3] == 0 || st[p + 3] == 5 || st[p + 3] == 3 && st[p + 10] == 0 && st[p + 4] < buf_size() && st[p + 14] == 0 {
+        if st[p + 3] == 0 || st[p + 3] == 5 || st[p + 3] == 3 && st[p + 10] == 0 && st[p + 4] < shared.buf_size() && st[p + 14] == 0 {
             want = want + 1;
+        }
+        if want % 2 == 1 && st[p + tlsio.f_cin()] > 0 && st[p + tlsio.f_mode()] != 0 {
+            // Ciphertext is held that the engine has not yet taken: the socket has nothing to add, and watching it would spin.
+            want = want - 1;
         }
     } else if st[p + 1] == 3 {
         // Idle in the pool: anything it says, or its closing, means it is no longer fit for use.
         want = 1;
     } else if st[p + 3] == 0 {
         want = 2;
-    } else if st[p + 14] == 0 && st[p + 4] < buf_size() {
+    } else if st[p + 14] == 0 && st[p + 4] < shared.buf_size() {
         want = want + 1;
     }
     if want != st[p + 6] {
-        conns.rewatch(tab, core.poller, k, token_of(k), want);
+        conns.rewatch(tab, core.poller, k, shared.token_of(k), want);
         st[p + 6] = want;
     }
     return 0;
 }
 
 // Close slot `k`, whatever it is, and forget it.
-fn close_slot[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [] int {
+fn close_slot[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> [] int {
     conns.close(tab, k);
-    contents(core.state)[stride() * k] = 0;
+    contents(core.state)[shared.stride() * k] = 0;
     return 0;
 }
 
-// How many idle connections to upstream `idx` the pool holds.
-fn idle_count[&c](core: &c Core, idx: int) -> [] int {
-    let st = contents(core.state);
-    var n = 0;
-    var k = 0;
-    while k < slot_limit() {
-        if st[stride() * k] == 1 && st[stride() * k + 1] == 3 && st[stride() * k + 11] == idx {
-            n = n + 1;
-        }
-        k = k + 1;
-    }
-    return n;
-}
-
 // An idle connection to upstream `idx`, or -1.
-fn pool_find[&c](core: &c Core, idx: int) -> [] int {
+fn pool_find[&c](core: &c shared.Core, idx: int) -> [] int {
     let st = contents(core.state);
     var k = 0;
-    while k < slot_limit() {
-        if st[stride() * k] == 1 && st[stride() * k + 1] == 3 && st[stride() * k + 11] == idx {
+    while k < shared.slot_limit() {
+        if st[shared.stride() * k] == 1 && st[shared.stride() * k + 1] == 3 && st[shared.stride() * k + 11] == idx {
             return k;
         }
         k = k + 1;
@@ -464,10 +141,10 @@ fn pool_find[&c](core: &c Core, idx: int) -> [] int {
 }
 
 // Upstream `u` has finished a response and may carry another request: keep it, if the pool has room, else close it.
-fn pool_return[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int) -> [poll] int {
+fn pool_return[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, now: int) -> [poll] int {
     let st = contents(core.state);
-    let p = stride() * u;
-    if pool_max() == 0 || idle_count(core, st[p + 11]) >= pool_max() {
+    let p = shared.stride() * u;
+    if shared.pool_max() == 0 || shared.idle_count(core, st[p + 11]) >= shared.pool_max() {
         close_slot(tab, core, u);
         return 0;
     }
@@ -476,7 +153,7 @@ fn pool_return[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int) -
     st[p + 3] = 1;
     st[p + 4] = 0;
     st[p + 5] = 0;
-    st[p + 7] = now + idle_ms();
+    st[p + 7] = now + shared.idle_ms();
     st[p + 8] = 0;
     st[p + 14] = 0;
     st[p + 16] = 0;
@@ -490,12 +167,12 @@ fn pool_return[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int) -
 }
 
 // The oldest idle connection is closed to make room. Answers 1 if there was one.
-fn evict_idle[&t, &c](tab: &!t conns.Table, core: &!c Core) -> [] int {
+fn evict_idle[&t, &c](tab: &!t conns.Table, core: &!c shared.Core) -> [] int {
     let st = contents(core.state);
     var oldest = 0 - 1;
     var k = 0;
-    while k < slot_limit() {
-        if st[stride() * k] == 1 && st[stride() * k + 1] == 3 && (oldest < 0 || st[stride() * k + 7] < st[stride() * oldest + 7]) {
+    while k < shared.slot_limit() {
+        if st[shared.stride() * k] == 1 && st[shared.stride() * k + 1] == 3 && (oldest < 0 || st[shared.stride() * k + 7] < st[shared.stride() * oldest + 7]) {
             oldest = k;
         }
         k = k + 1;
@@ -509,10 +186,10 @@ fn evict_idle[&t, &c](tab: &!t conns.Table, core: &!c Core) -> [] int {
 
 // May a request go to upstream `idx` now? 0: yes, the circuit is closed. 1: yes, as the single trial after the open period.
 // 2: no, the circuit is open, or a trial is already in flight.
-fn circuit_admit[&c](core: &!c Core, idx: int, now: int) -> [] int {
+fn circuit_admit[&c](core: &!c shared.Core, idx: int, now: int) -> [] int {
     let h = contents(core.health);
     let b = 4 * idx;
-    if circuit_threshold() == 0 || h[b + 1] == 0 {
+    if shared.circuit_threshold() == 0 || h[b + 1] == 0 {
         return 0;
     }
     if now < h[b + 1] {
@@ -522,12 +199,12 @@ fn circuit_admit[&c](core: &!c Core, idx: int, now: int) -> [] int {
     if h[b + 2] != 0 && now < h[b + 2] {
         return 2;
     }
-    h[b + 2] = now + connect_ms() + upstream_ms();
+    h[b + 2] = now + shared.connect_ms() + shared.upstream_ms();
     return 1;
 }
 
 // Upstream `idx` answered: the failures are forgotten and the circuit, if open, closes.
-fn health_ok[&c](core: &!c Core, idx: int) -> [] int {
+fn health_ok[&c](core: &!c shared.Core, idx: int) -> [] int {
     let h = contents(core.health);
     let b = 4 * idx;
     h[b] = 0;
@@ -539,21 +216,21 @@ fn health_ok[&c](core: &!c Core, idx: int) -> [] int {
 // Upstream `idx` failed (it would not connect, did not answer in time, hung up without answering on a fresh connection, or said
 // something unreadable). Enough in a row opens the circuit, and its idle pooled connections go. The count is not reset when the
 // circuit opens, so a failed trial after the open period reopens it at once.
-fn health_fail[&t, &c](tab: &!t conns.Table, core: &!c Core, idx: int, now: int) -> [] int {
+fn health_fail[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, idx: int, now: int) -> [] int {
     metrics.upstream_failed(contents(core.stats), idx);
-    if circuit_threshold() == 0 {
+    if shared.circuit_threshold() == 0 {
         return 0;
     }
     let h = contents(core.health);
     let st = contents(core.state);
     let b = 4 * idx;
     h[b] = h[b] + 1;
-    if h[b] >= circuit_threshold() {
-        h[b + 1] = now + circuit_open_ms();
+    if h[b] >= shared.circuit_threshold() {
+        h[b + 1] = now + shared.circuit_open_ms();
         h[b + 2] = 0;
         var k = 0;
-        while k < slot_limit() {
-            if st[stride() * k] == 1 && st[stride() * k + 1] == 3 && st[stride() * k + 11] == idx {
+        while k < shared.slot_limit() {
+            if st[shared.stride() * k] == 1 && st[shared.stride() * k + 1] == 3 && st[shared.stride() * k + 11] == idx {
                 close_slot(tab, core, k);
             }
             k = k + 1;
@@ -565,17 +242,17 @@ fn health_fail[&t, &c](tab: &!t conns.Table, core: &!c Core, idx: int, now: int)
 // Upstream `u` has hung up, failed, or been written to in vain. If it was a pooled connection that died before saying anything and
 // the request may be sent again (no body, idempotent) and has not been, it is sent again on a fresh connection; otherwise
 // the client is answered 502, or, if the response was under way, simply closed.
-fn upstream_lost[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int) -> [poll] int {
+fn upstream_lost[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, now: int) -> [conn_write, poll] int {
     let st = contents(core.state);
-    let p = stride() * u;
+    let p = shared.stride() * u;
     let client = st[p + 2];
-    if client < 0 || st[stride() * client] != 1 {
+    if client < 0 || st[shared.stride() * client] != 1 {
         close_slot(tab, core, u);
         return 0;
     }
-    let pc = stride() * client;
+    let pc = shared.stride() * client;
     if st[p + 16] == 1 {
-        drop_session(tab, core, client);
+        shared.drop_session(tab, core, client);
         return 0;
     }
     if st[p + 20] == 0 && st[p + 16] == 0 {
@@ -587,7 +264,7 @@ fn upstream_lost[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int)
         st[pc + 2] = 0 - 1;
         st[pc + 3] = 1;
         st[pc + 17] = 1;
-        st[pc + 7] = now + connect_ms();
+        st[pc + 7] = now + shared.connect_ms();
         return 0;
     }
     refuse(tab, core, client, 502, "proxy.upstream-closed", now);
@@ -596,16 +273,20 @@ fn upstream_lost[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int)
 
 // Write what is queued for `k`, and, once nothing is left and `k` is to close, close it (a refusal first lingers). Answers 1 if
 // the session ended or the upstream was replaced (the write failed, or `k` has closed).
-fn flush[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, now: int) -> [conn_write, poll] int {
+fn flush[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: int) -> [conn_write, poll] int {
     let st = contents(core.state);
     let pd = contents(core.pends);
-    let p = stride() * k;
-    let base = k * pend_size();
+    let p = shared.stride() * k;
+    let base = k * shared.pend_size();
     if st[p] != 1 {
         return 0;
     }
+    if st[p + 5] == 0 && shared.tls_drain(tab, core, k) < 0 {
+        shared.drop_session(tab, core, k);
+        return 1;
+    }
     if st[p + 5] > 0 {
-        match conns.write(tab, k, pd[base..base + st[p + 5]]) {
+        match shared.client_write(tab, core, k, pd[base..base + st[p + 5]]) {
             Sent::Wrote(n) => {
                 copy_into(pd[base..base + st[p + 5] - n], pd[base + n..base + st[p + 5]]);
                 st[p + 5] = st[p + 5] - n;
@@ -616,19 +297,19 @@ fn flush[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, now: int) -> [con
                 if st[p + 1] == 2 {
                     upstream_lost(tab, core, k, now);
                 } else {
-                    drop_session(tab, core, k);
+                    shared.drop_session(tab, core, k);
                 }
                 return 1;
             }
         }
     }
-    if st[p + 5] == 0 && st[p + 8] == 1 {
+    if st[p + 5] == 0 && st[p + 8] == 1 && !shared.tls_pending(core, k) {
         if st[p + 1] == 1 && st[p + 3] == 4 {
             // A final answer is out while the client may still be sending: linger, reading and discarding, until it stops or
             // the time is up.
             st[p + 3] = 5;
             st[p + 8] = 0;
-            st[p + 7] = now + linger_ms();
+            st[p + 7] = now + shared.linger_ms();
             // The lingering cap: the request's own total deadline, or three seconds, whichever comes first.
             if st[p + 12] == 0 || st[p + 12] > now + 3000 {
                 st[p + 12] = now + 3000;
@@ -636,7 +317,7 @@ fn flush[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, now: int) -> [con
             settle(tab, core, k);
             return 0;
         }
-        drop_session(tab, core, k);
+        shared.drop_session(tab, core, k);
         return 1;
     }
     return 0;
@@ -645,29 +326,29 @@ fn flush[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, now: int) -> [con
 // Refuse the request of client `k` with `status` and `rule`: the upstream, if any, is closed, and a problem+json response is
 // queued and the connection closed once it is sent (the poller reports the socket writable at once). If a response has already
 // begun there is nothing honest to send: the session just ends.
-fn refuse[&t, &c, &r](tab: &!t conns.Table, core: &!c Core, k: int, status: int, rule: &r [byte], now: int) -> [poll] int {
+fn refuse[&t, &c, &r](tab: &!t conns.Table, core: &!c shared.Core, k: int, status: int, rule: &r [byte], now: int) -> [conn_write, poll] int {
     let st = contents(core.state);
     let pd = contents(core.pends);
-    let p = stride() * k;
-    release_trial(core, k);
+    let p = shared.stride() * k;
+    shared.release_trial(core, k);
     if st[p + 13] == 1 {
-        drop_session(tab, core, k);
+        shared.drop_session(tab, core, k);
         return 0;
     }
     let peer = st[p + 2];
-    if peer >= 0 && st[stride() * peer] == 1 {
+    if peer >= 0 && st[shared.stride() * peer] == 1 {
         conns.close(tab, peer);
-        st[stride() * peer] = 0;
+        st[shared.stride() * peer] = 0;
     }
     st[p + 2] = 0 - 1;
     // The record of the refusal, for the access log: its status and rule, and that the gateway made it.
     st[p + 29] = status;
-    flag_set(core, k, 1);
-    meta_put(core, k, 68, 40, 1, rule);
-    let base = k * pend_size();
-    let n = problem.response(pd[base..base + pend_size()], status, rule, meta_get(core, k, 4, 0));
+    shared.flag_set(core, k, 1);
+    shared.meta_put(core, k, 68, 40, 1, rule);
+    let base = k * shared.pend_size();
+    let n = problem.response(pd[base..base + shared.pend_size()], status, rule, shared.meta_get(core, k, 4, 0));
     if n < 0 {
-        drop_session(tab, core, k);
+        shared.drop_session(tab, core, k);
         return 0;
     }
     st[p + 5] = n;
@@ -675,7 +356,7 @@ fn refuse[&t, &c, &r](tab: &!t conns.Table, core: &!c Core, k: int, status: int,
     st[p + 8] = 1;
     st[p + 3] = 4;
     st[p + 4] = 0;
-    st[p + 7] = now + flush_ms();
+    st[p + 7] = now + shared.flush_ms();
     settle(tab, core, k);
     return 0;
 }
@@ -683,15 +364,15 @@ fn refuse[&t, &c, &r](tab: &!t conns.Table, core: &!c Core, k: int, status: int,
 // The upstream's response is complete: the client's connection ends once what is queued for it has been written, and the
 // upstream goes back to the pool if it may carry another request (its framing allows it, nothing is left unread, the request's
 // body was fully sent and the upstream did not hang up), else it is closed.
-fn finish_response[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int) -> [conn_write, poll] int {
+fn finish_response[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, now: int) -> [conn_write, poll] int {
     let st = contents(core.state);
-    let pu = stride() * u;
+    let pu = shared.stride() * u;
     let client = st[pu + 2];
-    let pc = stride() * client;
+    let pc = shared.stride() * client;
     let reuse = st[pu + 19] == 1 && st[pu + 4] == 0 && st[pc + 10] == 1 && st[pu + 14] == 0;
     st[pc + 2] = 0 - 1;
     st[pc + 8] = 1;
-    flag_set(core, client, 2);
+    shared.flag_set(core, client, 2);
     if st[pc + 10] == 0 {
         // The upstream answered before the request body was all sent: the client may still be sending, so it lingers.
         st[pc + 3] = 4;
@@ -709,21 +390,21 @@ fn finish_response[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: in
 
 // Move what the upstream `u` has said to its client: first its head (parsed, rewritten, interim responses passed on), then its
 // body as its framing says, as far as the client's queue has room.
-fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int) -> [conn_write, poll] int {
+fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, now: int) -> [conn_write, poll] int {
     let st = contents(core.state);
     let bf = contents(core.bufs);
     let pd = contents(core.pends);
     let ch = contents(core.chunks);
     let tb = contents(core.table);
-    let pu = stride() * u;
+    let pu = shared.stride() * u;
     let client = st[pu + 2];
-    if client < 0 || st[stride() * client] != 1 {
+    if client < 0 || st[shared.stride() * client] != 1 {
         close_slot(tab, core, u);
         return 0;
     }
-    let pc = stride() * client;
-    let ub = u * buf_size();
-    let cb = client * pend_size();
+    let pc = shared.stride() * client;
+    let ub = u * shared.buf_size();
+    let cb = client * shared.pend_size();
     var going = true;
     while going {
         going = false;
@@ -736,7 +417,7 @@ fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int)
                     refuse(tab, core, client, response.status(0 - r), response.tag(0 - r), now);
                     return 0;
                 }
-                if r > 0 && pend_size() - st[pc + 5] >= r + 64 {
+                if r > 0 && shared.pend_size() - st[pc + 5] >= r + 64 {
                     if response.interim(tb) {
                         // Passed on as it came; the final response is still to come.
                         copy_into(pd[cb + st[pc + 5]..cb + st[pc + 5] + r], view[0..r]);
@@ -745,9 +426,9 @@ fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int)
                         st[pc + 13] = 1;
                     } else {
                         health_ok(core, st[pu + 11]);
-                        let m = forward.rewrite_response(view[0..r], tb, pd[cb + st[pc + 5]..cb + pend_size()], meta_get(core, client, 4, 0));
+                        let m = forward.rewrite_response(view[0..r], tb, pd[cb + st[pc + 5]..cb + shared.pend_size()], shared.meta_get(core, client, 4, 0));
                         if m < 0 {
-                            drop_session(tab, core, client);
+                            shared.drop_session(tab, core, client);
                             return 0;
                         }
                         st[pc + 5] = st[pc + 5] + m;
@@ -784,7 +465,7 @@ fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int)
                 }
             }
         } else {
-            var room = pend_size() - st[pc + 5];
+            var room = shared.pend_size() - st[pc + 5];
             var take = st[pu + 4];
             if take > room {
                 take = room;
@@ -804,7 +485,7 @@ fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int)
                     let n = chunked.advance(bf[ub..ub + take], slot_chunks);
                     if n < 0 {
                         // A body that is not valid chunked framing: nothing honest to do but end the session.
-                        drop_session(tab, core, client);
+                        shared.drop_session(tab, core, client);
                         return 0;
                     }
                     used = n;
@@ -843,28 +524,28 @@ fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int)
 }
 
 // Move request-body bytes from client `c`'s buffer to its upstream's queue, framed, and write them as far as there is room.
-fn pump_request[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, now: int) -> [conn_write, poll] int {
+fn pump_request[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: int) -> [conn_write, poll] int {
     let st = contents(core.state);
     let bf = contents(core.bufs);
     let pd = contents(core.pends);
     let ch = contents(core.chunks);
-    let p = stride() * k;
+    let p = shared.stride() * k;
     let u = st[p + 2];
-    if u < 0 || st[stride() * u] != 1 || st[stride() * u + 3] != 1 {
+    if u < 0 || st[shared.stride() * u] != 1 || st[shared.stride() * u + 3] != 1 {
         return 0;
     }
-    let pu = stride() * u;
+    let pu = shared.stride() * u;
     var moving = true;
     while moving {
         moving = false;
         if st[p + 10] == 0 && st[p + 4] > 0 {
-            var room = pend_size() - st[pu + 5];
+            var room = shared.pend_size() - st[pu + 5];
             var take = st[p + 4];
             if take > room {
                 take = room;
             }
-            let cb = k * buf_size();
-            let ub = u * pend_size();
+            let cb = k * shared.buf_size();
+            let ub = u * shared.pend_size();
             if take > 0 {
                 var used = take;
                 if st[p + 9] >= 0 {
@@ -915,13 +596,13 @@ fn pump_request[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, now: int) 
 }
 
 // Client `k` has bytes while its head is arriving: judge them, route the request, and ask for an upstream connection.
-fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, now: int) -> [poll] int {
+fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: int) -> [conn_write, poll] int {
     let st = contents(core.state);
     let bf = contents(core.bufs);
     let tb = contents(core.table);
     let ch = contents(core.chunks);
-    let p = stride() * k;
-    let base = k * buf_size();
+    let p = shared.stride() * k;
+    let base = k * shared.buf_size();
     let view = bf[base..base + st[p + 4]];
     let r = framing.judge(view, tb);
     if r == 0 {
@@ -933,8 +614,8 @@ fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, now: int) ->
         return 0;
     }
     // The head is good: keep what the access log will say about it (the head's buffer is reused as the request goes on).
-    meta_put(core, k, 108, 16, 2, http.method(view, tb));
-    meta_put(core, k, 124, 128, 3, http.path(view, tb));
+    shared.meta_put(core, k, 108, 16, 2, http.method(view, tb));
+    shared.meta_put(core, k, 124, 128, 3, http.path(view, tb));
     let sel = route.select(http.header(view, tb, "host"), http.method(view, tb), http.path(view, tb));
     if sel < 0 {
         refuse(tab, core, k, route.status(0 - sel), route.tag(0 - sel), now);
@@ -975,7 +656,7 @@ fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, now: int) ->
     st[p + 23] = st[p + 23] / 2 * 2 + route.trust_forwarded(sel);
     let own = forward.id_choice(view, tb, route.trust_forwarded(sel) == 1);
     if own >= 0 {
-        meta_put(core, k, 4, 64, 0, forward.id_value(view, tb, own));
+        shared.meta_put(core, k, 4, 64, 0, forward.id_value(view, tb, own));
     }
     st[p + 25] = now;
     // A request with no body and an idempotent method may be sent again, once, if a pooled connection turns out to be dead.
@@ -990,28 +671,28 @@ fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, now: int) ->
         st[p + 18] = 1;
     }
     st[p + 3] = 1;
-    st[p + 7] = now + connect_ms();
+    st[p + 7] = now + shared.connect_ms();
     settle(tab, core, k);
     return 0;
 }
 
 // Write the request head for client `k` into the queue of upstream slot `slot` (already in the table and initialised), and tie
 // the two together. Answers 1 if that failed and the client was refused.
-fn attach[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, slot: int, now: int) -> [poll] int {
+fn attach[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, slot: int, now: int) -> [conn_write, poll] int {
     let st = contents(core.state);
     let bf = contents(core.bufs);
     let pd = contents(core.pends);
     let tb = contents(core.table);
-    let p = stride() * k;
-    let q = stride() * slot;
+    let p = shared.stride() * k;
+    let q = shared.stride() * slot;
     // Rebuild the head's parse (another client may have used the table since) and rewrite it for the upstream.
-    let kb = k * buf_size();
+    let kb = k * shared.buf_size();
     let view = bf[kb..kb + st[p + 15]];
     var failed = 0;
     if http.parse(view, tb) < 0 {
         failed = 1;
     } else {
-        let m = forward.rewrite(view, tb, pd[slot * pend_size()..slot * pend_size() + pend_size()], pool_max() > 0, st[p + 23] % 2 == 1, meta_get(core, k, 4, 0));
+        let m = forward.rewrite(view, tb, pd[slot * shared.pend_size()..slot * shared.pend_size() + shared.pend_size()], shared.pool_max() > 0, st[p + 23] % 2 == 1, st[p + tlsio.f_mode()] != 0, shared.meta_get(core, k, 4, 0));
         if m < 0 {
             failed = 0 - m + 1;
         } else {
@@ -1043,10 +724,10 @@ fn attach[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, slot: int, now: 
 
 // Give client `k` an upstream connection, from the pool if there is an idle one (and this is not a second attempt), else a
 // new one, and put the request head in its queue. Owns the table because `conns.put` does.
-fn dial[&h, &n, &c](heap: &!h Heap, tab: conns.Table, net: &n Net(""), core: &!c Core, k: int, now: int) -> [heap, conn_write, poll, net_out("")] conns.Table {
+fn dial[&h, &n, &c](heap: &!h Heap, tab: conns.Table, net: &n Net(""), core: &!c shared.Core, k: int, now: int) -> [heap, conn_write, poll, net_out("")] conns.Table {
     var table = tab;
     let st = contents(core.state);
-    let p = stride() * k;
+    let p = shared.stride() * k;
     let idx = st[p + 11];
     let addr = deploy.upstream_addr(idx);
     if !egress.allowed(addr) {
@@ -1060,7 +741,7 @@ fn dial[&h, &n, &c](heap: &!h Heap, tab: conns.Table, net: &n Net(""), core: &!c
         pooled = pool_find(core, idx);
     }
     if pooled >= 0 {
-        let q = stride() * pooled;
+        let q = shared.stride() * pooled;
         st[q + 1] = 2;
         st[q + 2] = k;
         st[q + 3] = 1;
@@ -1078,7 +759,7 @@ fn dial[&h, &n, &c](heap: &!h Heap, tab: conns.Table, net: &n Net(""), core: &!c
         borrow mut table as &!tw in {
             if attach(tw, core, k, pooled, now) == 0 {
                 st[p + 3] = 3;
-                st[p + 7] = now + upstream_ms();
+                st[p + 7] = now + shared.upstream_ms();
                 // pump_request writes the head and then settles both sessions, so the pooled connection's interest changes at most
                 // once (and not at all when the write completes): settling first would arm and disarm write interest around it.
                 pump_request(tw, core, k, now);
@@ -1098,7 +779,7 @@ fn dial[&h, &n, &c](heap: &!h Heap, tab: conns.Table, net: &n Net(""), core: &!c
         Dialed::Ok(conn) => {
             let (grown, slot) = conns.put(heap, table, conn);
             table = grown;
-            if slot < 0 || slot >= slot_limit() {
+            if slot < 0 || slot >= shared.slot_limit() {
                 borrow mut table as &!tw in {
                     if slot >= 0 {
                         conns.close(tw, slot);
@@ -1107,7 +788,7 @@ fn dial[&h, &n, &c](heap: &!h Heap, tab: conns.Table, net: &n Net(""), core: &!c
                 }
                 return table;
             }
-            let q = stride() * slot;
+            let q = shared.stride() * slot;
             st[q] = 1;
             st[q + 1] = 2;
             st[q + 2] = k;
@@ -1128,13 +809,13 @@ fn dial[&h, &n, &c](heap: &!h Heap, tab: conns.Table, net: &n Net(""), core: &!c
             borrow mut table as &!tw in {
                 let ignored = conns.nodelay(tw, slot);
                 if attach(tw, core, k, slot, now) == 0 {
-                    if conns.watch(tw, core.poller, slot, token_of(slot), 2) != 0 {
+                    if conns.watch(tw, core.poller, slot, shared.token_of(slot), 2) != 0 {
                         close_slot(tw, core, slot);
                         refuse(tw, core, k, 502, "proxy.connect", now);
                     } else {
                         st[q + 6] = 2;
                         st[p + 3] = 2;
-                        st[p + 7] = now + connect_ms();
+                        st[p + 7] = now + shared.connect_ms();
                         settle(tw, core, k);
                     }
                 }
@@ -1150,12 +831,14 @@ fn dial[&h, &n, &c](heap: &!h Heap, tab: conns.Table, net: &n Net(""), core: &!c
     return table;
 }
 
-fn read_client[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, now: int) -> [conn_read, conn_write, poll] int {
+fn read_client[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: int) -> [conn_read, conn_write, poll] int {
     let st = contents(core.state);
     let bf = contents(core.bufs);
-    let p = stride() * k;
-    let base = k * buf_size();
-    match conns.read(tab, k, bf[base + st[p + 4]..base + buf_size()]) {
+    let p = shared.stride() * k;
+    let base = k * shared.buf_size();
+    let heard = shared.client_read(tab, core, k, bf[base + st[p + 4]..base + shared.buf_size()]);
+    shared.tls_promote(core, k, now);
+    match heard {
         Received::Data(got) => {
             st[p + 4] = st[p + 4] + got;
             if st[p + 3] == 0 {
@@ -1167,7 +850,7 @@ fn read_client[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, now: int) -
         Received::End => {
             if st[p + 3] == 0 || st[p + 10] == 0 {
                 // It left before its request was whole.
-                drop_session(tab, core, k);
+                shared.drop_session(tab, core, k);
             } else {
                 st[p + 14] = 1;
                 settle(tab, core, k);
@@ -1176,18 +859,18 @@ fn read_client[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, now: int) -
         Received::Again => {
         }
         Received::Failed(e) => {
-            drop_session(tab, core, k);
+            shared.drop_session(tab, core, k);
         }
     }
     return 0;
 }
 
-fn read_upstream[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int) -> [conn_read, conn_write, poll] int {
+fn read_upstream[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, now: int) -> [conn_read, conn_write, poll] int {
     let st = contents(core.state);
     let bf = contents(core.bufs);
-    let p = stride() * u;
-    let base = u * buf_size();
-    match conns.read(tab, u, bf[base + st[p + 4]..base + buf_size()]) {
+    let p = shared.stride() * u;
+    let base = u * shared.buf_size();
+    match conns.read(tab, u, bf[base + st[p + 4]..base + shared.buf_size()]) {
         Received::Data(got) => {
             st[p + 4] = st[p + 4] + got;
             pump_response(tab, core, u, now);
@@ -1206,310 +889,15 @@ fn read_upstream[&t, &c](tab: &!t conns.Table, core: &!c Core, u: int, now: int)
     return 0;
 }
 
-// ---- the admin listener (docs/observability.md section 7) ----
-
-// Fill the gauges of a scrape: uptime, clients being served, whether the log failed in the last ten seconds, and per upstream its idle pooled
-// connections and whether its circuit is open (it is not "open" once its period has run out: a trial is then allowed, and a gateway that
-// reported itself not ready would be sent no traffic to take that trial with).
-fn gauge_fill[&c](core: &!c Core, now: int) -> [] int {
-    let st = contents(core.state);
-    let g = contents(core.gauge);
-    let ids = contents(core.ids);
-    let h = contents(core.health);
-    var live = 0;
-    var k = 0;
-    while k < slot_limit() {
-        if st[stride() * k] == 1 && st[stride() * k + 1] == 1 {
-            live = live + 1;
-        }
-        k = k + 1;
-    }
-    g[0] = now - ids[0];
-    g[1] = live;
-    g[2] = 0;
-    if ids[9] != 0 && now - ids[9] < 10000 {
-        g[2] = 1;
-    }
-    g[3] = ids[6];
-    g[4] = ids[7];
-    var i = 0;
-    while i < deploy.upstream_count() {
-        g[5 + 2 * i] = idle_count(core, i);
-        g[6 + 2 * i] = 0;
-        if circuit_threshold() > 0 && h[4 * i + 1] != 0 && now < h[4 * i + 1] {
-            g[6 + 2 * i] = 1;
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
-// Queue a problem+json refusal for admin connection `k`; it is closed once the answer is written.
-fn admin_error[&t, &c, &r](tab: &!t conns.Table, core: &!c Core, k: int, status: int, rule: &r [byte], now: int) -> [poll] int {
-    let st = contents(core.state);
-    let pd = contents(core.pends);
-    let p = stride() * k;
-    let base = k * pend_size();
-    let n = problem.response(pd[base..base + pend_size()], status, rule, "admin");
-    if n < 0 {
-        drop_session(tab, core, k);
-        return 0;
-    }
-    st[p + 5] = n;
-    st[p + 8] = 1;
-    st[p + 3] = 2;
-    st[p + 4] = 0;
-    admin_settle(tab, core, k);
-    return 0;
-}
-
-// Answer `/healthz` or `/readyz` from `pends[k]`: they are a few bytes, so they do not take the metrics buffer.
-fn admin_small[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, code: int, now: int) -> [poll] int {
-    gauge_fill(core, now);
-    let st = contents(core.state);
-    let pd = contents(core.pends);
-    let p = stride() * k;
-    let base = k * pend_size();
-    var end = 0 - 1;
-    var status = 200;
-    if code == admin.healthz() {
-        end = out.put(pd[base..base + pend_size()], metrics.head_room(), "{\"alive\":true}\n");
-    } else {
-        end = metrics.ready_body(pd[base..base + pend_size()], metrics.head_room(), contents(core.gauge));
-        if metrics.is_ready(contents(core.gauge)) == 0 {
-            status = 503;
-        }
-    }
-    var start = 0 - 1;
-    if end >= 0 {
-        start = metrics.frame(pd[base..base + pend_size()], status, "application/json", end);
-    }
-    if start < 0 {
-        admin_error(tab, core, k, 500, "admin.size", now);
-        return 0;
-    }
-    copy_into(pd[base..base + end - start], pd[base + start..base + end]);
-    st[p + 5] = end - start;
-    st[p + 8] = 1;
-    st[p + 3] = 2;
-    st[p + 4] = 0;
-    admin_settle(tab, core, k);
-    return 0;
-}
-
-// Build the metrics answer for admin connection `k` into the shared buffer, which it now owns until it is closed. (`prom`: the Prometheus text.)
-fn admin_metrics[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, prom: bool, now: int) -> [poll] int {
-    gauge_fill(core, now);
-    let st = contents(core.state);
-    let p = stride() * k;
-    let ab = contents(core.abuf);
-    var end = 0 - 1;
-    var ctype = "application/json";
-    if prom {
-        ctype = "text/plain; version=0.0.4; charset=utf-8";
-        end = metrics.prometheus(ab, metrics.head_room(), contents(core.stats), contents(core.rnames), contents(core.gauge));
-    } else {
-        end = metrics.json(ab, metrics.head_room(), contents(core.stats), contents(core.rnames), contents(core.gauge));
-    }
-    var start = 0 - 1;
-    if end >= 0 {
-        start = metrics.frame(ab, 200, ctype, end);
-    }
-    if start < 0 {
-        admin_error(tab, core, k, 500, "admin.size", now);
-        return 0;
-    }
-    contents(core.ids)[8] = k + 1;
-    st[p + 9] = start;
-    st[p + 5] = end - start;
-    st[p + 3] = 3;
-    st[p + 4] = 0;
-    admin_settle(tab, core, k);
-    return 0;
-}
-
-// Give the metrics buffer to a waiting admin connection, if it is free.
-fn admin_pump[&t, &c](tab: &!t conns.Table, core: &!c Core, now: int) -> [poll] int {
-    let st = contents(core.state);
-    if contents(core.ids)[8] != 0 {
-        return 0;
-    }
-    var k = 0;
-    while k < slot_limit() {
-        if st[stride() * k] == 1 && st[stride() * k + 1] == 4 && st[stride() * k + 3] == 1 {
-            admin_metrics(tab, core, k, st[stride() * k + 9] == 1, now);
-            return 0;
-        }
-        k = k + 1;
-    }
-    return 0;
-}
-
-// The head of admin connection `k` is complete (`end` bytes of `bufs[k]`): refuse it, or answer it.
-fn admin_request[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, end: int, now: int) -> [poll] int {
-    let st = contents(core.state);
-    let bf = contents(core.bufs);
-    let p = stride() * k;
-    let code = admin.parse(bf[k * buf_size()..k * buf_size() + end]);
-    if code >= 10 {
-        admin_error(tab, core, k, admin.status(code), admin.tag(code), now);
-        return 0;
-    }
-    if code == admin.healthz() || code == admin.readyz() {
-        admin_small(tab, core, k, code, now);
-        return 0;
-    }
-    st[p + 9] = code;
-    st[p + 3] = 1;
-    st[p + 4] = 0;
-    admin_settle(tab, core, k);
-    admin_pump(tab, core, now);
-    return 0;
-}
-
-// Write what is left of the metrics answer; the connection ends when it is all out.
-fn admin_write[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, now: int) -> [conn_write] int {
-    let st = contents(core.state);
-    let ab = contents(core.abuf);
-    let p = stride() * k;
-    match conns.write(tab, k, ab[st[p + 9]..st[p + 9] + st[p + 5]]) {
-        Sent::Wrote(n) => {
-            st[p + 9] = st[p + 9] + n;
-            st[p + 5] = st[p + 5] - n;
-            if st[p + 5] == 0 {
-                drop_session(tab, core, k);
-            }
-        }
-        Sent::Again => {
-        }
-        Sent::Failed(e) => {
-            drop_session(tab, core, k);
-        }
-    }
-    return 0;
-}
-
-fn admin_step[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, readiness: int, now: int) -> [conn_read, conn_write, poll] int {
-    let st = contents(core.state);
-    let bf = contents(core.bufs);
-    let p = stride() * k;
-    let base = k * buf_size();
-    let phase = st[p + 3];
-    if phase == 0 {
-        if readiness % 2 == 1 {
-            match conns.read(tab, k, bf[base + st[p + 4]..base + admin_head_max()]) {
-                Received::Data(got) => {
-                    st[p + 4] = st[p + 4] + got;
-                    let end = admin.head_end(bf[base..base + st[p + 4]]);
-                    if end >= 0 {
-                        admin_request(tab, core, k, end, now);
-                    } else if st[p + 4] >= admin_head_max() {
-                        admin_error(tab, core, k, 431, "admin.head", now);
-                    }
-                }
-                Received::End => {
-                    drop_session(tab, core, k);
-                }
-                Received::Again => {
-                }
-                Received::Failed(e) => {
-                    drop_session(tab, core, k);
-                }
-            }
-        }
-        return 0;
-    }
-    if phase == 2 {
-        if readiness % 4 >= 2 {
-            flush(tab, core, k, now);
-        } else {
-            drop_session(tab, core, k);
-        }
-        return 0;
-    }
-    if phase == 3 {
-        if readiness % 4 >= 2 {
-            admin_write(tab, core, k, now);
-        } else {
-            drop_session(tab, core, k);
-        }
-        return 0;
-    }
-    // Waiting for the buffer: it asked for nothing, so any event is the peer going away.
-    drop_session(tab, core, k);
-    return 0;
-}
-
-// Take every connection waiting on the admin listener, up to the limit.
-fn accept_admin[&h, &l, &c](heap: &!h Heap, conn: conns.Table, listener: &!l Listener, core: &!c Core, now: int) -> [heap, conn_accept, poll] conns.Table {
-    let st = contents(core.state);
-    var table = conn;
-    var more = true;
-    while more {
-        match tcp_accept(listener) {
-            Accepted::Ok(c) => {
-                var open = 0;
-                var k = 0;
-                while k < slot_limit() {
-                    if st[stride() * k] == 1 && st[stride() * k + 1] == 4 {
-                        open = open + 1;
-                    }
-                    k = k + 1;
-                }
-                var held = 0;
-                borrow table as &tt in {
-                    held = conns.live(tt);
-                }
-                if open >= admin_max() || held + 1 > slot_limit() {
-                    conn_close(c);
-                } else {
-                    let (grown, slot) = conns.put(heap, table, c);
-                    table = grown;
-                    if slot >= slot_limit() {
-                        borrow mut table as &!ct in {
-                            conns.close(ct, slot);
-                        }
-                    } else if slot >= 0 {
-                        let p = stride() * slot;
-                        st[p] = 1;
-                        st[p + 1] = 4;
-                        st[p + 2] = 0 - 1;
-                        st[p + 3] = 0;
-                        st[p + 4] = 0;
-                        st[p + 5] = 0;
-                        st[p + 6] = 1;
-                        st[p + 7] = now + admin_ms();
-                        st[p + 8] = 0;
-                        st[p + 9] = 0;
-                        borrow mut table as &!ct in {
-                            if conns.nonblocking(ct, slot) != 0 || conns.watch(ct, core.poller, slot, token_of(slot), 1) != 0 {
-                                conns.close(ct, slot);
-                                st[p] = 0;
-                            }
-                        }
-                    }
-                }
-            }
-            Accepted::Again => {
-                more = false;
-            }
-            Accepted::Failed(e) => {
-                more = false;
-            }
-        }
-    }
-    return table;
-}
-
 // The poller said slot `k` is ready: readiness 1 is readable (or hung up), 2 is writable.
-fn step[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, readiness: int, now: int) -> [conn_read, conn_write, poll] int {
+fn step[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, readiness: int, now: int) -> [conn_read, conn_write, poll] int {
     let st = contents(core.state);
-    let p = stride() * k;
+    let p = shared.stride() * k;
     if st[p] != 1 {
         return 0;
     }
     if st[p + 1] == 4 {
-        admin_step(tab, core, k, readiness, now);
+        adminloop.admin_step(tab, core, k, readiness, now);
         return 0;
     }
     if st[p + 1] == 1 {
@@ -1517,38 +905,38 @@ fn step[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, readiness: int, no
             if readiness % 4 >= 2 {
                 flush(tab, core, k, now);
             } else {
-                drop_session(tab, core, k);
+                shared.drop_session(tab, core, k);
             }
             return 0;
         }
         if st[p + 3] == 5 {
             // Lingering: read and discard until the client closes.
             let bf = contents(core.bufs);
-            match conns.read(tab, k, bf[k * buf_size()..k * buf_size() + buf_size()]) {
+            match shared.client_read(tab, core, k, bf[k * shared.buf_size()..k * shared.buf_size() + shared.buf_size()]) {
                 Received::Data(got) => {
                     // Still sending: wait for it to stop, up to the lingering cap.
-                    if now + linger_ms() < st[p + 12] {
-                        st[p + 7] = now + linger_ms();
+                    if now + shared.linger_ms() < st[p + 12] {
+                        st[p + 7] = now + shared.linger_ms();
                     }
                 }
                 Received::End => {
-                    drop_session(tab, core, k);
+                    shared.drop_session(tab, core, k);
                 }
                 Received::Again => {
                 }
                 Received::Failed(e) => {
-                    drop_session(tab, core, k);
+                    shared.drop_session(tab, core, k);
                 }
             }
             return 0;
         }
-        if st[p + 5] > 0 && readiness % 4 >= 2 {
+        if (st[p + 5] > 0 || st[p + tlsio.f_mode()] >= tlsio.m_handshake()) && readiness % 4 >= 2 {
             if flush(tab, core, k, now) == 1 {
                 return 0;
             }
             // Room has opened for more of the response.
             let up = st[p + 2];
-            if up >= 0 && st[stride() * up] == 1 {
+            if up >= 0 && st[shared.stride() * up] == 1 {
                 pump_response(tab, core, up, now);
             }
             if st[p] != 1 {
@@ -1567,8 +955,8 @@ fn step[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, readiness: int, no
     }
     // An upstream connection.
     let client = st[p + 2];
-    if client < 0 || st[stride() * client] != 1 {
-        drop_session(tab, core, k);
+    if client < 0 || st[shared.stride() * client] != 1 {
+        shared.drop_session(tab, core, k);
         return 0;
     }
     if st[p + 3] == 0 {
@@ -1579,8 +967,8 @@ fn step[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, readiness: int, no
             return 0;
         }
         st[p + 3] = 1;
-        st[stride() * client + 3] = 3;
-        st[stride() * client + 7] = now + upstream_ms();
+        st[shared.stride() * client + 3] = 3;
+        st[shared.stride() * client + 7] = now + shared.upstream_ms();
         pump_request(tab, core, client, now);
         return 0;
     }
@@ -1601,11 +989,11 @@ fn step[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, readiness: int, no
 
 // Deadlines: a client whose phase or whole request has run out of time is answered 408 or 504, or, if its response has
 // begun, simply closed.
-fn sweep[&t, &c](tab: &!t conns.Table, core: &!c Core, now: int) -> [poll] int {
+fn sweep[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, now: int) -> [conn_write, poll] int {
     let st = contents(core.state);
     var k = 0;
-    while k < slot_limit() {
-        let p = stride() * k;
+    while k < shared.slot_limit() {
+        let p = shared.stride() * k;
         if st[p] == 1 && st[p + 1] == 3 && now >= st[p + 7] {
             close_slot(tab, core, k);
         }
@@ -1613,12 +1001,17 @@ fn sweep[&t, &c](tab: &!t conns.Table, core: &!c Core, now: int) -> [poll] int {
             if st[p + 3] == 1 {
                 // Waited the whole exchange for the metrics buffer: say so, and give the answer a second to be written.
                 st[p + 7] = now + 1000;
-                admin_error(tab, core, k, 503, "admin.busy", now);
+                adminloop.admin_error(tab, core, k, 503, "admin.busy", now);
             } else {
-                drop_session(tab, core, k);
+                shared.drop_session(tab, core, k);
             }
         }
-        if st[p] == 1 && st[p + 1] == 1 {
+        if st[p] == 1 && st[p + 1] == 1 && (st[p + tlsio.f_mode()] == tlsio.m_queued() || st[p + tlsio.f_mode()] == tlsio.m_handshake()) {
+            // Before the handshake is done there is no HTTP to answer with: a client that is too slow is dropped, as the engine would drop it.
+            if now >= st[p + 7] {
+                shared.drop_session(tab, core, k);
+            }
+        } else if st[p] == 1 && st[p + 1] == 1 {
             if st[p + 12] != 0 && now >= st[p + 12] {
                 refuse(tab, core, k, 504, "timeout.total", now);
             } else if st[p + 7] != 0 && now >= st[p + 7] {
@@ -1631,7 +1024,7 @@ fn sweep[&t, &c](tab: &!t conns.Table, core: &!c Core, now: int) -> [poll] int {
                     health_fail(tab, core, st[p + 11], now);
                     refuse(tab, core, k, 504, "timeout.upstream", now);
                 } else {
-                    drop_session(tab, core, k);
+                    shared.drop_session(tab, core, k);
                 }
             }
         }
@@ -1641,7 +1034,8 @@ fn sweep[&t, &c](tab: &!t conns.Table, core: &!c Core, now: int) -> [poll] int {
 }
 
 // Take every client waiting on the listener, up to the limit.
-fn accept_all[&h, &l, &c](heap: &!h Heap, conn: conns.Table, listener: &!l Listener, core: &!c Core, now: int) -> [heap, conn_accept, poll] conns.Table {
+// `secure`: the listener is the TLS one, and its connections wait for a handshake before anything is read from them.
+fn accept_all[&h, &l, &c](heap: &!h Heap, conn: conns.Table, listener: &!l Listener, core: &!c shared.Core, secure: bool, now: int) -> [heap, conn_accept, poll] conns.Table {
     let st = contents(core.state);
     var table = conn;
     var more = true;
@@ -1653,56 +1047,54 @@ fn accept_all[&h, &l, &c](heap: &!h Heap, conn: conns.Table, listener: &!l Liste
                     held = conns.live(tt);
                 }
                 // A session holds two slots: leave room for the upstream half, closing an idle pooled connection if that is what it takes.
-                if held + 2 > slot_limit() {
+                if held + 2 > shared.slot_limit() {
                     var made = 0;
                     borrow mut table as &!et in {
                         made = evict_idle(et, core);
                     }
                     held = held - made;
                 }
-                if held + 2 > slot_limit() {
+                if held + 2 > shared.slot_limit() {
                     conn_close(c);
                 } else {
                     let (grown, slot) = conns.put(heap, table, c);
                     table = grown;
-                    if slot >= slot_limit() {
+                    if slot >= shared.slot_limit() {
                         borrow mut table as &!ct in {
                             conns.close(ct, slot);
                         }
                     } else if slot >= 0 {
-                        let p = stride() * slot;
+                        let p = shared.stride() * slot;
                         st[p] = 1;
                         st[p + 1] = 1;
                         st[p + 2] = 0 - 1;
-                        st[p + 3] = 0;
-                        st[p + 4] = 0;
-                        st[p + 5] = 0;
                         st[p + 6] = 1;
-                        st[p + 7] = now + header_ms();
-                        st[p + 8] = 0;
-                        st[p + 9] = 0;
-                        st[p + 10] = 0;
-                        st[p + 11] = 0;
-                        st[p + 12] = now + total_ms();
-                        st[p + 13] = 0;
-                        st[p + 14] = 0;
-                        st[p + 15] = 0;
-                        st[p + 16] = 0;
-                        st[p + 17] = 0;
-                        st[p + 18] = 0;
-                        st[p + 19] = 0;
-                        st[p + 20] = 0;
-                        st[p + 21] = 0;
-                        st[p + 22] = 0;
-                        session_begin(core, slot, now);
+                        st[p + 7] = now + shared.header_ms();
+                        st[p + 12] = now + shared.total_ms();
+                        var z = 3;
+                        while z < 23 {
+                            if z != 6 && z != 7 && z != 12 {
+                                st[p + z] = 0;
+                            }
+                            z = z + 1;
+                        }
+                        if secure {
+                            st[p + 6] = 0;
+                            // Waiting for a handshake's turn is bounded by the whole request's time, not by the handshake's: a bound delays an honest peer.
+                            st[p + 7] = now + shared.total_ms();
+                            st[p + tlsio.f_since()] = now;
+                            st[p + tlsio.f_mode()] = tlsio.m_queued();
+                        }
+                        shared.session_begin(core, slot, now);
                         borrow mut table as &!ct in {
                             // TCP_NODELAY: a request is forwarded in as many writes as it arrives in reads, and a small trailing write
                             // behind a large one would otherwise wait for the peer's delayed acknowledgement (tens of milliseconds).
                             // Best effort: a refusal leaves the connection working, only slower.
                             let ignored = conns.nodelay(ct, slot);
-                            if conns.nonblocking(ct, slot) != 0 || conns.watch(ct, core.poller, slot, token_of(slot), 1) != 0 {
+                            if conns.nonblocking(ct, slot) != 0 || !secure && conns.watch(ct, core.poller, slot, shared.token_of(slot), 1) != 0 {
                                 conns.close(ct, slot);
                                 st[p] = 0;
+                                st[p + tlsio.f_mode()] = 0;
                             }
                         }
                     }
@@ -1719,10 +1111,54 @@ fn accept_all[&h, &l, &c](heap: &!h Heap, conn: conns.Table, listener: &!l Liste
     return table;
 }
 
+// Start the queued handshakes the bounds allow, and read again the clients that may hold more than they have been given.
+fn tls_turn[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, now: int, now_unix: int) -> [conn_read, conn_write, poll] int {
+    let st = contents(core.state);
+    var go = true;
+    while go {
+        var started = 0 - 1;
+        started = tlsio.admit(core.tls, st, shared.stride(), shared.slot_limit(), now, now_unix);
+        if started >= 0 {
+            st[shared.stride() * started + 7] = now + deploy.tls_handshake_ms();
+            if conns.watch(tab, core.poller, started, shared.token_of(started), 1) != 0 {
+                shared.drop_session(tab, core, started);
+            } else {
+                st[shared.stride() * started + 6] = 1;
+            }
+        } else if started <= 0 - 2 {
+            shared.drop_session(tab, core, 0 - 2 - started);
+        } else {
+            go = false;
+        }
+    }
+    var moved = 0;
+    var queued = 0;
+    var k = 0;
+    while k < shared.slot_limit() {
+        let p = shared.stride() * k;
+        if st[p] == 1 && st[p + tlsio.f_mode()] == tlsio.m_queued() {
+            queued = queued + 1;
+        }
+        if st[p] == 1 && st[p + 1] == 1 && st[p + tlsio.f_more()] == 1 && st[p + tlsio.f_mode()] >= tlsio.m_handshake() {
+            if st[p + 3] == 0 || st[p + 3] == 3 && st[p + 10] == 0 && st[p + 4] < shared.buf_size() && st[p + 14] == 0 {
+                let before = st[p + tlsio.f_prog()];
+                read_client(tab, core, k, now);
+                settle(tab, core, k);
+                if st[p] != 1 || st[p + tlsio.f_prog()] != before {
+                    moved = moved + 1;
+                }
+            }
+        }
+        k = k + 1;
+    }
+    // Moved something: do not sleep; someone is waiting for a handshake's turn: wake in 20 ms to see if the bounds allow it now.
+    return moved + 1000 * queued;
+}
+
 // Serve until the process is killed. Answers a non-zero status only if it could not start.
 // `admin` is the admin listener's `tcp_listen` answer (`Listening::Failed` when the deployment has none): matched in place, so no second
 // copy of the loop is needed for a gateway without one.
-pub fn run[&h, &l, &a, &n, &k, &i](heap: &!h Heap, listener: &!l Listener, admin: &!a Listening, net: &n Net(""), clock: &k Clock, io: &!i Io) -> [heap, conn_accept, conn_read, conn_write, poll, clock, io_write, net_out("")] int {
+pub fn run[&h, &l, &a, &x, &n, &k, &i](heap: &!h Heap, listener: &!l Listener, admin: &!a Listening, secure: &!x Listening, tlsstate: tlsio.Tls, net: &n Net(""), clock: &k Clock, io: &!i Io) -> [heap, conn_accept, conn_read, conn_write, poll, clock, io_write, net_out("")] int {
     match poller_new() {
         Polling::Ok(pl) => {
             var poller = pl;
@@ -1731,14 +1167,22 @@ pub fn run[&h, &l, &a, &n, &k, &i](heap: &!h Heap, listener: &!l Listener, admin
                 match admin {
                     Listening::Ok(al) => {
                         listener_nonblocking(al);
-                        poller_add_listener(pw, al, admin_token());
+                        poller_add_listener(pw, al, shared.admin_token());
+                    }
+                    Listening::Failed(e) => {
+                    }
+                }
+                match secure {
+                    Listening::Ok(sl) => {
+                        listener_nonblocking(sl);
+                        poller_add_listener(pw, sl, shared.tls_token());
                     }
                     Listening::Failed(e) => {
                     }
                 }
             }
-            let limit = slot_limit();
-            var core = Core { poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * limit, 0), bufs: box_slice(heap, limit * buf_size(), byte_of(0)), pends: box_slice(heap, limit * pend_size(), byte_of(0)), table: box_slice(heap, http.slots(64), 0), chunks: box_slice(heap, limit * chunked.state_len(), 0), health: box_slice(heap, 4 * 256, 0), ids: box_slice(heap, 16, 0), meta: box_slice(heap, limit * meta_size(), byte_of(0)), logq: box_slice(heap, logq_size(), byte_of(0)), stats: box_slice(heap, metrics.stats_len(), 0), rnames: box_slice(heap, metrics.names_len(), byte_of(0)), gauge: box_slice(heap, metrics.gauge_len(), 0), abuf: box_slice(heap, admin_buffer_len(), byte_of(0)) };
+            let limit = shared.slot_limit();
+            var core = shared.Core { poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, shared.stride() * limit, 0), bufs: box_slice(heap, limit * shared.buf_size(), byte_of(0)), pends: box_slice(heap, limit * shared.pend_size(), byte_of(0)), table: box_slice(heap, http.slots(64), 0), chunks: box_slice(heap, limit * chunked.state_len(), 0), health: box_slice(heap, 4 * 256, 0), ids: box_slice(heap, 16, 0), meta: box_slice(heap, limit * shared.meta_size(), byte_of(0)), logq: box_slice(heap, shared.logq_size(), byte_of(0)), stats: box_slice(heap, metrics.stats_len(), 0), rnames: box_slice(heap, metrics.names_len(), byte_of(0)), gauge: box_slice(heap, metrics.gauge_len(), 0), abuf: box_slice(heap, shared.admin_buffer_len(), byte_of(0)), tls: tlsstate };
             var tab = conns.empty(heap, 64);
             borrow mut core as &!cw in {
                 let mono = clock_ms(clock);
@@ -1747,10 +1191,18 @@ pub fn run[&h, &l, &a, &n, &k, &i](heap: &!h Heap, listener: &!l Listener, admin
             }
             var running = true;
             var status = 0;
+            var hurry = 0;
             while running {
                 var ready = 0 - 1;
+                // A TLS connection that moved bytes last turn may hold more that no socket event will announce: do not sleep.
+                var nap = 250;
+                if hurry % 1000 > 0 {
+                    nap = 0;
+                } else if hurry > 0 {
+                    nap = 20;
+                }
                 borrow mut core as &!cw in {
-                    ready = poller_wait(cw.poller, contents(cw.events), 250);
+                    ready = poller_wait(cw.poller, contents(cw.events), nap);
                 }
                 let now = clock_ms(clock);
                 borrow mut core as &!cw in {
@@ -1766,13 +1218,23 @@ pub fn run[&h, &l, &a, &n, &k, &i](heap: &!h Heap, listener: &!l Listener, admin
                     }
                     if token == 0 {
                         borrow mut core as &!cw in {
-                            tab = accept_all(heap, tab, listener, cw, now);
+                            tab = accept_all(heap, tab, listener, cw, false, now);
                         }
-                    } else if token == admin_token() {
+                    } else if token == shared.tls_token() {
+                        match secure {
+                            Listening::Ok(sl) => {
+                                borrow mut core as &!cw in {
+                                    tab = accept_all(heap, tab, sl, cw, true, now);
+                                }
+                            }
+                            Listening::Failed(e) => {
+                            }
+                        }
+                    } else if token == shared.admin_token() {
                         match admin {
                             Listening::Ok(al) => {
                                 borrow mut core as &!cw in {
-                                    tab = accept_admin(heap, tab, al, cw, now);
+                                    tab = adminloop.accept_admin(heap, tab, al, cw, now);
                                 }
                             }
                             Listening::Failed(e) => {
@@ -1787,13 +1249,18 @@ pub fn run[&h, &l, &a, &n, &k, &i](heap: &!h Heap, listener: &!l Listener, admin
                     }
                     j = j + 1;
                 }
+                borrow mut tab as &!tw in {
+                    borrow mut core as &!cw in {
+                        hurry = tls_turn(tw, cw, now, contents(cw.ids)[2] + now);
+                    }
+                }
                 // Clients that asked for an upstream connection this turn.
                 var k = 0;
                 while k < limit {
                     var wants = false;
                     borrow core as &cr in {
                         let s = contents(cr.state);
-                        wants = s[stride() * k] == 1 && s[stride() * k + 1] == 1 && s[stride() * k + 3] == 1;
+                        wants = s[shared.stride() * k] == 1 && s[shared.stride() * k + 1] == 1 && s[shared.stride() * k + 3] == 1;
                     }
                     if wants {
                         borrow mut core as &!cw in {
@@ -1805,7 +1272,7 @@ pub fn run[&h, &l, &a, &n, &k, &i](heap: &!h Heap, listener: &!l Listener, admin
                 borrow mut tab as &!tw in {
                     borrow mut core as &!cw in {
                         sweep(tw, cw, now);
-                        admin_pump(tw, cw, now);
+                        adminloop.admin_pump(tw, cw, now);
                     }
                 }
                 // The lines of the requests that ended this turn, written together (docs/observability.md section 3).
@@ -1840,7 +1307,7 @@ pub fn run[&h, &l, &a, &n, &k, &i](heap: &!h Heap, listener: &!l Listener, admin
                 }
             }
             conns.drop(heap, tab);
-            let Core { poller, events, state, bufs, pends, table, chunks, health, ids, meta, logq, stats, rnames, gauge, abuf } = core;
+            let shared.Core { poller, events, state, bufs, pends, table, chunks, health, ids, meta, logq, stats, rnames, gauge, abuf, tls } = core;
             poller_close(poller);
             unbox_slice(heap, events);
             unbox_slice(heap, state);
@@ -1856,9 +1323,11 @@ pub fn run[&h, &l, &a, &n, &k, &i](heap: &!h Heap, listener: &!l Listener, admin
             unbox_slice(heap, rnames);
             unbox_slice(heap, gauge);
             unbox_slice(heap, abuf);
+            tlsio.close(heap, tls);
             return status;
         }
         Polling::Failed(e) => {
+            tlsio.close(heap, tlsstate);
             return 4;
         }
     }

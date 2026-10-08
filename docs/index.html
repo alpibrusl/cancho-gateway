@@ -276,18 +276,18 @@ trust_forwarded = true  # a TLS front is in front</code></pre>
 
 <section id="fit">
   <h2>Where it fits</h2>
-  <p class="sub">For a few services behind your own TLS front, where you would rather read the list of limits than trust them. Not for the public edge until TLS is built in.</p>
+  <p class="sub">For a few services, behind your own front or with its own TLS 1.3 listener, where you would rather read the list of limits than trust them. TLS is new, not independently reviewed, and has no certificate reload yet: not for a public edge you cannot restart.</p>
   <div class="fitwrap"><table class="fit wide">
     <thead><tr><th></th><th>You run</th><th>You get</th><th>You give up</th></tr></thead>
     <tbody>
-      <tr class="us"><th>cancho-gateway</th><td>One binary per deployment, no config file at run time</td><td>Strict parsing, a request id and a log line for every request, a report of what the program can touch, 1.9 MiB resident</td><td>Speed, TLS, HTTP/2, client keep-alive, hot reload, for now</td></tr>
+      <tr class="us"><th>cancho-gateway</th><td>One binary per deployment, no config file at run time</td><td>Strict parsing, a request id and a log line for every request, a report of what the program can touch, 1.9 MiB resident</td><td>Speed, HTTP/2, client keep-alive, hot reload, TLS reload, for now</td></tr>
       <tr><th>nginx, HAProxy</th><td>A mature proxy and its config</td><td>Speed, features, years of hardening</td><td>A checked statement of what the program can do</td></tr>
       <tr><th>Caddy, Traefik, Envoy, Kong</th><td>A larger runtime</td><td>TLS, discovery, plugins</td><td>33 to 156 MiB resident in this test, many moving parts</td></tr>
     </tbody>
   </table></div>
   <div class="cols">
-    <div><h3>Built for</h3><ul><li>Internal APIs behind a TLS-terminating front</li><li>A small, fixed set of upstreams</li><li>Places where a refusal must say why, as data</li></ul></div>
-    <div class="no"><h3>Not for</h3><ul><li>The public edge, until it has TLS (cancho&rsquo;s server exists; the gateway does not use it yet) and HTTP/2</li><li>Throughput: use nginx or HAProxy</li><li>Dynamic discovery or hot reload</li></ul></div>
+    <div><h3>Built for</h3><ul><li>Internal APIs, behind a TLS-terminating front or terminating TLS 1.3 itself</li><li>A small, fixed set of upstreams</li><li>Places where a refusal must say why, as data</li></ul></div>
+    <div class="no"><h3>Not for</h3><ul><li>A public edge that needs HTTP/2, client certificates, or a certificate renewed without a restart</li><li>Throughput: use nginx or HAProxy</li><li>Dynamic discovery or hot reload</li></ul></div>
   </div>
 </section>
 
@@ -327,21 +327,21 @@ build/gateway</code></pre>
   <div class="fitwrap"><table class="fit">
     <thead><tr><th>The gateway&rsquo;s report</th><td></td></tr></thead>
     <tbody>
-      <tr><th>Files</th><td class="good">none (<code>fs</code> is released at start)</td></tr>
+      <tr><th>Files</th><td class="good">read-only: with <code>tls_listen</code>, exactly <code>fs_read("/dev/urandom")</code> and the certificate directory compiled into the binary, and <code>dir_read</code>, <code>file_read</code> through its handle; no file is ever written. Without <code>tls_listen</code> the capability is released unread and no <code>fs_read</code> is reported.</td></tr>
       <tr><th>Foreign calls</th><td class="good">none (<code>ffi</code> is released at start)</td></tr>
       <tr><th>Memory</th><td>allocated at start, bounded</td></tr>
       <tr><th>Network</th><td><code>net_in("")</code> and <code>net_out("")</code>: <strong>not narrowed</strong>. The compiler has one bound for listening and connecting, so the upstream set is enforced in code and tested, not proved.</td></tr>
       <tr><th>Everything else</th><td><code>args, clock, conn_accept, conn_read, conn_write, heap, io_write, poll</code></td></tr>
     </tbody>
   </table></div>
-  <p class="note">No <code>unsafe</code>. The report is <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/manifests/gateway.authority.json"><code>manifests/gateway.authority.json</code></a>; a change to it fails CI.</p>
+  <p class="note">No <code>unsafe</code>. The report is <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/manifests/gateway.authority.json"><code>manifests/gateway.authority.json</code></a> (and <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/manifests/gateway-tls.authority.json"><code>gateway-tls.authority.json</code></a> for a deployment with TLS); a change to either fails CI.</p>
 </section>
 
 <aside class="status" id="status">
   <h2>Alpha: we are trying to break it before you deploy it</h2>
   <p class="note" style="margin:.2rem 0 .6rem">Alpha means the interfaces may change and nothing here is certified for production.</p>
   <ul>
-    <li><strong>Not built yet:</strong> authentication, rate limiting, WebSocket (the OCPP case), and <strong>TLS in the gateway</strong>. cancho now has a TLS 1.3 server, so the old reason (it needed foreign code) is gone; using it here is planned, and it would add file reads to the report below.</li>
+    <li><strong>Not built yet:</strong> authentication, rate limiting, WebSocket (the OCPP case), and <strong>reloading a TLS certificate</strong> (a renewed one means a restart). TLS 1.3 is built (<code>tls_listen</code>, cancho&rsquo;s server written in cancho, ECDSA P-256, not independently reviewed; <code>docs/tls.md</code>) and a handshake costs 12 ms of CPU on the development machine.</li>
     <li><strong>Slower than HAProxy</strong> on most cells, and than nginx on a POST body; no client-side keep-alive, which is most of the gap.</li>
     <li>About 127 concurrent sessions, one core, no hot reload; a changed route is a new binary.</li>
     <li>No client address: the compiler gives none, so there is no <code>X-Forwarded-For</code> of the gateway&rsquo;s own and no client in the log.</li>

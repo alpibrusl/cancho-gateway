@@ -1,0 +1,367 @@
+edition 5;
+
+module gateway.adminloop;
+
+import std.bytes;
+import std.conns;
+import std.http;
+import gateway.accesslog;
+import gateway.admin;
+import gateway.chunked;
+import gateway.deploy;
+import gateway.egress;
+import gateway.forward;
+import gateway.framing;
+import gateway.metrics;
+import gateway.out;
+import gateway.problem;
+import gateway.response;
+import gateway.route;
+import gateway.tlsio;
+import gateway.shared;
+
+// The admin listener's connections: accepted, read, answered, and released (docs/observability.md section 7). Split from `proxy.cho`.
+
+// What admin connection `k` is watched for: its head while it is being read, room to write while an answer is queued or being sent, nothing
+// while it waits for the buffer.
+pub fn admin_settle[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> [poll] int {
+    let st = contents(core.state);
+    let p = shared.stride() * k;
+    if st[p] != 1 {
+        return 0;
+    }
+    var want = 0;
+    if st[p + 3] == 0 {
+        want = 1;
+    } else if st[p + 3] == 2 || st[p + 3] == 3 {
+        want = 2;
+    }
+    if want != st[p + 6] {
+        conns.rewatch(tab, core.poller, k, shared.token_of(k), want);
+        st[p + 6] = want;
+    }
+    return 0;
+}
+
+// ---- the admin listener (docs/observability.md section 7) ----
+
+// Fill the gauges of a scrape: uptime, clients being served, whether the log failed in the last ten seconds, and per upstream its idle pooled
+// connections and whether its circuit is open (it is not "open" once its period has run out: a trial is then allowed, and a gateway that
+// reported itself not ready would be sent no traffic to take that trial with).
+pub fn gauge_fill[&c](core: &!c shared.Core, now: int) -> [] int {
+    let st = contents(core.state);
+    let g = contents(core.gauge);
+    let ids = contents(core.ids);
+    let h = contents(core.health);
+    var live = 0;
+    var k = 0;
+    while k < shared.slot_limit() {
+        if st[shared.stride() * k] == 1 && st[shared.stride() * k + 1] == 1 {
+            live = live + 1;
+        }
+        k = k + 1;
+    }
+    g[0] = now - ids[0];
+    g[1] = live;
+    g[2] = 0;
+    if ids[9] != 0 && now - ids[9] < 10000 {
+        g[2] = 1;
+    }
+    g[3] = ids[6];
+    g[4] = ids[7];
+    var i = 0;
+    while i < deploy.upstream_count() {
+        g[5 + 2 * i] = shared.idle_count(core, i);
+        g[6 + 2 * i] = 0;
+        if shared.circuit_threshold() > 0 && h[4 * i + 1] != 0 && now < h[4 * i + 1] {
+            g[6 + 2 * i] = 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// Queue a problem+json refusal for admin connection `k`; it is closed once the answer is written.
+pub fn admin_error[&t, &c, &r](tab: &!t conns.Table, core: &!c shared.Core, k: int, status: int, rule: &r [byte], now: int) -> [conn_write, poll] int {
+    let st = contents(core.state);
+    let pd = contents(core.pends);
+    let p = shared.stride() * k;
+    let base = k * shared.pend_size();
+    let n = problem.response(pd[base..base + shared.pend_size()], status, rule, "admin");
+    if n < 0 {
+        shared.drop_session(tab, core, k);
+        return 0;
+    }
+    st[p + 5] = n;
+    st[p + 8] = 1;
+    st[p + 3] = 2;
+    st[p + 4] = 0;
+    admin_settle(tab, core, k);
+    return 0;
+}
+
+// Answer `/healthz` or `/readyz` from `pends[k]`: they are a few bytes, so they do not take the metrics buffer.
+pub fn admin_small[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, code: int, now: int) -> [conn_write, poll] int {
+    gauge_fill(core, now);
+    let st = contents(core.state);
+    let pd = contents(core.pends);
+    let p = shared.stride() * k;
+    let base = k * shared.pend_size();
+    var end = 0 - 1;
+    var status = 200;
+    if code == admin.healthz() {
+        end = out.put(pd[base..base + shared.pend_size()], metrics.head_room(), "{\"alive\":true}\n");
+    } else {
+        end = metrics.ready_body(pd[base..base + shared.pend_size()], metrics.head_room(), contents(core.gauge));
+        if metrics.is_ready(contents(core.gauge)) == 0 {
+            status = 503;
+        }
+    }
+    var start = 0 - 1;
+    if end >= 0 {
+        start = metrics.frame(pd[base..base + shared.pend_size()], status, "application/json", end);
+    }
+    if start < 0 {
+        admin_error(tab, core, k, 500, "admin.size", now);
+        return 0;
+    }
+    copy_into(pd[base..base + end - start], pd[base + start..base + end]);
+    st[p + 5] = end - start;
+    st[p + 8] = 1;
+    st[p + 3] = 2;
+    st[p + 4] = 0;
+    admin_settle(tab, core, k);
+    return 0;
+}
+
+// Build the metrics answer for admin connection `k` into the shared buffer, which it now owns until it is closed. (`prom`: the Prometheus text.)
+pub fn admin_metrics[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, prom: bool, now: int) -> [conn_write, poll] int {
+    gauge_fill(core, now);
+    let st = contents(core.state);
+    let p = shared.stride() * k;
+    let ab = contents(core.abuf);
+    var end = 0 - 1;
+    var ctype = "application/json";
+    if prom {
+        ctype = "text/plain; version=0.0.4; charset=utf-8";
+        end = metrics.prometheus(ab, metrics.head_room(), contents(core.stats), contents(core.rnames), contents(core.gauge));
+    } else {
+        end = metrics.json(ab, metrics.head_room(), contents(core.stats), contents(core.rnames), contents(core.gauge));
+    }
+    var start = 0 - 1;
+    if end >= 0 {
+        start = metrics.frame(ab, 200, ctype, end);
+    }
+    if start < 0 {
+        admin_error(tab, core, k, 500, "admin.size", now);
+        return 0;
+    }
+    contents(core.ids)[8] = k + 1;
+    st[p + 9] = start;
+    st[p + 5] = end - start;
+    st[p + 3] = 3;
+    st[p + 4] = 0;
+    admin_settle(tab, core, k);
+    return 0;
+}
+
+// Give the metrics buffer to a waiting admin connection, if it is free.
+pub fn admin_pump[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, now: int) -> [conn_write, poll] int {
+    let st = contents(core.state);
+    if contents(core.ids)[8] != 0 {
+        return 0;
+    }
+    var k = 0;
+    while k < shared.slot_limit() {
+        if st[shared.stride() * k] == 1 && st[shared.stride() * k + 1] == 4 && st[shared.stride() * k + 3] == 1 {
+            admin_metrics(tab, core, k, st[shared.stride() * k + 9] == 1, now);
+            return 0;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+// The head of admin connection `k` is complete (`end` bytes of `bufs[k]`): refuse it, or answer it.
+pub fn admin_request[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, end: int, now: int) -> [conn_write, poll] int {
+    let st = contents(core.state);
+    let bf = contents(core.bufs);
+    let p = shared.stride() * k;
+    let code = admin.parse(bf[k * shared.buf_size()..k * shared.buf_size() + end]);
+    if code >= 10 {
+        admin_error(tab, core, k, admin.status(code), admin.tag(code), now);
+        return 0;
+    }
+    if code == admin.healthz() || code == admin.readyz() {
+        admin_small(tab, core, k, code, now);
+        return 0;
+    }
+    st[p + 9] = code;
+    st[p + 3] = 1;
+    st[p + 4] = 0;
+    admin_settle(tab, core, k);
+    admin_pump(tab, core, now);
+    return 0;
+}
+
+// Write what is left of the metrics answer; the connection ends when it is all out.
+pub fn admin_write[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: int) -> [conn_write] int {
+    let st = contents(core.state);
+    let ab = contents(core.abuf);
+    let p = shared.stride() * k;
+    match conns.write(tab, k, ab[st[p + 9]..st[p + 9] + st[p + 5]]) {
+        Sent::Wrote(n) => {
+            st[p + 9] = st[p + 9] + n;
+            st[p + 5] = st[p + 5] - n;
+            if st[p + 5] == 0 {
+                shared.drop_session(tab, core, k);
+            }
+        }
+        Sent::Again => {
+        }
+        Sent::Failed(e) => {
+            shared.drop_session(tab, core, k);
+        }
+    }
+    return 0;
+}
+
+pub fn admin_step[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, readiness: int, now: int) -> [conn_read, conn_write, poll] int {
+    let st = contents(core.state);
+    let bf = contents(core.bufs);
+    let p = shared.stride() * k;
+    let base = k * shared.buf_size();
+    let phase = st[p + 3];
+    if phase == 0 {
+        if readiness % 2 == 1 {
+            match conns.read(tab, k, bf[base + st[p + 4]..base + shared.admin_head_max()]) {
+                Received::Data(got) => {
+                    st[p + 4] = st[p + 4] + got;
+                    let end = admin.head_end(bf[base..base + st[p + 4]]);
+                    if end >= 0 {
+                        admin_request(tab, core, k, end, now);
+                    } else if st[p + 4] >= shared.admin_head_max() {
+                        admin_error(tab, core, k, 431, "admin.head", now);
+                    }
+                }
+                Received::End => {
+                    shared.drop_session(tab, core, k);
+                }
+                Received::Again => {
+                }
+                Received::Failed(e) => {
+                    shared.drop_session(tab, core, k);
+                }
+            }
+        }
+        return 0;
+    }
+    if phase == 2 {
+        if readiness % 4 >= 2 {
+            admin_flush(tab, core, k);
+        } else {
+            shared.drop_session(tab, core, k);
+        }
+        return 0;
+    }
+    if phase == 3 {
+        if readiness % 4 >= 2 {
+            admin_write(tab, core, k, now);
+        } else {
+            shared.drop_session(tab, core, k);
+        }
+        return 0;
+    }
+    // Waiting for the buffer: it asked for nothing, so any event is the peer going away.
+    shared.drop_session(tab, core, k);
+    return 0;
+}
+
+// Take every connection waiting on the admin listener, up to the limit.
+pub fn accept_admin[&h, &l, &c](heap: &!h Heap, conn: conns.Table, listener: &!l Listener, core: &!c shared.Core, now: int) -> [heap, conn_accept, poll] conns.Table {
+    let st = contents(core.state);
+    var table = conn;
+    var more = true;
+    while more {
+        match tcp_accept(listener) {
+            Accepted::Ok(c) => {
+                var open = 0;
+                var k = 0;
+                while k < shared.slot_limit() {
+                    if st[shared.stride() * k] == 1 && st[shared.stride() * k + 1] == 4 {
+                        open = open + 1;
+                    }
+                    k = k + 1;
+                }
+                var held = 0;
+                borrow table as &tt in {
+                    held = conns.live(tt);
+                }
+                if open >= shared.admin_max() || held + 1 > shared.slot_limit() {
+                    conn_close(c);
+                } else {
+                    let (grown, slot) = conns.put(heap, table, c);
+                    table = grown;
+                    if slot >= shared.slot_limit() {
+                        borrow mut table as &!ct in {
+                            conns.close(ct, slot);
+                        }
+                    } else if slot >= 0 {
+                        let p = shared.stride() * slot;
+                        st[p] = 1;
+                        st[p + 1] = 4;
+                        st[p + 2] = 0 - 1;
+                        st[p + 3] = 0;
+                        st[p + 4] = 0;
+                        st[p + 5] = 0;
+                        st[p + 6] = 1;
+                        st[p + 7] = now + shared.admin_ms();
+                        st[p + 8] = 0;
+                        st[p + 9] = 0;
+                        borrow mut table as &!ct in {
+                            if conns.nonblocking(ct, slot) != 0 || conns.watch(ct, core.poller, slot, shared.token_of(slot), 1) != 0 {
+                                conns.close(ct, slot);
+                                st[p] = 0;
+                            }
+                        }
+                    }
+                }
+            }
+            Accepted::Again => {
+                more = false;
+            }
+            Accepted::Failed(e) => {
+                more = false;
+            }
+        }
+    }
+    return table;
+}
+
+// An admin connection whose small answer (a refusal) is queued in its pend buffer: write it, and end the connection once it has all gone.
+pub fn admin_flush[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> [conn_write] int {
+    let st = contents(core.state);
+    let pd = contents(core.pends);
+    let p = shared.stride() * k;
+    let base = k * shared.pend_size();
+    if st[p] != 1 {
+        return 0;
+    }
+    match conns.write(tab, k, pd[base..base + st[p + 5]]) {
+        Sent::Wrote(n) => {
+            copy_into(pd[base..base + st[p + 5] - n], pd[base + n..base + st[p + 5]]);
+            st[p + 5] = st[p + 5] - n;
+        }
+        Sent::Again => {
+        }
+        Sent::Failed(e) => {
+            shared.drop_session(tab, core, k);
+            return 1;
+        }
+    }
+    if st[p + 5] == 0 {
+        shared.drop_session(tab, core, k);
+        return 1;
+    }
+    return 0;
+}

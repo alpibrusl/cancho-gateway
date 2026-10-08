@@ -1,0 +1,382 @@
+edition 5;
+
+module gateway.shared;
+
+import std.bytes;
+import std.conns;
+import std.http;
+import gateway.accesslog;
+import gateway.admin;
+import gateway.chunked;
+import gateway.deploy;
+import gateway.egress;
+import gateway.forward;
+import gateway.framing;
+import gateway.metrics;
+import gateway.out;
+import gateway.problem;
+import gateway.response;
+import gateway.route;
+import gateway.tlsio;
+
+// The state every part of the proxy shares (docs/proxy.md): the constants that size it, the `Core` record, the per-slot metadata and the
+// access-log line, the client's bytes (plain or through `gateway.tlsio`) and the end of a session. Split from `proxy.cho` to keep each file
+// under the 2,000 lines CONTRIBUTING.md allows; nothing here is new.
+
+pub fn slot_limit() -> [] int {
+    return 256;
+}
+
+pub fn buf_size() -> [] int {
+    return 16384;
+}
+
+pub fn pend_size() -> [] int {
+    return 32768;
+}
+
+pub fn stride() -> [] int {
+    return 40;
+}
+
+pub fn meta_size() -> [] int {
+    return 256;
+}
+
+// The access-log queue: lines wait here until the loop writes them (docs/observability.md section 3).
+pub fn logq_size() -> [] int {
+    return 262144;
+}
+
+// Idle upstream connections kept per upstream, and for how long; 0 keeps none (every request then uses its own connection).
+pub fn pool_max() -> [] int {
+    return deploy.pool_idle_max();
+}
+
+pub fn idle_ms() -> [] int {
+    return deploy.idle_ms();
+}
+
+// The passive circuit: this many consecutive failures to one upstream open it for `circuit_open_ms()`; 0 never opens it.
+pub fn circuit_threshold() -> [] int {
+    return deploy.circuit_threshold();
+}
+
+pub fn circuit_open_ms() -> [] int {
+    return deploy.circuit_open_ms();
+}
+
+// Milliseconds, from the deployment: the head must arrive, the upstream must connect and start answering, and the request must
+// end. (`flush_ms`: how long a refusal has to be written before the connection is dropped.)
+pub fn header_ms() -> [] int {
+    return deploy.header_ms();
+}
+
+pub fn connect_ms() -> [] int {
+    return deploy.connect_ms();
+}
+
+pub fn upstream_ms() -> [] int {
+    return deploy.upstream_ms();
+}
+
+pub fn total_ms() -> [] int {
+    return deploy.total_ms();
+}
+
+pub fn flush_ms() -> [] int {
+    return 5000;
+}
+
+// After a refusal has been written the connection is kept open until the client has been silent this long (and for at most three
+// seconds), its input read and thrown away: closing a socket with
+// unread request bytes in it sends a reset, which can destroy the response before the client has read it (RFC 9112 9.6).
+// cancho has no half-close, so the gateway lingers instead.
+pub fn linger_ms() -> [] int {
+    return 500;
+}
+
+// The admin listener (docs/observability.md section 7): its token on the poller (the slots use 1 to `slot_limit()`), how many connections it
+// serves at once, how long one exchange may take, and how much of a request head it reads.
+pub fn admin_token() -> [] int {
+    return slot_limit() + 1;
+}
+
+pub fn tls_token() -> [] int {
+    return slot_limit() + 2;
+}
+
+pub fn admin_max() -> [] int {
+    return 8;
+}
+
+pub fn admin_ms() -> [] int {
+    return 2000;
+}
+
+pub fn admin_head_max() -> [] int {
+    return 2048;
+}
+
+// The metrics buffer: the worst answer this deployment can give, or one byte if there is no admin listener.
+pub fn admin_buffer_len() -> [] int {
+    if deploy.admin_port() == 0 {
+        return 1;
+    }
+    return metrics.worst_case();
+}
+
+pub res struct Core {
+    poller: Poller,
+    // `poller_wait` fills these with (token, readiness) pairs.
+    events: Box[[int]],
+    state: Box[[int]],
+    bufs: Box[[byte]],
+    pends: Box[[byte]],
+    // The parse table of the head in hand.
+    table: Box[[int]],
+    // One chunked-body state per slot.
+    chunks: Box[[int]],
+    // Per upstream, four ints: consecutive failures, when the circuit is open until (0: closed), until when a half-open trial
+    // request is in flight (0: none), unused.
+    health: Box[[int]],
+    // Sixteen ints: 0 the clock at start, 1 the number of connections given an id so far, 2 the wall clock minus the monotonic one at
+    // start, 3 the clock of the turn in progress, 4 the bytes waiting in `logq`, 5 the lines dropped since the last announcement,
+    // 6 the lines dropped in all, 7 the log writes that failed, 8 the admin connection that owns `abuf` (slot + 1, 0 if none),
+    // 9 the clock of the last failed log write (0 if none).
+    ids: Box[[int]],
+    meta: Box[[byte]],
+    logq: Box[[byte]],
+    // The counters, the rule-name table and the gauges of `gateway.metrics`, and the one buffer a metrics answer is built in (owned by one admin
+    // connection at a time: `ids[8]` is its slot + 1, or 0).
+    stats: Box[[int]],
+    rnames: Box[[byte]],
+    gauge: Box[[int]],
+    abuf: Box[[byte]],
+    // TLS: the engine and the ciphertext buffers, or `Off` (docs/tls.md).
+    tls: tlsio.Tls,
+}
+
+pub fn token_of(k: int) -> [] int {
+    return k + 1;
+}
+
+// Is bit `bit` set in the flags `v`?
+pub fn flag_has(v: int, bit: int) -> [] bool {
+    return v / bit % 2 == 1;
+}
+
+// Set `bit` in the flags of client slot `k`.
+pub fn flag_set[&c](core: &!c Core, k: int, bit: int) -> [] int {
+    let st = contents(core.state);
+    let p = stride() * k;
+    if !flag_has(st[p + 30], bit) {
+        st[p + 30] = st[p + 30] + bit;
+    }
+    return 0;
+}
+
+// Keep the first `cap` bytes of `value` in client `k`'s meta area at `at`, its length at `lenpos`.
+pub fn meta_put[&c, &s](core: &!c Core, k: int, at: int, cap: int, lenpos: int, value: &s [byte]) -> [] int {
+    let m = contents(core.meta);
+    var n = len(value);
+    if n > cap {
+        n = cap;
+    }
+    let base = k * meta_size();
+    copy_into(m[base + at..base + at + n], value[0..n]);
+    m[base + lenpos] = byte_of(n);
+    return n;
+}
+
+// The `n`-byte field of client `k`'s meta area at `at`, whose length is at `lenpos`.
+pub fn meta_get[&c](core: &c Core, k: int, at: int, lenpos: int) -> [] &c [byte] {
+    let m = contents(core.meta);
+    let base = k * meta_size();
+    return m[base + at..base + at + int_of(m[base + lenpos])];
+}
+
+// Client `k` has been accepted: its start, its own id (the next sequence number), and every field of the record cleared.
+pub fn session_begin[&c](core: &!c Core, k: int, now: int) -> [] int {
+    let st = contents(core.state);
+    let ids = contents(core.ids);
+    let m = contents(core.meta);
+    let p = stride() * k;
+    ids[1] = ids[1] + 1;
+    st[p + 23] = 2 * ids[1];
+    st[p + 24] = now;
+    st[p + 25] = 0;
+    st[p + 26] = 0;
+    st[p + 27] = 0;
+    st[p + 28] = 0;
+    st[p + 29] = 0;
+    st[p + 30] = 0;
+    st[p + 31] = 0;
+    let base = k * meta_size();
+    m[base + 1] = byte_of(0);
+    m[base + 2] = byte_of(0);
+    m[base + 3] = byte_of(0);
+    let n = forward.put_generated_id(m[base + 4..base + 4 + 64], 0, ids[0], deploy.listen_port(), ids[1]);
+    m[base] = byte_of(n);
+    return 0;
+}
+
+// Queue the access-log line of client `k`, once, when its session ends (docs/observability.md sections 2 and 3). Pure memory work: the
+// loop writes the queue. A line that does not fit is dropped and counted, and announced when there is room again.
+pub fn log_end[&c](core: &!c Core, k: int) -> [] int {
+    let st = contents(core.state);
+    let p = stride() * k;
+    if st[p] != 1 || st[p + 1] != 1 || flag_has(st[p + 30], 4) {
+        return 0;
+    }
+    flag_set(core, k, 4);
+    let ids = contents(core.ids);
+    let q = contents(core.logq);
+    let now = ids[3];
+    var outcome = 2;
+    if flag_has(st[p + 30], 1) {
+        outcome = 1;
+    } else if flag_has(st[p + 30], 2) {
+        outcome = 0;
+    }
+    var upstream_ms = 0;
+    if st[p + 26] > 0 && st[p + 25] > 0 {
+        upstream_ms = st[p + 26] - st[p + 25];
+    }
+    var route_name = "";
+    if st[p + 31] > 0 {
+        route_name = route.name(st[p + 31] - 1);
+    }
+    var upstream_name = "";
+    if st[p + 31] > 0 {
+        upstream_name = deploy.upstream_name(st[p + 11]);
+    }
+    var wait_ms = 0 - 1;
+    if st[p + 26] > 0 && st[p + 25] > 0 {
+        wait_ms = st[p + 26] - st[p + 25];
+    }
+    var route_index = 0 - 1;
+    if st[p + 31] > 0 {
+        route_index = st[p + 31] - 1;
+    }
+    metrics.record(contents(core.stats), contents(core.rnames), st[p + 29], route_index, st[p + 11], now - st[p + 24], wait_ms, st[p + 28], st[p + 27], meta_get(core, k, 68, 1), st[p + 17] == 1);
+    var at = ids[4];
+    if ids[5] > 0 && logq_size() - at >= accesslog.max_line() * 2 {
+        let announced = accesslog.dropped_line(q[at..at + accesslog.max_line()], ids[2] + now, ids[5]);
+        if announced > 0 {
+            at = at + announced;
+            ids[5] = 0;
+        }
+    }
+    var n = 0 - 1;
+    if logq_size() - at >= accesslog.max_line() {
+        n = accesslog.line(q[at..at + accesslog.max_line()], ids[2] + st[p + 24], meta_get(core, k, 4, 0), meta_get(core, k, 108, 2), meta_get(core, k, 124, 3), route_name, upstream_name, st[p + 29], meta_get(core, k, 68, 1), outcome, now - st[p + 24], upstream_ms, st[p + 28], st[p + 27], st[p + tlsio.f_mode()] != 0);
+    }
+    if n < 0 {
+        ids[5] = ids[5] + 1;
+        ids[6] = ids[6] + 1;
+    } else {
+        at = at + n;
+    }
+    ids[4] = at;
+    return 0;
+}
+
+// If client `k` was admitted as the half-open trial and the circuit has not yet heard its outcome, hand the trial back (its
+// request ended without a verdict: refused locally, or abandoned by its client). `st[24k+21]` is the trial's expiry as it was
+// issued; it only releases the trial if that is still the one outstanding.
+pub fn release_trial[&c](core: &!c Core, k: int) -> [] int {
+    let st = contents(core.state);
+    let p = stride() * k;
+    if st[p + 1] == 1 && st[p + 21] != 0 {
+        let h = contents(core.health);
+        if h[4 * st[p + 11] + 2] == st[p + 21] {
+            h[4 * st[p + 11] + 2] = 0;
+        }
+        st[p + 21] = 0;
+    }
+    return 0;
+}
+
+// Close slot `k` and its peer and forget both.
+// If admin connection `k` owns the metrics buffer, give it back.
+pub fn admin_release[&c](core: &!c Core, k: int) -> [] int {
+    let ids = contents(core.ids);
+    if ids[8] == k + 1 {
+        ids[8] = 0;
+    }
+    return 0;
+}
+
+// A client's bytes: what `conns.read` and `conns.write` answer for a plain client, and, for one that spoke TLS, the same answers for the
+// plaintext, through `gateway.tlsio` (docs/tls.md section 3). Everything after these calls sees plaintext and is the plain case's code.
+pub fn client_read[&t, &c, &o](tab: &!t conns.Table, core: &!c Core, k: int, into: &!o [byte]) -> [conn_read, conn_write] Received {
+    return tlsio.read(core.tls, tab, contents(core.state), stride() * k, k, into);
+}
+
+pub fn client_write[&t, &c, &d](tab: &!t conns.Table, core: &!c Core, k: int, data: &d [byte]) -> [conn_write] Sent {
+    return tlsio.write(core.tls, tab, contents(core.state), stride() * k, k, data);
+}
+
+// Write what the TLS engine owes client `k` (0 all gone or none, 1 the socket is full, `0 - 1` failed); is anything still queued for it.
+pub fn tls_drain[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [conn_write] int {
+    return tlsio.drain(core.tls, tab, contents(core.state), stride() * k, k);
+}
+
+pub fn tls_pending[&c](core: &c Core, k: int) -> [] bool {
+    return tlsio.pending(core.tls, contents(core.state), stride() * k, k);
+}
+
+// The handshake may have finished: the request's header clock starts now.
+pub fn tls_promote[&c](core: &!c Core, k: int, now: int) -> [] int {
+    let st = contents(core.state);
+    let done = tlsio.promote(core.tls, st, stride() * k, k);
+    if done == 1 {
+        st[stride() * k + 7] = now + header_ms();
+        metrics.tls_established(contents(core.stats));
+    }
+    return done;
+}
+
+pub fn drop_session[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [conn_write] int {
+    let st = contents(core.state);
+    let peer = st[stride() * k + 2];
+    release_trial(core, k);
+    if peer >= 0 {
+        release_trial(core, peer);
+    }
+    // The client's request ends here. (Every call but one passes the client; the one that passes an upstream does so because its client is
+    // already gone, and that client's line was written when it went.)
+    log_end(core, k);
+    admin_release(core, k);
+    if st[stride() * k + tlsio.f_mode()] == tlsio.m_queued() || st[stride() * k + tlsio.f_mode()] == tlsio.m_handshake() {
+        // Ended before the handshake did: counted, with the engine's reason, or the deadline's, or none if the peer simply left.
+        var why = tlsio.failed_tag(core.tls, k);
+        if len(why) == 0 && contents(core.ids)[3] >= st[stride() * k + 7] {
+            why = "tls.handshake-timeout";
+        }
+        metrics.tls_refused(contents(core.stats), contents(core.rnames), why);
+    }
+    tlsio.end(core.tls, tab, contents(core.state), stride() * k, k);
+    conns.close(tab, k);
+    st[stride() * k] = 0;
+    if peer >= 0 && st[stride() * peer] == 1 {
+        conns.close(tab, peer);
+        st[stride() * peer] = 0;
+    }
+    return 0;
+}
+
+// How many idle connections to upstream `idx` the pool holds.
+pub fn idle_count[&c](core: &c Core, idx: int) -> [] int {
+    let st = contents(core.state);
+    var n = 0;
+    var k = 0;
+    while k < slot_limit() {
+        if st[stride() * k] == 1 && st[stride() * k + 1] == 3 && st[stride() * k + 11] == idx {
+            n = n + 1;
+        }
+        k = k + 1;
+    }
+    return n;
+}

@@ -9,10 +9,17 @@
 #
 # The gateway's row (docs/design.md section 3, section 2.1): the network both ways and unnarrowed (one bound serves listen and
 # connect, so the compiler cannot carry the upstream set: `gateway.egress` enforces it), the clock for deadlines, the heap for
-# the slabs sized at start, args for `--version`, standard output for it. Never: ffi, fs_read, fs_write, file_*, dir_*.
+# the slabs sized at start, args for `--version`, standard output for it. Never: ffi, fs_write, file_write, dir_write.
+#
+# The TLS code is in every build (a deployment without `tls_listen` releases the filesystem capability unread, so it reports no `fs_read`), and it
+# reads certificates through a directory handle: `dir_read` and `file_read` (docs/tls.md section 4). `gateway-tls` is the same program as built for
+# deploy/examples/tls.toml: it adds exactly two named paths, and scripts/authority.py fails on any other `fs_read`.
 
 [gateway]
-allow = ["args", "clock", "conn_accept", "conn_read", "conn_write", "heap", "io_write", "err_write", "net_in(\"\")", "net_out(\"\")", "poll"]
+allow = ["args", "clock", "conn_accept", "conn_read", "conn_write", "dir_read", "file_read", "heap", "io_write", "err_write", "net_in(\"\")", "net_out(\"\")", "poll"]
+
+[gateway-tls]
+allow = ["args", "clock", "conn_accept", "conn_read", "conn_write", "dir_read", "file_read", "fs_read(\"/dev/urandom\")", "fs_read(\"/etc/cancho-gateway/tls\")", "heap", "io_write", "err_write", "net_in(\"\")", "net_out(\"\")", "poll"]
 
 # A test tool: reads its input from argv, answers on standard output. No network, no files.
 [framing_probe]

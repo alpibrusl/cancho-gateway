@@ -1,8 +1,10 @@
-edition 5;
+edition 6;
 
 import std.io;
 import gateway.deploy;
 import gateway.proxy;
+import gateway.shared;
+import gateway.tlsio;
 import gateway.version;
 
 // `gateway` -- the reverse proxy (docs/design.md, docs/proxy.md). `gateway --version` prints its name and version; any other
@@ -25,9 +27,17 @@ fn admin_listening[&n](net: &n Net("")) -> [net_in("")] Listening {
     return tcp_listen(net, deploy.admin_port(), 16, 0);
 }
 
+// The TLS listener's `tcp_listen` answer, or a `Failed` for a deployment that has none.
+fn tls_listening[&n](net: &n Net("")) -> [net_in("")] Listening {
+    if deploy.tls_port() == 0 {
+        return Listening::Failed(0);
+    }
+    return tcp_listen(net, deploy.tls_port(), 1024, 0);
+}
+
 fn main(world: World) -> [] int {
-    let Split { io, ffi, fs, heap, args, net, clock } = split(world);
-    release(fs);
+    let Split { io, ffi, fs, heap, args, net, clock, signals } = split(world);
+    release(signals);
     release(ffi);
     var status = 0;
     var show_version = false;
@@ -43,6 +53,7 @@ fn main(world: World) -> [] int {
             write_all(i, "\n");
         }
         release(io);
+        release(fs);
         release(heap);
         release(net);
         release(clock);
@@ -67,16 +78,40 @@ fn main(world: World) -> [] int {
                         }
                     }
                 }
-                if admin_failed {
+                var secure = tls_listening(nn);
+                var secure_failed = false;
+                if deploy.tls_port() != 0 {
+                    borrow mut secure as &!sw in {
+                        match sw {
+                            Listening::Ok(x) => {
+                            }
+                            Listening::Failed(e) => {
+                                secure_failed = true;
+                            }
+                        }
+                    }
+                }
+                if admin_failed || secure_failed {
                     served = 2;
+                    release(fs);
                 } else {
                     borrow mut heap as &!h in {
                         borrow mut listener as &!lh in {
                             borrow mut admin as &!ah in {
-                                listener_nonblocking(lh);
-                                borrow clock as &ck in {
-                                    borrow mut io as &!ii in {
-                                        served = proxy.run(h, lh, ah, nn, ck, ii);
+                                borrow mut secure as &!sh in {
+                                    listener_nonblocking(lh);
+                                    borrow clock as &ck in {
+                                        borrow mut io as &!ii in {
+                                            // TLS, if the deployment has `tls_listen`: the certificates are read and the engine made here, before the first
+                                            // connection is taken; a bad identity ends the process with its own status (docs/tls.md section 3).
+                                            let (made, how) = tlsio.start(h, fs, ck, shared.slot_limit(), ii);
+                                            if how != 0 {
+                                                tlsio.close(h, made);
+                                                served = how;
+                                            } else {
+                                                served = proxy.run(h, lh, ah, sh, made, nn, ck, ii);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -90,10 +125,18 @@ fn main(world: World) -> [] int {
                     Listening::Failed(e) => {
                     }
                 }
+                match secure {
+                    Listening::Ok(sl) => {
+                        listener_close(sl);
+                    }
+                    Listening::Failed(e) => {
+                    }
+                }
                 listener_close(listener);
             }
             Listening::Failed(e) => {
                 served = 2;
+                release(fs);
             }
         }
     }

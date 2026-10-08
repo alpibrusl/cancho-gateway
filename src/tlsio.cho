@@ -1,0 +1,389 @@
+edition 6;
+
+module gateway.tlsio;
+
+import std.bytes;
+import std.conns;
+import std.dirs;
+import gateway.deploy;
+import gateway.tlsfiles;
+import gateway.tlsids;
+import tls;
+
+// TLS between a client's socket and the proxy's plaintext buffers (docs/tls.md section 3, items 3 to 6). The engine (cancho's `packages/tls`) moves
+// bytes and holds no socket; this module is the glue the proxy calls where a plain client connection would call `conns.read` and `conns.write`:
+// `read` and `write` answer what those answer (`Received`, `Sent`), so the proxy's framing, routing and relay code sees plaintext and is the
+// same code. Nothing here knows an HTTP byte.
+//
+// A TLS client slot has, besides the proxy's plaintext `bufs[k]` and `pends[k]`, two ciphertext buffers (`cin[k]`, bytes read from the socket
+// and not yet fed to the engine; `cout[k]`, bytes the engine has produced and not yet written) and six fields in the proxy's state record,
+// at the index `f_*` names below (the proxy's stride covers them): the mode, and the buffers' fill. The engine's slot is the table's slot.
+//
+// Back-pressure is the plain case's: the engine is read from only when the plaintext it would produce has room (`read` is called with the room
+// that is left in `bufs[k]`), and plaintext is given to it only when its output queue and `cout[k]` have room, so the memory a connection can
+// make the gateway hold is its slot's buffers and nothing more.
+
+// The state record's fields (offsets from the slot's base): the mode, bytes held in `cin`, where the unwritten part of `cout` starts and ends,
+// the clock when the handshake started (0: not yet), and 1 once the handshake's outcome has been counted.
+pub fn f_mode() -> [] int {
+    return 32;
+}
+
+pub fn f_cin() -> [] int {
+    return 33;
+}
+
+pub fn f_cs() -> [] int {
+    return 34;
+}
+
+pub fn f_ce() -> [] int {
+    return 35;
+}
+
+pub fn f_since() -> [] int {
+    return 36;
+}
+
+pub fn f_noted() -> [] int {
+    return 37;
+}
+
+// How many ints of the record are the TLS fields' (the proxy's stride is at least this plus `f_mode()`).
+pub fn fields() -> [] int {
+    return 8;
+}
+
+// Counts the ciphertext taken and the plaintext given, so that the loop can tell a read that moved something from one that did not.
+pub fn f_prog() -> [] int {
+    return 39;
+}
+
+// 1 while the connection may hold more plaintext or ciphertext than the proxy has taken (the proxy reads such a connection again without waiting for
+// the socket, because the socket will not say so).
+pub fn f_more() -> [] int {
+    return 38;
+}
+
+// Modes: not TLS, accepted and waiting its turn for a handshake (not watched: its ClientHello waits in the kernel and costs nothing), the
+// handshake under way, established, and its close_notify queued.
+pub fn m_plain() -> [] int {
+    return 0;
+}
+
+pub fn m_queued() -> [] int {
+    return 1;
+}
+
+pub fn m_handshake() -> [] int {
+    return 2;
+}
+
+pub fn m_established() -> [] int {
+    return 3;
+}
+
+pub fn m_closing() -> [] int {
+    return 4;
+}
+
+// One TLS record of ciphertext at the engine's largest (16,384 + 5 + 256), rounded; and two records of output, so that one can be written
+// while the next is made.
+pub fn cin_cap() -> [] int {
+    return 17408;
+}
+
+pub fn cout_cap() -> [] int {
+    return 34816;
+}
+
+// The engine and the buffers, for `slots` connections. `conf`: 0 handshakes started in the rate window, 1 the clock the window began.
+pub res struct Tls {
+    engine: tls.Engine,
+    cin: Box[[byte]],
+    cout: Box[[byte]],
+    conf: Box[[int]],
+}
+
+// A gateway without `tls_listen` holds one slot's worth of engine and buffers (about 60 KiB) that nothing ever uses: `match` through a reference
+// cannot bind a payload this wide in this compiler, so the TLS state is always present and the mode fields say whether it is in use.
+pub fn bare[&h](heap: &!h Heap) -> [heap] Tls {
+    return Tls { engine: tls.open_server(heap, 1), cin: box_slice(heap, 1, byte_of(0)), cout: box_slice(heap, 1, byte_of(0)), conf: box_slice(heap, 2, 0) };
+}
+
+// A server engine of `slots` slots, seeded, speaking `http/1.1` only; identities are added by the caller.
+pub fn open[&h, &e, &d, &o](heap: &!h Heap, slots: int, entropy: &e [byte], dir: &d Dir, now_unix: int, report: &!o Io) -> [heap, dir_read, file_read, io_write] (Tls, int) {
+    var engine = tls.open_server(heap, slots);
+    var status = 0;
+    borrow mut engine as &!ew in {
+        tls.seed(ew, entropy);
+        tls.set_alpn(ew, "http/1.1");
+        var i = 0;
+        var count = deploy.tls_identity_count();
+        if count == 0 {
+            count = 1;
+        }
+        while i < count && status == 0 {
+            if tlsids.load(heap, dir, deploy.tls_identity(i), ew, 0 - 1, now_unix) < 0 {
+                status = 6;
+                write_bytes(report, "gateway: TLS identity refused or unreadable: ");
+                write_bytes(report, deploy.tls_identity(i));
+                write_bytes(report, "\n");
+            }
+            i = i + 1;
+        }
+    }
+    return (Tls { engine: engine, cin: box_slice(heap, slots * cin_cap(), byte_of(0)), cout: box_slice(heap, slots * cout_cap(), byte_of(0)), conf: box_slice(heap, 2, 0) }, status);
+}
+
+pub fn close[&h](heap: &!h Heap, t: Tls) -> [heap] int {
+    let Tls { engine, cin, cout, conf } = t;
+    tls.close(heap, engine);
+    unbox_slice(heap, cin);
+    unbox_slice(heap, cout);
+    unbox_slice(heap, conf);
+    return 0;
+}
+
+// Write what the engine has queued for the socket of slot `k` (its state record starting at `b`): 0 when all of it went or there was none,
+// 1 when the socket is full, `0 - 1` when it failed.
+pub fn drain[&t, &x, &s](t: &!t Tls, tab: &!x conns.Table, st: &!s [int], b: int, k: int) -> [conn_write] int {
+    if st[b + f_mode()] < m_handshake() {
+        return 0;
+    }
+    let base = k * cout_cap();
+    while true {
+        if st[b + f_cs()] == st[b + f_ce()] {
+            st[b + f_cs()] = 0;
+            st[b + f_ce()] = tls.take(t.engine, k, contents(t.cout)[base..base + cout_cap()]);
+            if st[b + f_ce()] == 0 {
+                return 0;
+            }
+        }
+        match conns.write(tab, k, contents(t.cout)[base + st[b + f_cs()]..base + st[b + f_ce()]]) {
+            Sent::Wrote(n) => {
+                st[b + f_cs()] = st[b + f_cs()] + n;
+            }
+            Sent::Again => {
+                return 1;
+            }
+            Sent::Failed(e) => {
+                return 0 - 1;
+            }
+        }
+    }
+    return 0;
+}
+
+// Is anything queued for the socket, in `cout` or in the engine? (A session must not end, and a slot must be watched for room, while it is.)
+pub fn pending[&t, &s](t: &t Tls, st: &s [int], b: int, k: int) -> [] bool {
+    if st[b + f_mode()] < m_handshake() {
+        return false;
+    }
+    if st[b + f_cs()] != st[b + f_ce()] {
+        return true;
+    }
+    return tls.event(t.engine, k) == tls.event_want_write();
+}
+
+// Plaintext for the proxy: what `conns.read` would answer for this client. `into` is the room left in the request buffer. Ciphertext is read
+// from the socket only when the engine has no plaintext and needs more; what it owes the peer (the handshake's flights, an alert) is written
+// first, every time, so a handshake advances whenever this is called. The peer's end before its close_notify is `End`, as a plain socket's is:
+// a request is length-framed, so a truncated one is an aborted request either way (gate 5 of docs/tls.md).
+pub fn read[&t, &x, &s, &o](t: &!t Tls, tab: &!x conns.Table, st: &!s [int], b: int, k: int, into: &!o [byte]) -> [conn_read, conn_write] Received {
+    if st[b + f_mode()] == m_plain() {
+        return conns.read(tab, k, into);
+    }
+    let ib = k * cin_cap();
+    var rounds = 0;
+    while rounds < 64 {
+        rounds = rounds + 1;
+        if drain(t, tab, st, b, k) < 0 {
+            return Received::Failed(32);
+        }
+        let n = tls.recv(t.engine, k, into);
+        if n > 0 {
+            st[b + f_prog()] = st[b + f_prog()] + 1;
+            st[b + f_more()] = 0;
+            if n == len(into) || st[b + f_cin()] > 0 {
+                st[b + f_more()] = 1;
+            }
+            return Received::Data(n);
+        }
+        if n == 0 {
+            return Received::End;
+        }
+        if n != tls.would_block() {
+            // The engine failed the connection: its alert is queued; send it if the socket allows, and report the failure.
+            drain(t, tab, st, b, k);
+            return Received::Failed(71);
+        }
+        if st[b + f_cin()] > 0 {
+            let took = tls.feed(t.engine, k, contents(t.cin)[ib..ib + st[b + f_cin()]]);
+            if took < 0 {
+                // Failed: the next round writes the alert and reports it.
+            } else if took == 0 {
+                // The engine has no room for this record yet (its output has not gone, or the plaintext has not been taken).
+                st[b + f_more()] = 1;
+                return Received::Again;
+            } else {
+                st[b + f_prog()] = st[b + f_prog()] + 1;
+                copy_into(contents(t.cin)[ib..ib + st[b + f_cin()] - took], contents(t.cin)[ib + took..ib + st[b + f_cin()]]);
+                st[b + f_cin()] = st[b + f_cin()] - took;
+            }
+        } else {
+            match conns.read(tab, k, contents(t.cin)[ib..ib + cin_cap()]) {
+                Received::Data(m) => {
+                    st[b + f_cin()] = m;
+                }
+                Received::Again => {
+                    st[b + f_more()] = 0;
+                    return Received::Again;
+                }
+                Received::End => {
+                    tls.eof(t.engine, k);
+                    return Received::End;
+                }
+                Received::Failed(e) => {
+                    return Received::Failed(e);
+                }
+            }
+        }
+    }
+    return Received::Again;
+}
+
+// Plaintext from the proxy: what `conns.write` would answer. Up to one record is given to the engine and written; `Again` when the engine or
+// the socket has no room (the proxy keeps the bytes in `pends[k]` and is told when there is). Only an established connection is written to.
+pub fn write[&t, &x, &s, &d](t: &!t Tls, tab: &!x conns.Table, st: &!s [int], b: int, k: int, data: &d [byte]) -> [conn_write] Sent {
+    if st[b + f_mode()] == m_plain() {
+        return conns.write(tab, k, data);
+    }
+    let held = drain(t, tab, st, b, k);
+    if held < 0 {
+        return Sent::Failed(32);
+    }
+    if held == 1 || st[b + f_mode()] != m_established() {
+        return Sent::Again;
+    }
+    let n = tls.send(t.engine, k, data);
+    if n < 0 {
+        return Sent::Failed(71);
+    }
+    if n == 0 {
+        return Sent::Again;
+    }
+    if drain(t, tab, st, b, k) < 0 {
+        return Sent::Failed(32);
+    }
+    return Sent::Wrote(n);
+}
+
+// The handshake is done: the mode becomes established (and answers 1 once, for the proxy to count it and start the request's clocks).
+pub fn promote[&t, &s](t: &t Tls, st: &!s [int], b: int, k: int) -> [] int {
+    if st[b + f_mode()] == m_handshake() && tls.event(t.engine, k) == tls.event_established() {
+        st[b + f_mode()] = m_established();
+        return 1;
+    }
+    return 0;
+}
+
+// The end of a session: close_notify queued and written if the socket takes it now (best effort: the session is over either way), then the
+// engine's secrets for this slot overwritten and the TLS fields cleared. Called by the proxy just before it closes the socket.
+pub fn end[&t, &x, &s](t: &!t Tls, tab: &!x conns.Table, st: &!s [int], b: int, k: int) -> [conn_write] int {
+    if st[b + f_mode()] == m_plain() {
+        return 0;
+    }
+    if st[b + f_mode()] >= m_established() {
+        tls.finish(t.engine, k);
+        drain(t, tab, st, b, k);
+    }
+    tls.drop(t.engine, k);
+    var i = 0;
+    while i < fields() {
+        st[b + f_mode() + i] = 0;
+        i = i + 1;
+    }
+    return 0;
+}
+
+// Start the engine for the gateway: read the entropy and open the certificate directory (`gateway.tlsfiles`, the only code that holds the
+// filesystem), make the engine and give it every identity the deployment names. Answers the state and a status for `main` to exit with:
+// 0 ok (or no `tls_listen`, the state `Off` and `fs` released unread), 5 the entropy or the directory unavailable, 6 an identity refused.
+pub fn start[&h, &k, &o](heap: &!h Heap, fs: Fs(""), clock: &k Clock, slots: int, report: &!o Io) -> [heap, clock, io_write] (Tls, int) {
+    let entropy = box_slice(heap, 32, byte_of(0));
+    var status = 0;
+    var state = bare(heap);
+    borrow mut entropy as &!ew in {
+        match tlsfiles.open_files(fs, contents(ew)) {
+            DirOpened::Ok(d) => {
+                var dir = d;
+                if deploy.tls_port() != 0 {
+                    borrow dir as &dh in {
+                        let (made, how) = open(heap, slots, contents(ew), dh, clock_unix_ms(clock), report);
+                        status = how;
+                        close(heap, state);
+                        state = made;
+                    }
+                }
+                dir_close(dir);
+            }
+            DirOpened::Failed(e) => {
+                if deploy.tls_port() != 0 {
+                    status = 5;
+                    write_bytes(report, "gateway: cannot read the TLS entropy or open the certificate directory\n");
+                }
+            }
+        }
+        bytes.zero(contents(ew));
+    }
+    unbox_slice(heap, entropy);
+    return (state, status);
+}
+
+// Start one queued handshake if the bounds allow (handshakes in progress below `tls_handshakes`, started this second below `tls_rate`),
+// the connection accepted first. Answers the slot started, `0 - 1` for none, or `0 - 2 - slot` for a slot whose `serve` the engine
+// refused (the proxy ends it). `limit` slots of `stride` ints; `now_unix` is the wall clock.
+pub fn admit[&t, &s](t: &!t Tls, st: &!s [int], stride: int, limit: int, now: int, now_unix: int) -> [] int {
+    if now - contents(t.conf)[1] >= 1000 || now < contents(t.conf)[1] {
+        contents(t.conf)[1] = now;
+        contents(t.conf)[0] = 0;
+    }
+    if contents(t.conf)[0] >= deploy.tls_rate() || tls.handshakes_in_progress(t.engine) >= deploy.tls_handshakes() {
+        return 0 - 1;
+    }
+    // The oldest queued connection first (`f_since` is when it was accepted): lowest slot first would starve a connection in a high slot for as long
+    // as new ones keep taking the low slots the finished ones leave.
+    var pick = 0 - 1;
+    var k = 0;
+    while k < limit {
+        let b = k * stride;
+        if st[b] == 1 && st[b + f_mode()] == m_queued() && (pick < 0 || st[b + f_since()] < st[pick * stride + f_since()]) {
+            pick = k;
+        }
+        k = k + 1;
+    }
+    if pick < 0 {
+        return 0 - 1;
+    }
+    let b = pick * stride;
+    if tls.serve(t.engine, pick, now_unix) != 0 {
+        return 0 - 2 - pick;
+    }
+    st[b + f_mode()] = m_handshake();
+    st[b + f_since()] = now;
+    contents(t.conf)[0] = contents(t.conf)[0] + 1;
+    return pick;
+}
+
+// Why the engine ended slot `k`'s connection, as the `tls-server-*` tag the refusal table counts it by; empty if the engine did not fail it.
+pub fn failed_tag[&t](t: &t Tls, k: int) -> [] &static [byte] {
+    if tls.event(t.engine, k) != tls.event_failed() {
+        return "";
+    }
+    let code = tls.failure(t.engine, k);
+    if code == 0 {
+        return "";
+    }
+    return tls.refusal_tag(code);
+}

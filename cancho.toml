@@ -1,13 +1,20 @@
 [package]
 name = "cancho-gateway"
-cancho = "a4572ea3b506e4bcec1c4be43deda1043c11ba9f"   # the compiler these sources were written for; CI builds this commit
+cancho = "2fcf4cde156dbc118d2545dae84d6e054c4118e4"   # the compiler these sources were written for; CI builds this commit
+
+# The TLS 1.3 server (cancho's packages/tls, and the x509 package it requires, fetched with it): a full commit hash, never a name. The store
+# is inside cancho's repository at that commit; `cancho build` and `cancho test` fetch it, re-typecheck and re-hash every declaration (docs/tls.md).
+[dependencies.tls]
+git = "https://github.com/alpibrusl/cancho"
+rev = "2fcf4cde156dbc118d2545dae84d6e054c4118e4"
+path = "packages/tls/.cancho-vcs/tls"
 
 # One program, one authority row (docs/design.md section 3). The deployment
 # generator (task #11) will add a generated module here per deployment.
 
 [[bin]]
 name = "gateway"
-sources = ["generated/deploy.cho", "generated/routes.cho", "src/out.cho", "src/accesslog.cho", "src/problem.cho", "src/framing.cho", "src/chunked.cho", "src/route.cho", "src/response.cho", "src/forward.cho", "src/egress.cho", "src/admin.cho", "src/metrics.cho", "src/proxy.cho", "src/version.cho", "src/gateway.cho"]
+sources = ["generated/deploy.cho", "generated/routes.cho", "src/out.cho", "src/accesslog.cho", "src/problem.cho", "src/framing.cho", "src/chunked.cho", "src/route.cho", "src/response.cho", "src/forward.cho", "src/egress.cho", "src/admin.cho", "src/metrics.cho", "generated/tlsfiles.cho", "src/tlsids.cho", "src/tlsio.cho", "src/shared.cho", "src/adminloop.cho", "src/proxy.cho", "src/version.cho", "src/gateway.cho"]
 std = true
 out = "build/gateway"
 

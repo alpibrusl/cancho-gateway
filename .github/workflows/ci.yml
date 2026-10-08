@@ -81,6 +81,10 @@ jobs:
         working-directory: gateway
         run: python3 tests/admin_test.py
 
+      - name: TLS against Python's ssl, openssl and curl; the handshake bounds, hostile clients, and the smuggling corpus over TLS
+        working-directory: gateway
+        run: python3 tests/tls_test.py
+
       - name: The header policy against nginx (the table in the test says where they differ on purpose, and why)
         working-directory: gateway
         run: |
@@ -98,7 +102,9 @@ jobs:
 
       - name: The authority is the compiler's, recorded, and within its ceiling
         working-directory: gateway
-        run: python3 scripts/authority.py --check
+        run: |
+          python3 scripts/authority.py --check
+          python3 tests/authority_test.py
 
       - name: The site (docs/index.html, evidence.html) - its figures and tables come from the recorded results, and its links resolve
         working-directory: gateway

@@ -13,10 +13,24 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-FORBIDDEN = {"ffi", "fs_read", "fs_write", "file_read", "file_write", "dir_read", "dir_write"}
+FORBIDDEN = {"ffi", "fs_write", "file_write", "dir_write"}
+# The deployment that turns TLS on is derived as well (docs/tls.md section 4): its generated modules replace the example's, and the report must
+# name exactly the two filesystem paths the program reads, never `fs_read("")`.
+PROFILES = [("gateway-tls", "gateway", "deploy/examples/tls.toml")]
+
+
+def dependencies(sources):
+    """The packages `cancho build` fetched (the TLS engine and what it requires), for a program that imports them."""
+    if not any(s.endswith("src/tlsio.cho") for s in sources):
+        return []
+    found = sorted(str(p) for p in (ROOT / "build" / "deps").glob("*.cho"))
+    if not found:
+        sys.exit("build/deps is empty: run `cancho build` once first")
+    return found
 
 
 def derive(files):
@@ -55,12 +69,14 @@ def main():
     with open(ROOT / "authority.toml", "rb") as f:
         ceilings = tomllib.load(f)
     failures = []
+    derive_cached = {}
     for entry in project.get("bin", []):
         name = entry["name"]
         if name not in ceilings:
             failures.append("%s: no ceiling in authority.toml" % name)
             continue
-        report = derive([str(ROOT / s) for s in entry["sources"]])
+        sources = [str(ROOT / s) for s in entry["sources"]]
+        report = derive(dependencies(sources) + sources)
         record = ROOT / "manifests" / ("%s.authority.json" % name)
         text = json.dumps(report, indent=2) + "\n"
         if check:
@@ -69,8 +85,33 @@ def main():
         else:
             record.parent.mkdir(exist_ok=True)
             record.write_text(text)
+        derive_cached[name] = report
         failures.extend(problems_for(name, report, set(ceilings[name].get("allow", []))))
         print("%-8s %s" % (name, ", ".join(label_text(l) for l in report["labels"])))
+    bins = {e["name"]: e for e in project.get("bin", [])}
+    for name, base, deployment in PROFILES:
+        if name not in ceilings:
+            failures.append("%s: no ceiling in authority.toml" % name)
+            continue
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(ROOT / deployment), "--out", tmp], check=True)
+            sources = [str(pathlib.Path(tmp) / pathlib.Path(s).name) if s.startswith("generated/") else str(ROOT / s) for s in bins[base]["sources"]]
+            report = derive(dependencies(sources) + sources)
+        record = ROOT / "manifests" / ("%s.authority.json" % name)
+        text = json.dumps(report, indent=2) + "\n"
+        if check:
+            if not record.exists() or record.read_text() != text:
+                failures.append("%s: %s is not the compiler's report" % (name, record.relative_to(ROOT)))
+        else:
+            record.write_text(text)
+        failures.extend(problems_for(name, report, set(ceilings[name].get("allow", []))))
+        reads = sorted(label_text(l) for l in report["labels"] if l["name"] == "fs_read")
+        if len(reads) != 2 or any(r == 'fs_read("")' for r in reads):
+            failures.append("%s: the filesystem authority must be exactly two named paths, found %s" % (name, reads))
+        print("%-8s %s" % (name, ", ".join(label_text(l) for l in report["labels"])))
+    plain = [label_text(l) for l in derive_cached.get("gateway", {}).get("labels", [])]
+    if any(t.startswith("fs_read") for t in plain):
+        failures.append("gateway: a deployment without tls_listen must report no fs_read, found %s" % plain)
     for p in failures:
         print("FAIL " + p)
     return 1 if failures else 0
