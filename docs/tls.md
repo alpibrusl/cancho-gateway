@@ -146,7 +146,7 @@ its handshake is dropped without an answer, since there is no HTTP to answer wit
 | TLS state absent unless `tls_listen` | always present: one slot's engine and one slot's buffers when off (about 60 KiB), the full ones when on | this compiler cannot bind a payload wider than one leaf when matching a `res enum` through a reference (`matching through a reference cannot bind a payload wider than one leaf`), so `Core` holds a `Tls` struct, not an `Off | On(Tls)` enum. The mode field of each slot says whether it is in use |
 | handshakes queued in arrival order | queued oldest first by accept time | the first version took the lowest slot number first and **starved** a connection in a high slot for as long as new ones kept taking the low slots: 19 of 250 connections in a burst test waited out their 4 s and were dropped. `tls_test.py` has the burst; a mutant that restores lowest-slot-first fails it |
 | a queued connection is bounded by `tls_handshake_ms` | bounded by `total_timeout_ms` while it waits, and by `tls_handshake_ms` from when its handshake starts | bounding the wait by the handshake's deadline refused the honest peer that a bound is meant to delay (the first version did; a mutant that restores it fails the burst test with 110 clients at once, the last of which waits 2.2 s) |
-| edition 6 for the modules that touch the new capabilities | `gateway.cho` (its `Split` has a `signals` field in edition 6, released unread), `tlsio.cho`, `tlsids.cho`, `tlsfiles.cho`; the rest stay edition 5 | as designed |
+| edition 6 for the modules that touch the new capabilities | `gateway.cho` (its `Split` has a `signals` field in edition 6, released unread *(slice 2 claims it, section 11)*), `tlsio.cho`, `tlsids.cho`, `tlsfiles.cho`; the rest stay edition 5 *(corrected in slice 2: `proxy.cho` is edition 6 too, section 11.7)* | as designed |
 | `X-Forwarded-Proto`, log field, metrics | as designed, with the corrections marked in section 3 | |
 | the report | `gateway`: the old row plus `dir_read`, `file_read` (the code is in every build; a deployment without `tls_listen` releases the capability unread and reports no `fs_read`). `gateway-tls` (derived for `deploy/examples/tls.toml`): the same plus exactly `fs_read("/dev/urandom")` and `fs_read("/etc/cancho-gateway/tls")` | `scripts/authority.py` derives both and fails on any other `fs_read`, and on `fs_write`, `file_write`, `dir_write` and `ffi` as before |
 | the default `tls_rate` is 100 a second | **50** | a handshake measured 12 ms of this gateway's CPU on the development machine (below), against cancho's 3 to 5.5 ms; 100 a second would be more than a core. The operator sets it from their machine's figure |
@@ -216,3 +216,46 @@ report prints the set, so a program that claimed one more would be refused by th
 **11.8 Gates.** (a) The tests of `tests/tls_test.py`: `SIGHUP` after a certificate is replaced on disk, a new connection gets the new certificate (compared as DER, and it verifies against the new chain and not the old), a connection that was open before keeps working with the certificate it was sent; four
 kinds of bad replacement (a key that is not a key, a pair that does not match, a missing file, an empty chain), each leaving the old certificate serving, counted in both formats, and named on standard error; `SIGTERM` and `SIGINT` each stop the gateway with status 0 and an open TLS connection gets `close_notify`;
 a TLS-only deployment listens on the TLS and admin ports and no other. (b) `tests/proxy_test.py`: `SIGHUP` on a plain deployment is ignored, `SIGTERM` and `SIGINT` stop it with status 0. (c) `tests/generate_test.py`: one case for each new refusal and acceptance. (d) `tests/authority_test.py` as in 11.7. (e) Mutants of the new code (11.9).
+
+**11.9 As built, and where it differs from the design.** Everything in 11.1 to 11.7 was built as written. What the code found: (1) the directory handle could not simply be stored in `Tls` (a `res struct` that must exist, `bare`, in a deployment with no directory), so `start` returns it beside the state as a `DirOpened`, `serve` in `gateway.cho` owns
+it and lends `proxy.run` a `&DirOpened` that the signal turn matches in place (a `Failed` for a deployment without TLS, where `SIGHUP` is a no-op). (2) `serve` could not declare `dir_read`/`file_read`: the compiler discharges them by the handle the function holds, and a row that names an effect it does not perform is refused ("a row is exact").
+(3) The measure of "exactly two `fs_read` paths" is unchanged and still checked in `scripts/authority.py` (it fails on any other count, and on `fs_read("")`). (4) The plain listener's `listener_nonblocking` moved from `main` into `proxy.run`, beside the other two listeners', because the plain listener may now not exist.
+(5) A stop is a loop exit, so the lines of the turn are written and `end_all` sends `close_notify` to every connection that is up; the exit status is `0`, and a test shows a TLS client that was connected when `SIGTERM` arrived reads a clean end of stream, not a reset. (6) `err_write` is new in the derived report (it was in the ceiling already). The tests: `tests/tls_test.py` 22 (18 before),
+`tests/proxy_test.py` 77 (75), `tests/admin_test.py` 16 (the key list and the Prometheus names gain the reload counters), `tests/generate_test.py` 90 refusal cases (82) and 7 accepted (5) and two checks of what a TLS-only deployment compiles, `tests/authority_test.py` 5 checks (3).
+
+**Mutants of slice 2.** 28 single edits of the new code, each applied to a copy of the tree and run against the tests that should notice it: **27 killed, 1 survives**, argued below. (The first version of mutant S1, "SIGHUP ignored", was written as `sg.has(mask, 0)`, which is true of every mask (all of no bits are present), so it survived, and it was
+a bad mutant, not a gap: it reloads on every signal. Rewritten as a test of `SIGUSR1` instead, it is killed.)
+
+| | the edit | killed by |
+|---|---|---|
+| R1 | reload reads only the first identity | reload counters (+1 where +2) |
+| R2 | a refused replacement counted as replaced | the failure counter |
+| R3 | an unreadable file reported as `refused` | the stderr line of the missing-key case |
+| R4 | the reload line is not written | the stderr line |
+| R5 | identity number off by one | counters and the certificate served |
+| **R6** | **reload with the clock at 0 instead of the wall clock** | **survives**: the engine's `replace_identity` uses its time argument as a clock for the handshakes it starts, not to judge the certificate (a certificate whose `notBefore` is after 1970 was accepted at time 0). Equivalent until the engine starts to judge validity at load, and then the reload test with a not-yet-valid certificate is the one to add |
+| R7 | add an identity (id -1) instead of replacing | the new certificate is not the one served |
+| S1 | `SIGHUP` not recognised | no reload |
+| S2 | `SIGINT`, `SIGTERM` not recognised | the process does not stop (3 s wait) |
+| S3 | `SIGHUP` also stops the gateway | the plain deployment must survive `SIGHUP` |
+| S4 | a stop answers status 1 | exit status 0 |
+| S5 | the signal's token equals the TLS listener's | the signal is never read; no reload |
+| S6 | the claim is not registered on the poller | no reload (the signal is blocked, never seen) |
+| S7 | `end_all` not called | an open TLS connection gets a reset, not `close_notify` |
+| S8 | `end_all` skips every slot | the same |
+| S9 | no `gateway: stopping` line | the exact stderr line is asserted |
+| C1 | the two reload counters swapped | counters |
+| C2 | Prometheus prints the failures as the reloads | the Prometheus test |
+| C3 | JSON key renamed | `admin_test.py`'s key list |
+| C4 | the scrape bound not grown for the two new families | `cancho test` (`metrics_bound`) |
+| L1 | the plain port bound even when `listen` is absent | the TLS-only deployment's listening ports |
+| L2 | the request id's port is 0 with no plain listener | the request id test |
+| L3 | the plain listener left blocking | the plain listener's test |
+| L4 | the plain listener never polled | the plain listener's test |
+| G1 | a deployment with no listener accepted | `config.listeners` cases |
+| G2 | `admin_listen == listen` compared when there is no `listen` | the TLS-only deployments without an admin port |
+| G3 | `listen = 0` accepted | the `config.listen` cases |
+| G4 | `--explain` says a plain listener exists | the TLS-only compile check |
+
+**Not done in slice 2:** a drain on stop (requests in flight are cut); the names of an identity, or the set of identities, read again (a restart); a reload of an identity's chain that is not valid yet (R6); the cost cell (gate 9). The runbook line for a renewal: copy the new `chain.pem` and `key.pem` into the identity's directory (each file replaced whole; the pair complete before the signal, because the engine refuses a pair that does not match and the old one keeps serving), then `kill -HUP <pid>`, then look at the
+`tls_reload_failures_total` counter or at standard error.
