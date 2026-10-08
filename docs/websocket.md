@@ -1,7 +1,7 @@
 # WebSocket proxying (task #15), first slice
 
-Status: **design, written before the code (2026-10-08); the gates in section 12 are fixed here and must be able to fail.** Sections 1 to 12 are the decision. Section 13 is filled in after the build
-(what was built, what was measured, the mutants) and says where the build found the design false; a claim found false is corrected in place and marked *(corrected)*. Claims about cancho are about the pinned
+Status: **slice 1 built (2026-10-08).** Sections 1 to 12 are the decision, written before the code; the gates in section 12 were fixed then and must be able to fail. Section 13 is what was built, what was measured and the mutants, and says where
+the build found the design false; a claim found false is corrected in place and marked *(corrected)*. Claims about cancho are about the pinned
 compiler (`cancho.toml`, `2fcf4cd`).
 
 The use case is OCPP-J: EV chargers connect to a back office over a WebSocket (`ws`, or `wss` in production) and speak a subprotocol, `ocpp1.6` or `ocpp2.0.1`, for hours or weeks. The gateway sits in front of the
@@ -40,7 +40,7 @@ read WebSocket frames.
 - **What the gateway does about it:** it carries copies of those two files (`src/sha1.cho`, `src/b64.cho`; module names changed, bodies not) and one module of its own, `src/websocket.cho`. SHA-1 is used for one
   thing, the `Sec-WebSocket-Accept` value, which is a check that the server read the key, **not** a security primitive (RFC 6455 section 1.3, 10.8). The gateway's own differential against `hashlib` is a gate (section 12, gate 2).
 - **No new effect.** Nothing in this slice needs a capability the gateway does not already hold; section 12 gate 9 holds the authority report to that.
-- **Unknown, to be measured:** whether `std.http.parse` at this commit accepts a request head carrying `Upgrade` and `Sec-WebSocket-*` headers without comment. The code reads as if it does (it treats `Upgrade` as an ordinary header and the
+- **Unknown, to be measured** *(measured, section 13: it accepts)*: whether `std.http.parse` at this commit accepts a request head carrying `Upgrade` and `Sec-WebSocket-*` headers without comment. The code reads as if it does (it treats `Upgrade` as an ordinary header and the
   gateway strips it today as hop-by-hop, `src/forward.cho`); gate 1 measures it.
 
 ## 3. Deployment keys
@@ -50,8 +50,8 @@ Per route (all optional; `subprotocols` and `origins` are refused without `webso
 | key | type | default | meaning |
 |---|---|---|---|
 | `websocket` | bool | `false` | the route accepts WebSocket upgrades. A request without `Upgrade` is an ordinary request on the same route |
-| `subprotocols` | list of up to 8 tokens | `[]` | the subprotocols the route serves (`"ocpp1.6"`, `"ocpp2.0.1"`). Each is an RFC 9110 token of at most 64 bytes, no repeats. An empty list means the route serves **no** subprotocol (section 4, row 11) |
-| `origins` | list of up to 16 strings | `[]` | the `Origin` values a request may carry (section 4, row 12), each `scheme://host[:port]` exactly as a browser writes it (lowercase scheme and host, no path, no trailing slash) |
+| `subprotocols` | list of up to 8 tokens | `[]` | the subprotocols the route serves (`"ocpp1.6"`, `"ocpp2.0.1"`). Each is an RFC 9110 token of at most 64 bytes, no repeats. An empty list means the route serves **no** subprotocol (section 4, row 9) |
+| `origins` | list of up to 16 strings | `[]` | the `Origin` values a request may carry (section 4, row 10), each `scheme://host[:port]` exactly as a browser writes it (lowercase scheme and host, no path, no trailing slash) |
 
 A route with `websocket = true` whose `methods` exclude `GET` is refused (`config.websocket`): an upgrade is a `GET`.
 
@@ -83,18 +83,16 @@ The stance is the gateway's: one reading or a refusal. Where RFC 6455 allows a s
 | 6 | nothing after the head in what was read (no pipelined bytes). RFC 6455 4.1: the client waits for the response before sending more | `ws.early-data` 400 |
 | 7 | exactly one `Sec-WebSocket-Version` whose value is `13`. Anything else: `426` with `Sec-WebSocket-Version: 13` in the response (RFC 6455 4.4) | `ws.version` 426 |
 | 8 | exactly one `Sec-WebSocket-Key`, 24 bytes, canonical base64 of 16 bytes: 22 base64 characters whose last carries no stray low bits (`A`, `Q`, `g` or `w`), then `==`. A lenient decoder would accept non-canonical padding; the gateway does not | `ws.key` 400 |
-| 9 | no more than one `Sec-WebSocket-Protocol` header, a comma-separated list of tokens, each at most 64 bytes, no empty items, at most 16 | `ws.subprotocol` 400 |
-| 10 | no more than one `Origin` header | `ws.origin` 403 |
-| 11 | subprotocols: if the route lists any, the client must offer at least one of them; if the route lists none, the client must offer none. Comparison is exact and case-sensitive (RFC 6455 section 11.5 registry names are lowercase; 4.2.2 item 5.ii compares case-sensitively) | `ws.subprotocol` 400 |
-| 12 | origin: a request with **no** `Origin` header is not from a browser and is admitted. A request **with** one must equal, byte for byte, an entry of the route's `origins`; an empty list admits none. There is no wildcard | `ws.origin` 403 |
-| 13 | tunnels in progress or open are fewer than `ws_max_tunnels` | `ws.limit` 503 |
+| 9 | subprotocols: at most one `Sec-WebSocket-Protocol` header, a comma-separated list of tokens, each at most 64 bytes, no empty items, at most 16. Then: if the route lists any, the client must offer at least one of them; if the route lists none, the client must offer none. Comparison is exact and case-sensitive (RFC 6455 section 11.5 registry names are lowercase; 4.2.2 item 5.ii compares case-sensitively) | `ws.subprotocol` 400 |
+| 10 | origin: at most one `Origin` header. A request with **no** `Origin` header is not from a browser and is admitted. A request **with** one must equal, byte for byte, an entry of the route's `origins`; an empty list admits none. There is no wildcard | `ws.origin` 403 |
+| 11 | tunnels in progress or open are fewer than `ws_max_tunnels` | `ws.limit` 503 |
 
-Why rows 11 and 12 are shaped as they are. A browser always sends `Origin` on a WebSocket request, and a script on any web page can ask the browser to open a socket to your back office with the user's cookies and network position
+Why rows 9 and 10 are shaped as they are. *(Corrected: the design listed the format and the match of each as four rows, 9 to 12, and the limit as 13; the code checks each pair together, so the rows are merged and the order of the two pairs is subprotocol then origin.)* A browser always sends `Origin` on a WebSocket request, and a script on any web page can ask the browser to open a socket to your back office with the user's cookies and network position
 (cross-site WebSocket hijacking, RFC 6455 section 10.2). Refusing an unlisted `Origin` is the whole defence at this layer, and a charger (which is not a browser and sends none) is unaffected. The default, an empty list, admits no
 browser at all. The subprotocol rule is the other half of an OCPP route: a charger that offers `ocpp1.6` to a route that serves `ocpp2.0.1` is refused at the edge, with a tag, instead of reaching a back office that would close it with
 a code.
 
-Row 13 is checked last so that a refused request does not count against the bound; the count is taken when the check passes and released when the session ends, so a refusal later (the upstream's) frees it.
+Row 11 is checked last so that a refused request does not count against the bound; the count is taken when the check passes and released when the session ends, so a refusal later (the upstream's) frees it.
 
 ## 5. What the upstream is sent
 
@@ -167,7 +165,7 @@ A deployment that sets it near 127 leaves no room for ordinary requests on the s
 gateways or accept that bound. The count of tunnels in progress and open is `sessions with an upgrade flag`, taken from the slot table by a scan, so it cannot drift from the table.
 
 This slice does not raise the table. A deployment of ten thousand chargers (the spike in cancho's `docs/websocket-spike.md` held 9,999 in 79.8 MB on a dedicated server) needs the slot count to become a deployment key, which changes the memory budget of the whole gateway (`docs/tls.md`
-section 4 already lists 23 MiB of TLS state at 256 slots) and is measured separately. **Unknown:** the CPU and memory of the tunnel path at hundreds of tunnels; gate 5 measures the 127 case only.
+section 4 already lists 23 MiB of TLS state at 256 slots) and is measured separately. **Unknown** *(measured at 120 in section 13)*: the CPU and memory of the tunnel path at hundreds of tunnels.
 
 ## 10. Interaction with the pool, the circuit and the retry
 
@@ -218,7 +216,7 @@ the bound that keeps `refusals_total`'s label set closed is the same: tags the c
 
 **Gates, fixed before the code; each must be able to fail (gate 8 shows it).**
 
-1. **End to end, plain** (`tests/websocket_test.py`): a Python RFC 6455 client and a Python RFC 6455 upstream (both written for the test, from the RFC, not from the gateway), through a built gateway: text, binary (1 byte, 125, 126, 65535, 65536 bytes), ping with
+1. **End to end, plain** (`tests/websocket_test.py`): a Python RFC 6455 client and a Python RFC 6455 upstream (both written for the test, from the RFC, not from the gateway), through a built gateway (and, where the `websockets` library is installed, that library as a client and as an upstream: an implementation that is not ours): text, binary (1 byte, 125, 126, 65535, 65536 bytes), ping with
    payload answered by a pong with the same payload, a close handshake with a code and a reason, subprotocol selection of `ocpp1.6` and `ocpp2.0.1` on two routes. Also: the access log line of a finished tunnel has `status` 101, `"upgrade":"websocket"`
    last, the byte counts equal to what the test sent and received, and a non-upgrade line has no `upgrade` key.
 2. **The accept value against `hashlib`:** the RFC 6455 example key, and 300 random keys, each through the gateway: the upstream computes the accept with `hashlib` and `base64`, the gateway with its own SHA-1 and base64 and compares; every handshake succeeds
@@ -228,7 +226,7 @@ the bound that keeps `refusals_total`'s label set closed is the same: tags the c
    characters, a key of non-canonical padding, two keys, version 8 and `13, 8` and none, an origin not listed, two origins, `Origin: null`, a subprotocol not listed, none offered to a route that lists some, one offered to a route that lists none, a subprotocol list with an empty item. Upstream-side: an upstream whose `101` has a wrong
    accept, no accept, two accepts, no `Upgrade`, `Content-Length`, `Transfer-Encoding`, an unoffered subprotocol, a subprotocol where none is served, no subprotocol where one is required, an extension; and a `101` to a plain request; and a `200`/`401`/`404` to an upgrade (relayed with its status).
 4. **Tunnel integrity under back-pressure:** a 1 MiB message in each direction, and a 1 MiB message echoed while the client does not read for a second; 8 MiB sent by the upstream to a client that reads late; all byte-for-byte (SHA-256); the gateway's resident memory
-   does not grow past the slabs it allocated at start (bounded, measured); `ws.idle` timer does not fire while data is draining slowly.
+   does not grow past the slabs it allocated at start (bounded, measured); `ws.idle` timer does not fire while data is draining slowly. *(Corrected in section 13: 32 MiB toward the upstream as well, because 8 MiB was absorbed by the kernel's buffers; the last clause was not tested.)*
 5. **Deadlines and no spin:** an idle tunnel is closed at `ws_idle_timeout_ms` (within a bound, with `ws.idle-timeout` in the log); traffic every half interval keeps it open past three intervals; a busy tunnel is closed at `ws_max_lifetime_ms` with
    `ws.lifetime`; a tunnel at rest and one with a non-reading peer use under 0.05 s of CPU in a second; a tunnel ended by the client or the upstream leaves no descriptor and no slot (`sessions_active` and `ws.tunnels_active` return to their start); 120 tunnels
    at once all carry bytes, the 121st past `ws_max_tunnels` is refused `ws.limit`, and ordinary requests are served meanwhile.
@@ -240,4 +238,140 @@ the bound that keeps `refusals_total`'s label set closed is the same: tags the c
 
 ## 13. As built
 
-*(filled in after the build)*
+Built 2026-10-08, on a branch of its own; everything below was run on the development machine against the pinned compiler (`2fcf4cd`).
+
+**What exists.**
+
+- *Deployment keys* (`scripts/generate.py`, one tag, `config.websocket`): per route `websocket`, `subprotocols`, `origins`; deployment-wide `ws_idle_timeout_ms`, `ws_max_lifetime_ms`, `ws_max_tunnels`. The route table has three more columns (8 to 10); `generated/deploy.cho` has `ws_idle_ms`, `ws_lifetime_ms`, `ws_max_tunnels`.
+- *`src/websocket.cho`* (468 lines, pure, no effect): `asks_upgrade`, `judge` (section 4), `accept_for`, `check_response` (section 6), `upgrade_response` (the head the client is sent), the rule tags and statuses. `src/sha1.cho` and `src/b64.cho` are cancho's spike files with the module name changed.
+- *The proxy* (`src/proxy.cho`, 1,334 to 1,550 lines, still the largest file): the block in `head_ready`, `upgrade_answered`, `tunnel_down`, `tunnel_up`, a dispatch at the top of `pump_response` and `pump_request`, a tunnel branch in `settle`, `step`, `read_client`, `read_upstream` and `sweep`, and the TLS turn. A tunnel is client phase 6 and upstream state 16 = 2. `src/shared.cho`: client stride 40 to 48 (fields 40 `ws_mode`, 41 `ws_mask`; 32 to 39 stay TLS's), meta area 256 to 288 bytes (the accept value at 252), `tunnels` (the scan of section 9). `src/forward.cho`: `rewrite_upgrade`. `src/response.cho`: `parse_upgrade`. `src/problem.cho`: 403 and 426 (with `Sec-WebSocket-Version: 13`). `src/accesslog.cho`: the `upgrade` key. `src/metrics.cho`: `ws_tunnels_total`, `ws_tunnels_active`, and the worst-case bound.
+- *Tests:* `tests/websocket_test.cho` (23 cancho tests: every row of sections 4 and 6 case by case, the accept value against the RFC's example and SHA-1's vectors), `tests/websocket_test.py` (52 end-to-end tests, below), `tests/websocket_mutants.py` (the mutant runner), 35 `config.websocket` refusal cases and 6 accepted deployments in `tests/generate_test.py`, 1 test of `forward.rewrite_upgrade` and 1 of the log line in the existing cancho tests. `deploy/examples/ocpp.toml` with `scripts/demo_ws_upstream.py` and `scripts/demo_ws_client.py` is example 8 on `docs/examples.html`; its output there is from a real run.
+
+**Where the build found the design wrong, or the gate weaker than it read.**
+
+| design | built | why |
+|---|---|---|
+| section 4 rows 9 to 12 (format and match of the subprotocol and of the origin as four rows), limit as row 13 | two rows (9 subprotocol, 10 origin) and the limit as row 11 | the code checks each pair together, subprotocol before origin; corrected in the table |
+| gate 4: "8 MiB sent by the upstream to a client that reads late" only | 8 MiB toward the client **and 32 MiB toward the upstream** | the first version of the upstream-direction test sent 8 MiB and `send` returned at once: the kernel's buffers on loopback absorbed it, so nothing pushed back. 32 MiB blocked the sender for more than a second, which the test asserts |
+| gate 4: "the idle timer does not fire while data drains slowly" | **not tested** | a slow reader is tested for integrity and bounded memory, not for the timer; the timer is reset when bytes move into a queue, and a reader that drains slowly keeps the queue moving, which is an argument, not a measurement |
+| section 2, "unknown": `std.http.parse` and `Upgrade` | **measured: it accepts** a head with `Upgrade`, `Connection: Upgrade` and `Sec-WebSocket-*` as ordinary headers | every test of `judge` parses its request with it |
+| section 9, "unknown": CPU and memory at hundreds of tunnels | **measured at 120** (below); not beyond | the gateway admits up to 127 (the table is 256 slots); 120 is what the test sets |
+| section 12, gate 3 "one test for each tag" | one test checks 34 refusals before the dial, one 10 upstream-side modes plus a subprotocol where none is served, a corpus of 17 smuggling-shaped upgrades, and the cancho tests hold the rest case by case | the upstream-never-heard-of-it assertion is on the connection count, which is the same for all of them |
+| the 426 | `application/problem+json` with the version in a header (`Sec-WebSocket-Version: 13`) | RFC 6455 4.4; `problem.response` writes the header for this one status |
+
+Two defects the first runs of the tests found **in the tests**, not in the gateway: an upstream path (`/plain101`) that the test's own upstream answered as plain HTTP, and the idle/lifetime test whose first version could not tell a tunnel closed at the idle time from one closed at the lifetime (the lifetime is now 4 s against an idle time of 1 s).
+
+**Gates.**
+
+| gate | status | where |
+|---|---|---|
+| 1 end to end, plain | **met** | `websocket_test.py`: text, binary at 0, 1, 125, 126, 127, 65535, 65536 and 70000 bytes, ping and pong with a payload, a close handshake with a code, a fragmented message, `ocpp1.6` and `ocpp2.0.1` selected on two routes, a route with no subprotocol, a server that speaks first, a frame sent before the 101. The log line of a finished tunnel: `status` 101, `"upgrade":"websocket"` last, `bytes_in` equal to the bytes the client sent, `bytes_out` equal to the 101 head plus the bytes it received, no `tls` key; an ordinary request on the same gateway writes the line it always wrote |
+| 2 the accept value against `hashlib` | **met** | the RFC example key and 300 random keys through the gateway (the gateway compares its own SHA-1 and base64 with the upstream's `hashlib`); the cancho tests carry the SHA-1 vectors of the empty message, `abc` and the 448-bit message of FIPS 180-4; mutants r11 to r14 |
+| 3 refusals, the corpus | **met** | section 12's tag table, each tag asserted with its status; a refusal before the dial leaves the upstream's connection count unchanged; the smuggling corpus; every upstream-side refusal; a `401` relayed with its body; a `101` to a plain request refused (`response.status`) |
+| 4 integrity and back-pressure | **met, with the corrections above** | 1 MiB each way, six 600 KB messages echoed to a reader that reads nothing for a second, 8 MiB to a client with a 4 KiB receive buffer that reads after 1.5 s (the gateway's resident memory grew by under 4 MiB while it waited: asserted), 32 MiB to an upstream that reads after 1.5 s; all byte for byte; 3 MiB of random bytes that are not frames delivered exactly (the gateway does not judge them) |
+| 5 deadlines, no spin, limits | **met** | idle close at the idle time (measured 1.0 s for a 1 s setting), traffic from either side alone keeps a tunnel open, a busy tunnel closed at the lifetime (4.2 s for 4 s), an upstream's 101 pending counts against the limit, 120 tunnels at once with the 121st refused `ws.limit` and an ordinary request served, ten tunnels at rest and a stuck one use under 0.05 s of CPU in a second, descriptors and slots return to their start, 500 hostile upgrade requests leave the gateway answering |
+| 6 `wss` | **met** | frames of every kind, the scheme the upstream sees (`https`), 1 MiB each way, 8 MiB to a late reader, refusals, the idle and lifetime closes, a client that vanishes without `close_notify`; the line carries `"tls":true` then `"upgrade":"websocket"` |
+| 7 generator | **met** | 35 `config.websocket` refusals and 6 accepted deployments (117 refusal cases in all); `deploy/examples/ocpp.toml` generates, builds and ran |
+| 8 mutants | **75 single edits: 72 killed, 3 survive, each argued** | below |
+| 9 authority and the suites | **met** | the labels did not change (`args, clock, conn_accept, conn_read, conn_write, dir_read, file_read, heap, io_write, net_in(""), net_out(""), poll`; `gateway-tls` adds the same two `fs_read` paths); the manifests were re-recorded because the list of pure functions and the operator counts grew (1,326 to 1,380 functions); no source file over 2,000 lines; `proxy_test.py` 75 tests, `admin_test.py` 16, `tls_test.py` 18, `cancho test` 88, all passing with no change to them but the new `ws` object in the metrics' key list |
+
+**Counts, verbatim from the last full run.** `websocket_test.py`: `52 tests, 0 failures` (with the `websockets` library installed; without it `52 tests, 0 failures, 2 skipped`). `proxy_test.py`: `75 tests, 0 failures`. `admin_test.py`: `16 tests, 0 failures`. `tls_test.py`: `18 tests, 0 failures`. `generate_test.py`: `7 prefix cases, 117 refusal cases, 11 accepted, 0 failures`. `cancho test`: 10 suites, 88 tests, 0 failed (websocket 23, forward 20, accesslog 12, metrics 11). `route_test.py 12 400`: `12 tables, 4800 requests (1356 routed, 3444 refused), 0 failures`; `--fixed`: `18 fixed cases, 0 failures`. `smuggling/run.py --gateway`: `60 cases, 0 disagreements`; `--chunked`: `39 chunked cases x 6 deliveries = 234 runs, 0 failures`.
+
+**Measured, informally** (one machine, `tests`' Python endpoints on the same machine, the gateway's CPU from `/proc` in 10 ms ticks, so only totals over many runs mean anything; this is **not** the benchmark harness and compares nothing to another proxy). *Memory:* 2.2 MiB resident at start; 4.6 MiB with 120 tunnels open (about 20 KiB each: the slabs are allocated at start and touched as used); unchanged after they close. *CPU:* 0.0000 s a second for 120 idle tunnels over 3 s. *Throughput:* moving 320 MiB from the upstream to the client in 8 MiB frames cost the gateway 0.44 s of CPU (1.4 ms a MiB; 423 MiB/s wall median per 8 MiB), against 0.41 s (1.3 ms a MiB; 680 MiB/s) for relaying 320 MiB of plain HTTP response bodies on the same gateway: **the tunnel costs about what a response relay costs**. An 8 MiB message echoed both ways: 0.82 s of CPU for 640 MiB moved (1.3 ms a MiB). *Latency:* a 64-byte echo, 2,000 messages on one tunnel: p50 140 us and p99 278 us through the gateway, against p50 70 us and p99 175 us straight to the upstream: **the gateway adds about 70 us at the median**, one hop on loopback. The cost of the new column read on a request that is not an upgrade (one more scan of the route table per request) is **not measured**; the benchmark harness has not been run for this slice.
+
+**Mutants** (`python3 tests/websocket_mutants.py`: copy the tree, apply one edit, run the tests that should notice it, then the whole suite if they do not). **75 edits: 72 killed, 3 survive.** Three of the 75 were first written wrongly (the old text occurred twice, or had been reformatted by `cancho fmt`): they were corrected and rerun, and are in the table as killed.
+
+| id | the single edit | result |
+|---|---|---|
+| w01 | the method is not checked | killed by `rule_1_refuses_a_method_other_than_GET` (unit) |
+| w02 | HTTP/1.0 is admitted | killed by `rule_2_refuses_HTTP_1_0` (unit) |
+| w03 | two Upgrade headers are admitted | killed by `rule_3_refuses_an_Upgrade_that_is_not_exactly_websocket_once` (unit) |
+| w04 | any Upgrade protocol is admitted | killed by `rule_3_refuses_an_Upgrade_that_is_not_exactly_websocket_once` (unit) |
+| w05 | any other Connection token is admitted | killed by `rule_3_refuses_an_Upgrade_that_is_not_exactly_websocket_once` (unit) |
+| w06 | two Connection headers are admitted | killed by `rule_3_refuses_an_Upgrade_that_is_not_exactly_websocket_once` (unit) |
+| w07 | a Content-Length (even 0) is admitted | killed by `rule_4_refuses_a_body_or_a_header_that_says_there_is_one` (unit) |
+| w08 | a Transfer-Encoding is admitted | killed by `rule_4_refuses_a_body_or_a_header_that_says_there_is_one` (unit) |
+| w09 | bytes pipelined behind the head are admitted | killed by `rule_5_refuses_bytes_after_the_head` (unit) |
+| w10 | any version is admitted | killed by `rule_6_refuses_a_version_other_than_13` (unit) |
+| w11 | two version headers are admitted | killed by `rule_6_refuses_a_version_other_than_13` (unit) |
+| w12 | a non-canonical key is admitted | killed by `rule_7_refuses_a_key_that_is_not_16_bytes_in_canonical_base64` (unit) |
+| w13 | a key without its padding is admitted | killed by `rule_7_refuses_a_key_that_is_not_16_bytes_in_canonical_base64` (unit) |
+| w14 | a key of the wrong length is admitted | killed by `rule_7_refuses_a_key_that_is_not_16_bytes_in_canonical_base64` (unit) |
+| w15 | a client that offers none of the route's subprotocols is admitted | killed by `rule_8_refuses_a_subprotocol_the_route_does_not_serve_or_a_list_that_is_not_one` (unit) |
+| w16 | a subprotocol is admitted on a route that serves none | killed by `rule_8_refuses_a_subprotocol_the_route_does_not_serve_or_a_list_that_is_not_one` (unit) |
+| w17 | a list of 17 subprotocols is admitted | killed by `rule_8_refuses_a_subprotocol_the_route_does_not_serve_or_a_list_that_is_not_one` (unit) |
+| w18 | every Origin is admitted | killed by `rule_9_admits_no_browser_origin_that_is_not_listed_and_any_request_without_one` (unit) |
+| w19 | two Origin headers are admitted | killed by `rule_9_admits_no_browser_origin_that_is_not_listed_and_any_request_without_one` (unit) |
+| w20 | the offered mask names the first subprotocol only | killed by `a_good_handshake_is_admitted_and_answers_the_offered_subprotocols` (unit) |
+| r01 | the accept value is not compared | killed by `rule_12_refuses_an_accept_value_that_is_not_exactly_the_one_called_for` (unit) |
+| r02 | the accept value is compared on a prefix | killed by `rule_12_refuses_an_accept_value_that_is_not_exactly_the_one_called_for` (unit) |
+| r03 | two accept headers are admitted | killed by `rule_12_refuses_an_accept_value_that_is_not_exactly_the_one_called_for` (unit) |
+| r04 | a 101 without Upgrade: websocket is admitted | killed by `rule_11_refuses_a_101_that_is_not_a_websocket_upgrade_or_has_a_body_header` (unit) |
+| r05 | a 101 without Connection: Upgrade is admitted | killed by `rule_11_refuses_a_101_that_is_not_a_websocket_upgrade_or_has_a_body_header` (unit) |
+| r06 | a 101 with a body header is admitted | killed by `rule_11_refuses_a_101_that_is_not_a_websocket_upgrade_or_has_a_body_header` (unit) |
+| r07 | a subprotocol the client did not offer is admitted | killed by `rule_13_refuses_a_subprotocol_that_was_not_offered_or_not_served` (unit) |
+| r08 | no subprotocol is admitted where the route requires one | **survived**, argued below |
+| r09 | a subprotocol is admitted where the route serves none | killed by `rule_13_refuses_a_subprotocol_that_was_not_offered_or_not_served` (unit) |
+| r10 | an unsolicited extension is admitted | killed by `rule_14_refuses_an_extension_nobody_asked_for` (unit) |
+| r11 | the GUID is wrong | killed by `the_accept_value_of_the_rfc_example_and_of_known_digests` (unit) |
+| r12 | a SHA-1 round constant is wrong | killed by `the_accept_value_of_the_rfc_example_and_of_known_digests` (unit) |
+| r13 | SHA-1's majority function is wrong | killed by `the_accept_value_of_the_rfc_example_and_of_known_digests` (unit) |
+| r14 | the base64 alphabet is wrong | killed by `the_accept_value_of_the_rfc_example_and_of_known_digests` (unit) |
+| r15 | the 101 head carries a field nobody checked | killed by `the_head_the_client_is_sent_carries_only_what_was_checked` (unit) |
+| f01 | Sec-WebSocket-Extensions is forwarded | killed by `an_upgrade_is_forwarded_with_its_own_connection_headers_and_without_extensions` (unit) |
+| f02 | the upstream is not told it is an upgrade | killed by `an_upgrade_is_forwarded_with_its_own_connection_headers_and_without_extensions` (unit) |
+| f03 | a 101 is accepted for every request | killed by `a_101_is_a_refusal_unless_the_request_asked_for_an_upgrade` (unit) |
+| f04 | a 426 does not name the version | killed by `an_upstream_that_reads_late_receives_thirty_two_mebibytes_intact` (e2e) |
+| f05 | the log's upgrade value is wrong | killed by `an_upgrade_carries_its_field_last_and_the_worst_line_with_both_still_fits` (unit) |
+| f06 | the route's websocket column is read from the wrong place | killed by `handshake_selects_the_subprotocol_and_the_head_has_only_checked_fields` (e2e) |
+| p01 | no route is a websocket route | killed by `handshake_selects_the_subprotocol_and_the_head_has_only_checked_fields` (e2e) |
+| p02 | the limit is off by one | killed by `the_limit_refuses_the_fourth_and_frees_with_a_close` (e2e) |
+| p03 | the limit is not applied | killed by `a_hundred_and_twenty_tunnels_at_once_and_the_next_is_refused` (e2e) |
+| p04 | an upgrade may take a pooled connection | killed by `a_tunnel_connection_is_never_pooled` (e2e) |
+| p05 | a 101 is never accepted | killed by `handshake_selects_the_subprotocol_and_the_head_has_only_checked_fields` (e2e) |
+| p06 | the upstream's 101 is not checked | killed by `the_upstreams_refusals_of_the_upgrade_each_have_their_tag` (e2e) |
+| p07 | a bad 101 is not a failure of the upstream | killed by `the_circuit_counts_a_bad_101_and_closes_on_a_good_one` (e2e) |
+| p08 | a good 101 is not a success of the upstream | killed by `the_circuit_counts_a_bad_101_and_closes_on_a_good_one` (e2e) |
+| p09 | the idle timer is not reset by the upstream's bytes | killed by `traffic_from_the_upstream_alone_keeps_a_tunnel_open` (e2e) |
+| p10 | the idle timer is not reset by the client's bytes | killed by `traffic_from_the_client_alone_keeps_a_tunnel_open` (e2e) |
+| p11 | the lifetime is not applied | killed by `a_busy_tunnel_is_closed_at_the_lifetime` (e2e) |
+| p12 | the sweep does not close at the lifetime | killed by `a_busy_tunnel_is_closed_at_the_lifetime` (e2e) |
+| p13 | the sweep does not close an idle tunnel | killed by `an_idle_tunnel_is_closed_at_the_idle_time` (e2e) |
+| p14 | the client's queue room is not respected (downstream) | killed by `a_client_that_reads_late_gets_eight_mebibytes_intact_with_the_queues_bounded` (e2e) |
+| p15 | the upstream's queue room is not respected (upstream) | killed by `an_upstream_that_reads_late_receives_thirty_two_mebibytes_intact` (e2e) |
+| p16 | a client that closed leaves the tunnel up | killed by `the_client_closing_ends_the_upstream_connection_and_frees_the_slots` (e2e) |
+| p17 | an upstream that closed leaves the tunnel up | killed by `the_upstream_closing_ends_the_client_side` (e2e) |
+| p19 | a tunnel's client is never read | killed by `text_binary_ping_and_close_frames_go_both_ways` (e2e) |
+| p20 | a write to a lost upstream is answered as if it were an HTTP exchange | **survived**, argued below |
+| p21 | the offered mask is lost | killed by `handshake_selects_the_subprotocol_and_the_head_has_only_checked_fields` (e2e) |
+| p22 | the upstream is sent the ordinary rewrite | killed by `the_upstream_is_sent_the_checked_request_and_no_extensions` (e2e) |
+| p23 | the tunnel counter does not count | killed by `metrics_count_the_tunnel_and_return_to_zero` (e2e) |
+| p24 | the client stays in the request phase (not a tunnel) | killed by `text_binary_ping_and_close_frames_go_both_ways` (e2e) |
+| p25 | the log line has no upgrade key | killed by `the_access_log_line_of_a_tunnel` (e2e) |
+| p26 | the accept value overlaps the path in the meta area | killed by `a_long_path_is_logged_whole_beside_the_accept_value` (e2e) |
+| p27 | the active gauge is not filled | killed by `metrics_count_the_tunnel_and_return_to_zero` (e2e) |
+| p28 | an upgrade in progress holds no place | killed by `upgrades_still_waiting_for_their_101_hold_a_place` (e2e) |
+| p29 | read_client does not call tunnel_up (pump_request dispatches there too: expected equivalent) | **survived**, argued below |
+| p30 | the TLS turn does not read a tunnel's client again | killed by `a_wss_handshake_and_every_frame_type` (e2e) |
+| p31 | a tunnel's client is not watched for reading | killed by `text_binary_ping_and_close_frames_go_both_ways` (e2e) |
+| g01 | a websocket route may exclude GET | killed by `FAIL refusal config.websocket at line 9: exit 0` (generator) |
+| g02 | an origin with a trailing slash is accepted | killed by `FAIL refusal config.websocket at line 9: exit 0` (generator) |
+| g03 | ws_* keys are accepted without a websocket route | killed by `FAIL refusal config.websocket at line 2: exit 0` (generator) |
+| g04 | more tunnels than the table holds | killed by `FAIL refusal config.websocket at line 2: exit 0` (generator) |
+
+**The three that survive, and why:**
+
+- **r08**, the check that a route which serves subprotocols refuses a `101` with none. It survives because the answer does not change: without the guard `value_of` reads header index −1, which lands on slots 14 and 15 of the response table (unused, so zero), an empty slice that matches no subprotocol, and the next check refuses with the same tag. The guard exists so that the answer does not depend on two unused slots staying zero; the behaviour it protects is covered by r09 and the `noproto` upstream mode.
+- **p20**, `upstream_lost` treating a tunnel like a finished request when a write to the upstream fails. It survives because the fall-through reaches `refuse`, which, because the client's response has begun (the `101` was queued), just ends the session: the same end by a longer road.
+- **p29**, `read_client` not calling `tunnel_up` itself. It survives because `pump_request` dispatches a phase 6 client to `tunnel_up` at its top: the call at the site is redundant, kept so that the data path reads straight.
+
+**Not done, and not known.**
+
+- **No frame is read**, so there is no ping or pong policy, no close handshake of the gateway's own, no message-size limit (a peer can send a 4 GiB frame and the tunnel carries it), no fragment limit, no UTF-8 check, no per-message anything. Each is a later slice with its own gate; section 8 and section 7 say what their absence costs.
+- **No Close frame on a timer** (section 7), no gateway-originated keepalive, no `permessage-deflate` (stripped).
+- **More than 127 tunnels**: the slot table; a deployment of thousands of chargers needs the slot count as a deployment key and a new memory budget. Measured only at 120.
+- **The log line at open**: a tunnel that has not ended has no line; `ws_tunnels_active` is the only trace.
+- **TLS to the upstream**, **a peer address** (no `conn_peer`: the charger's identity is the path), **RFC 8441** (WebSocket over HTTP/2).
+- **A client that closes while its `101` is pending** is noticed when the `101` arrives, or at the upstream deadline, as a client whose whole request has been sent is today; the upgrade holds its place until then (a bound, not a leak: `ws_max_tunnels` counts it).
+- **The cost of the new column read on an ordinary request** is not measured (the benchmark harness was not run for this slice).
+- **A browser** was not used: the `Origin` rules are tested with the header, not with a real page. The `websockets` library (17.2) was run as a client and as an upstream (`Interop`, skipped without it); no other third-party implementation was.
