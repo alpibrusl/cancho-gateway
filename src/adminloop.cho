@@ -43,7 +43,6 @@ pub fn admin_settle[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int)
     return 0;
 }
 
-
 // ---- the admin listener (docs/observability.md section 7) ----
 
 // Fill the gauges of a scrape: uptime, clients being served, whether the log failed in the last ten seconds, and per upstream its idle pooled

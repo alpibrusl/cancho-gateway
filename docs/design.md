@@ -63,7 +63,7 @@ file compiled in by `scripts/generate.py` (task #11): `generated/deploy.cho` hol
 still computes `intended_egress_prefix` (longest common prefix cut at a delimiter, empty if none) and prints it, so the day
 cancho has separate bounds the literal is already derived and tested.
 
-What is proved, and by what: the compiler proves **no files, no ffi, bounded, only network and clock** (the ceiling gate,
+What is proved, and by what: the compiler proves **no ffi, no file writes, bounded, the network and the clock, and (since TLS, `docs/tls.md`) reading exactly two named paths: `/dev/urandom` and the certificate directory** (the ceiling gate,
 `authority.toml`). The tests prove the upstream set (`tests/egress_test.cho`, the generator's tests, and the mutants listed in
 section 9). Nothing proves the set *to the compiler*, and the README says so.
 
@@ -126,7 +126,7 @@ connection. Nothing else, ever.
 
 Recorded one by one in #16. TLS (**corrected 2026-10-07:** the reason first recorded here, that TLS needs foreign code and would make the
 authority report unbounded, no longer holds: cancho has a TLS 1.3 server in pure cancho, `packages/tls`, cancho #338 and #339, example #346.
-Integrating it is undecided and would add file reads (one certificate directory, `/dev/urandom`) to the report; until it is built, a front terminates TLS; the decision, the data path, the numbers and the gates are `docs/tls.md`),
+**Built 2026-10-08** as a second listener (`tls_listen`), adding file reads (one certificate directory, `/dev/urandom`) to the report; the decision, the data path, the numbers, the gates and what was measured are `docs/tls.md`),
 HTTP/2/gRPC, caching, response rewriting, dynamic discovery, clustering. Dynamic
 discovery additionally contradicts section 2 (a mutable set cannot be bounded by a compile-time literal).
 

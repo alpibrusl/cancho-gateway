@@ -248,6 +248,7 @@
     "event_established",
     "event_failed",
     "event_failed",
+    "event_failed",
     "event_want_read",
     "event_want_write",
     "event_want_write",
@@ -279,6 +280,9 @@
     "f_tls12",
     "f_write_protected",
     "fail",
+    "failed_tag",
+    "failure",
+    "failure",
     "field",
     "fields",
     "file_base",
@@ -648,6 +652,8 @@
     "record_overflow",
     "record_overhead",
     "recv_cap",
+    "refusal_tag",
+    "refusal_tag",
     "refused_check",
     "refused_context_length",
     "refused_counter_exhausted",
@@ -870,6 +876,7 @@
     "ticket_at",
     "ticket_cap",
     "time_ok",
+    "tls_base",
     "tls_handshake_ms",
     "tls_handshakes",
     "tls_identity",
@@ -962,7 +969,7 @@
     "z_of",
     "z_of"
   ],
-  "folded_operators": 129,
+  "folded_operators": 130,
   "folded_calls": 337,
-  "functions": 1317
+  "functions": 1326
 }

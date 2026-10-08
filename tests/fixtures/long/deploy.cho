@@ -61,6 +61,32 @@ pub fn admin_port() -> [] int {
     return 9090;
 }
 
+// TLS (docs/tls.md): the port, the handshake bounds, and the identities (subdirectories of the directory compiled into `gateway.tlsfiles`; an empty
+// name is the directory itself). Port 0: no TLS.
+pub fn tls_port() -> [] int {
+    return 0;
+}
+
+pub fn tls_handshakes() -> [] int {
+    return 32;
+}
+
+pub fn tls_rate() -> [] int {
+    return 50;
+}
+
+pub fn tls_handshake_ms() -> [] int {
+    return 10000;
+}
+
+pub fn tls_identity_count() -> [] int {
+    return 0;
+}
+
+pub fn tls_identity(i: int) -> [] &static [byte] {
+    return "";
+}
+
 // The longest common prefix of the addresses, cut at a delimiter: what `narrow` would be given once
 // cancho has separate listen and connect bounds. Empty means no shared prefix.
 pub fn intended_egress_prefix() -> [] &static [byte] {

@@ -38,7 +38,7 @@ TIMEOUT_RANGE = (100, 600000)
 DEFAULT_BODY = 1 << 20
 # TLS (docs/tls.md): handshakes in progress at once, handshakes started a second, milliseconds to finish one; up to 16 identities.
 TLS_HANDSHAKES, TLS_HANDSHAKES_RANGE = 32, (1, 1000)
-TLS_RATE, TLS_RATE_RANGE = 100, (1, 100000)
+TLS_RATE, TLS_RATE_RANGE = 50, (1, 100000)  # a handshake measured 12 ms of this gateway's CPU on the development machine (docs/tls.md section 10): 50 a second is about 60% of a core
 TLS_HANDSHAKE_MS = 10000
 MAX_IDENTITIES = 16
 ENTROPY_FILE = "/dev/urandom"

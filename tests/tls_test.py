@@ -29,6 +29,7 @@ LEX = pt.LEX
 SOURCES = pt.SOURCES
 HANDSHAKES = 4
 HANDSHAKE_MS = 1500
+RATE = 50
 
 
 def make_identity(directory, name, host):
@@ -56,6 +57,7 @@ tls_dir = "%s"
 tls_identities = ["api", "second"]
 tls_handshakes = %d
 tls_handshake_ms = %d
+tls_rate = %d
 header_timeout_ms = 1000
 connect_timeout_ms = 1000
 upstream_timeout_ms = 1500
@@ -71,7 +73,7 @@ name = "main"
 path_prefix = "/"
 upstream = "up"
 max_body = 16777216
-""" % (self.port, self.tls_port, self.admin, self.certs, HANDSHAKES, HANDSHAKE_MS, up_port))
+""" % (self.port, self.tls_port, self.admin, self.certs, HANDSHAKES, HANDSHAKE_MS, RATE, up_port))
         out = pathlib.Path(tmp) / "gen"
         subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(deploy), "--out", str(out)], check=True)
         files = [str(out / n) for n in ("deploy.cho", "routes.cho", "tlsfiles.cho")] + pt.dependencies() + [str(ROOT / "src" / (n + ".cho")) for n in SOURCES]
@@ -128,6 +130,12 @@ max_body = 16777216
         c.close()
         return json.loads(data.partition(b"\r\n\r\n")[2])
 
+    def rss_kib(self):
+        for line in open("/proc/%d/status" % self.proc.pid):
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1])
+        return 0
+
     def alive(self):
         return self.proc.poll() is None
 
@@ -160,7 +168,8 @@ def read_response(s):
         if not d:
             return data, b""
         data += d
-    head, _, body = data.partition(b"\r\n\r\n")
+    head, _, rest = data.partition(b"\r\n\r\n")
+    body = bytearray(rest)  # appended to in place: a bytes object copied at every record would make the client the slow end
     length = None
     for line in head.split(b"\r\n")[1:]:
         k, _, v = line.partition(b":")
@@ -171,7 +180,15 @@ def read_response(s):
         if not d:
             break
         body += d
-    return head, body
+    return head, bytes(body)
+
+
+def honest_client_hello():
+    """The first write of the vectors' case `honest: P-256 share only, AES-128-GCM`: a ClientHello any server can answer."""
+    for line in open(ROOT / "tests" / "vectors" / "tls" / "client_bytes.txt"):
+        if line.startswith("ok honest: P-256 share only, AES-128-GCM\t"):
+            return bytes.fromhex(line.rstrip("\n").partition("\t")[2].split(",")[0])
+    raise AssertionError("the vector is not in client_bytes.txt")
 
 
 def get(gw, path="/", host="api.example", **kw):
@@ -184,9 +201,10 @@ def get(gw, path="/", host="api.example", **kw):
 
 class T:
     def get_over_tls_reaches_the_upstream_as_https(gw, up):
-        n0, h0 = len(gw.lines()), len(up.heads)
+        n0, h0, m0 = len(gw.lines()), len(up.heads), gw.metrics()["tls"]["handshakes"]
         head, body = get(gw)
         assert head.startswith(b"HTTP/1.1 200") and body == b"ok", (head, body)
+        assert gw.metrics()["tls"]["handshakes"] == m0 + 1, "the handshake was not counted"
         e = gw.since(n0)[-1]
         assert e["tls"] is True and e["status"] == 200 and e["outcome"] == "ok", e
         sent = up.heads[h0].decode()
@@ -273,6 +291,7 @@ class T:
         assert e["outcome"] == "aborted" and e["tls"] is True, e
 
     def silent_peers_delay_an_honest_one_and_are_dropped_at_the_handshake_deadline(gw, up):
+        timed_out = gw.metrics()["refusals"].get("tls.handshake-timeout", 0)
         silent = [socket.create_connection(("127.0.0.1", gw.tls_port), timeout=10) for _ in range(HANDSHAKES)]
         time.sleep(0.2)
         t0 = time.time()
@@ -281,6 +300,8 @@ class T:
         assert body == b"ok", head
         assert waited > HANDSHAKE_MS / 1000.0 * 0.5, "the honest peer was served at once: the bound did not hold (%.2fs)" % waited
         assert waited < HANDSHAKE_MS / 1000.0 + 3, waited
+        counted = gw.metrics()["refusals"].get("tls.handshake-timeout", 0) - timed_out
+        assert counted == HANDSHAKES, "the %d silent peers dropped at the deadline were counted %d times" % (HANDSHAKES, counted)
         for s in silent:
             s.settimeout(3)
             try:
@@ -289,31 +310,99 @@ class T:
                 pass
             s.close()
 
-    def a_burst_of_handshakes_is_all_served(gw, up):
-        results = []
+    def a_burst_of_handshakes_is_held_to_tls_rate_and_every_one_is_served(gw, up):
+        # The honest ClientHello of cancho's vectors is all the client needs to send for the server to start (and pay for) a handshake, so the
+        # clients cost nothing and the rate is the server's. `tls_rate` is 50 a second, in windows of a second: 250 handshakes take five windows.
+        hello = honest_client_hello()
+        started, errors = [], []
+        lock = threading.Lock()
+        todo = list(range(250))
 
-        def one():
-            try:
-                head, body = get(gw)
-                results.append(body == b"ok")
-            except Exception as e:  # noqa: BLE001
-                results.append(str(e))
+        def worker():
+            while True:
+                with lock:
+                    if not todo:
+                        return
+                    todo.pop()
+                try:
+                    s = socket.create_connection(("127.0.0.1", gw.tls_port), timeout=20)
+                    s.sendall(hello)
+                    first = s.recv(5)
+                    s.close()
+                    with lock:
+                        (started if first[:3] == b"\x16\x03\x03" else errors).append(time.time())
+                except OSError as e:
+                    with lock:
+                        errors.append(str(e))
 
-        threads = [threading.Thread(target=one) for _ in range(60)]
+        t0 = time.time()
+        threads = [threading.Thread(target=worker) for _ in range(110)]
         for t in threads:
             t.start()
         for t in threads:
-            t.join(30)
-        assert results.count(True) == 60, [r for r in results if r is not True][:5]
+            t.join(60)
+        elapsed = time.time() - t0
+        # 110 at once: the last waits 2.2 s for its turn, longer than tls_handshake_ms (1.5 s), and must not be dropped for it.
+        assert len(started) == 250 and not errors, (len(started), errors[:3])
+        assert elapsed >= 3.0, "250 handshakes in %.2fs: tls_rate did not hold" % elapsed
+        assert elapsed < 12, elapsed
+
+    def a_session_waits_for_the_ciphertext_still_queued_when_the_relay_is_done(gw, up):
+        # A client that does not read lets the kernel's buffers fill (X bytes, whatever the kernel made them) and then the gateway's own queues. A
+        # response of up to X bytes is all in the kernel and the session ends at once; a longer one cannot end until the client reads. Find the
+        # largest size that ends without a read, then read it: a gateway that ended a session while ciphertext was still queued would have lost
+        # those bytes, and the body would be short.
+        def probe(n):
+            n0 = len(gw.lines())
+            s = connect(gw, timeout=20)
+            s.sendall(b"GET /big?n=%d HTTP/1.1\r\nHost: api.example\r\n\r\n" % n)
+            time.sleep(0.35)
+            ended = len(gw.lines()) > n0
+            head, body = read_response(s)
+            s.close()
+            want = (bytes(range(256)) * 256 * (n // 65536 + 1))[:n]
+            return ended, head.startswith(b"HTTP/1.1 200") and body == want
+
+        lo, hi = 0, 65536
+        while True:
+            ended, whole = probe(hi)
+            assert whole, "a response of %d bytes arrived short" % hi
+            if not ended:
+                break
+            lo, hi = hi, hi * 2
+            assert hi <= 64 << 20, "the kernel buffered 32 MB?"
+        while hi - lo > 16384:
+            mid = (lo + hi) // 2
+            ended, whole = probe(mid)
+            assert whole, "a response of %d bytes arrived short" % mid
+            if ended:
+                lo = mid
+            else:
+                hi = mid
+
+    def a_slow_handshake_is_not_held_to_the_header_deadline(gw, up):
+        # Half a ClientHello, a pause longer than header_timeout_ms (1000) and shorter than tls_handshake_ms (1500), then the rest: the clock that
+        # applies until the handshake is done is the handshake's.
+        hello = honest_client_hello()
+        s = socket.create_connection(("127.0.0.1", gw.tls_port), timeout=5)
+        s.sendall(hello[:20])
+        time.sleep(1.25)
+        s.sendall(hello[20:])
+        s.settimeout(3)
+        assert s.recv(5)[:3] == b"\x16\x03\x03", "the handshake was cut by the header deadline"
+        s.close()
 
     def a_client_that_stops_reading_is_ended_at_its_deadline(gw, up):
         n0 = len(gw.lines())
+        rss0 = gw.rss_kib()
         s = connect(gw)
         s.sendall(b"GET /big?n=50000000 HTTP/1.1\r\nHost: api.example\r\n\r\n")
         time.sleep(5.5)
         e = gw.since(n0)[-1]
         assert e["outcome"] == "aborted", e
         s.close()
+        grown = gw.rss_kib() - rss0
+        assert grown < 4096, "the gateway grew by %d KiB serving a client that did not read (the slot's buffers are 100 KiB)" % grown
         assert get(gw)[1] == b"ok"
 
     def garbage_and_old_versions_are_refused_and_nothing_leaks(gw, up):
@@ -430,6 +519,33 @@ class T:
             assert a == b, "%s: plain %r, tls %r" % (cid, a, b)
             n += 1
         assert n == len(CASES) + len(CHUNKED) and n >= 99, n
+
+    def a_client_that_handshakes_and_sends_nothing_gets_408_at_the_header_deadline(gw, up):
+        # header_timeout_ms is 1000 and tls_handshake_ms 1500: the clock that applies after the handshake is the header's.
+        n0 = len(gw.lines())
+        s = connect(gw)
+        t0 = time.time()
+        head, body = read_response(s)
+        waited = time.time() - t0
+        s.close()
+        assert head.startswith(b"HTTP/1.1 408"), head
+        assert 0.7 < waited < 1.4, waited
+        e = gw.since(n0)[-1]
+        assert e["status"] == 408 and e["rule"] == "timeout.header" and e["tls"] is True, e
+
+    def the_server_closes_with_close_notify(gw, up):
+        raw = socket.create_connection(("127.0.0.1", gw.tls_port), timeout=8)
+        c = context(gw)
+        s = c.wrap_socket(raw, server_hostname="api.example", suppress_ragged_eofs=False)
+        s.sendall(b"GET / HTTP/1.1\r\nHost: api.example\r\n\r\n")
+        data = b""
+        while True:
+            d = s.recv(65536)  # SSLEOFError here if the TCP connection ended without close_notify
+            if not d:
+                break
+            data += d
+        assert data.endswith(b"ok"), data
+        s.close()
 
 
 def main():

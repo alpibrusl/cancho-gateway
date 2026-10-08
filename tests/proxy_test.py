@@ -172,7 +172,7 @@ class Upstream:
                         self.eof_seen.append(path)
             else:
                 c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
-        except OSError:
+        except (OSError, ValueError):  # a client that sent a malformed chunked body (the smuggling corpus does)
             pass
         finally:
             try:

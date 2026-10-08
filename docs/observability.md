@@ -35,7 +35,8 @@ One JSON object per request, one line, written when the request ends, in this ke
 | `outcome` | `ok` (the response was relayed whole), `refused` (the gateway answered, `rule` says why), `aborted` (the client or the upstream went away, or the total deadline cut a response that had begun) |
 | `ms` | accept to the end of the request |
 | `upstream_ms` | from the request being routed to the first byte of the upstream's response; `0` if there was none |
-| `bytes_in`, `bytes_out` | request-body bytes forwarded to the upstream, response bytes (head and body) queued for the client |
+| `bytes_in`, `bytes_out` | request-body bytes forwarded to the upstream, response bytes (head and body) queued for the client; over TLS these are plaintext bytes |
+| `tls` | `true`, **only** on a connection that spoke TLS on `tls_listen` (`docs/tls.md`); absent otherwise, so a deployment without `tls_listen` writes the lines it always wrote. It is the last key |
 
 **Escaping, so that a hostile request cannot make a line unparseable or longer than its bound:** in every string, `"` and `\` are backslash-escaped, every
 byte below 0x20 and 0x7f and every byte from 0x80 up is written as `\u00XX` (the byte read as Latin-1: always valid JSON, never invalid UTF-8). The path is cut at 128 input bytes **and** its escaped form at 256 output bytes (never in the middle of an escape), after which `"path_truncated":true` follows. A line is at most
@@ -89,6 +90,7 @@ Kept in one block of integers sized at start from the compiled-in counts (`route
 | `upstream_responses_total`, `upstream_retries_total`, `upstream_failures_total` | `upstream` | counters: requests whose response head arrived; requests sent again on a fresh connection; failures as the circuit counts them (counted even when the circuit is off) |
 | `sessions_active`, `pool_idle`, `circuit_open` | (`upstream` for the last two) | gauges, read when scraped |
 | `log_dropped_total`, `log_write_failures_total` | | counters |
+| `tls_handshakes_total`, `tls_handshake_failures_total` | | counters (`docs/tls.md` section 10): handshakes that finished; TLS connections ended before theirs did. A failure is also counted in `refusals_total` under the engine's `tls-*` tag (or `tls.handshake-timeout`). The JSON has them as `"tls":{"handshakes":N,"failures":N}`, between `refusals` and `log` |
 
 **Labels are bounded by construction.** A route, an upstream and a class are compiled in. A rule is one of the tags the code can emit, but the tags live in several modules and there is no single table, so the rule counters sit in a small table filled as tags are first seen (at most 96 entries of 40 bytes; a tag past the 96th is counted under `other`, which cannot happen while the code has about 60). A client cannot make a label: it can only reach a tag the code already has. The table is searched linearly (96 comparisons) on a refusal, which is not the hot path.
 

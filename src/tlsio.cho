@@ -342,7 +342,7 @@ pub fn start[&h, &k, &o](heap: &!h Heap, fs: Fs(""), clock: &k Clock, slots: int
 }
 
 // Start one queued handshake if the bounds allow (handshakes in progress below `tls_handshakes`, started this second below `tls_rate`),
-// the slot with the lowest number first. Answers the slot started, `0 - 1` for none, or `0 - 2 - slot` for a slot whose `serve` the engine
+// the connection accepted first. Answers the slot started, `0 - 1` for none, or `0 - 2 - slot` for a slot whose `serve` the engine
 // refused (the proxy ends it). `limit` slots of `stride` ints; `now_unix` is the wall clock.
 pub fn admit[&t, &s](t: &!t Tls, st: &!s [int], stride: int, limit: int, now: int, now_unix: int) -> [] int {
     if now - contents(t.conf)[1] >= 1000 || now < contents(t.conf)[1] {
@@ -352,21 +352,28 @@ pub fn admit[&t, &s](t: &!t Tls, st: &!s [int], stride: int, limit: int, now: in
     if contents(t.conf)[0] >= deploy.tls_rate() || tls.handshakes_in_progress(t.engine) >= deploy.tls_handshakes() {
         return 0 - 1;
     }
+    // The oldest queued connection first (`f_since` is when it was accepted): lowest slot first would starve a connection in a high slot for as long
+    // as new ones keep taking the low slots the finished ones leave.
+    var pick = 0 - 1;
     var k = 0;
     while k < limit {
         let b = k * stride;
-        if st[b] == 1 && st[b + f_mode()] == m_queued() {
-            if tls.serve(t.engine, k, now_unix) != 0 {
-                return 0 - 2 - k;
-            }
-            st[b + f_mode()] = m_handshake();
-            st[b + f_since()] = now;
-            contents(t.conf)[0] = contents(t.conf)[0] + 1;
-            return k;
+        if st[b] == 1 && st[b + f_mode()] == m_queued() && (pick < 0 || st[b + f_since()] < st[pick * stride + f_since()]) {
+            pick = k;
         }
         k = k + 1;
     }
-    return 0 - 1;
+    if pick < 0 {
+        return 0 - 1;
+    }
+    let b = pick * stride;
+    if tls.serve(t.engine, pick, now_unix) != 0 {
+        return 0 - 2 - pick;
+    }
+    st[b + f_mode()] = m_handshake();
+    st[b + f_since()] = now;
+    contents(t.conf)[0] = contents(t.conf)[0] + 1;
+    return pick;
 }
 
 // Why the engine ended slot `k`'s connection, as the `tls-server-*` tag the refusal table counts it by; empty if the engine did not fail it.
@@ -374,5 +381,9 @@ pub fn failed_tag[&t](t: &t Tls, k: int) -> [] &static [byte] {
     if tls.event(t.engine, k) != tls.event_failed() {
         return "";
     }
-    return tls.refusal_tag(tls.failure(t.engine, k));
+    let code = tls.failure(t.engine, k);
+    if code == 0 {
+        return "";
+    }
+    return tls.refusal_tag(code);
 }

@@ -17,19 +17,19 @@ assumption.
 | assumed | found | consequence |
 |---|---|---|
 | the client's address, for `X-Forwarded-For` and `Forwarded: for=` | **not available.** `Accepted` carries no peer address; `docs/native-sockets.md` (the "Peer address on `accept`" row) records `conn_peer(&Conn, &![byte]) -> int` as a later, additive builtin "with no asker until an access log exists". It is not in `std.conns` or the builtins at the pinned commit (`grep conn_peer` over `std/` and `builtin.rs`: no match) | the gateway **cannot say who the client was**. It does not write a `for=` or an `X-Forwarded-For` of its own, and says so (section 2). #7, #9 (rate limiting by client address) and #10 (the access log) are now three askers for `conn_peer`; it is a request to cancho, not something to emulate |
-| randomness for request ids | **no random-bytes effect.** The TLS engine is seeded by a program that read `/dev/urandom` through a file capability (`docs/tls-hooks.md`); the gateway deliberately has none (no `fs_*`, design section 3) | request ids are **unique, not unpredictable**: a start stamp, the listen port and a counter (section 3). They are correlation ids and nothing may treat them as secrets |
+| randomness for request ids | **no random-bytes effect.** The TLS engine is seeded by a program that read `/dev/urandom` through a file capability (`docs/tls-hooks.md`); the TLS engine is seeded from it once, at start, and the gateway deliberately has no random-bytes capability beyond that (design section 3) | request ids are **unique, not unpredictable**: a start stamp, the listen port and a counter (section 3). They are correlation ids and nothing may treat them as secrets |
 | the clock | present (`clock`); the loop already reads `clock_ms` each turn | the start stamp |
 
 ## 2. The policy, in one table
 
 `trust_forwarded` is a per-route key (default `false`) in the deployment file: "the party in front of this gateway is mine and
-its forwarding headers are true". The realistic case is a TLS-terminating front (Caddy, nginx) that sets them; the gateway has no
-TLS (design section 7).
+its forwarding headers are true". The realistic case is a TLS-terminating front (Caddy, nginx) that sets them. The gateway can terminate TLS
+itself on `tls_listen` (`docs/tls.md`); a client that did is forwarded as `https`.
 
 | header | `trust_forwarded = false` (default) | `trust_forwarded = true` |
 |---|---|---|
 | `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Port`, `X-Real-IP` (request) | **removed**, whatever the client sent | passed through untouched |
-| `X-Forwarded-Host`, `X-Forwarded-Proto` (request) | inbound removed; `X-Forwarded-Host: <the Host header as received>` and `X-Forwarded-Proto: http` added | passed through untouched; none added |
+| `X-Forwarded-Host`, `X-Forwarded-Proto` (request) | inbound removed; `X-Forwarded-Host: <the Host header as received>` and `X-Forwarded-Proto: https` (the client spoke TLS on `tls_listen`) or `http` added | passed through untouched; none added |
 | `X-Request-Id` (request) | inbound removed; a generated one added | one inbound header whose value is 1 to 64 bytes of `[A-Za-z0-9._-]` is **kept**; any other (invalid value, empty, or more than one header) is removed and a generated one added |
 | `Via` (request) | inbound kept (an intermediary appends, RFC 9110 7.6.3); `Via: 1.1 cancho-gateway` appended | the same |
 | `Via` (response) | upstream's kept; `Via: 1.1 cancho-gateway` appended | the same |
@@ -71,7 +71,7 @@ Every byte written into a head comes from one of three places, and each is safe 
 
 1. **A client's header** copied as received: `framing.judge` has already refused CR, LF, NUL and other control bytes in names and
    values, obs-fold, and whitespace before the colon; nothing is re-encoded.
-2. **The gateway's literals** (`Via: 1.1 cancho-gateway`, `X-Forwarded-Proto: http`).
+2. **The gateway's literals** (`Via: 1.1 cancho-gateway`, `X-Forwarded-Proto: http` or `https`).
 3. **Hex digits it formats** (the id) and **the Host header** (case 1, already validated).
 
 A kept `X-Request-Id` is restricted to `[A-Za-z0-9._-]` precisely so that a trusted-but-wrong front cannot smuggle a delimiter, a

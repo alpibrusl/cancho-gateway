@@ -72,7 +72,7 @@ pub fn tls_handshakes() -> [] int {
 }
 
 pub fn tls_rate() -> [] int {
-    return 100;
+    return 50;
 }
 
 pub fn tls_handshake_ms() -> [] int {

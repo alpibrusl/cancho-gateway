@@ -1082,6 +1082,7 @@ fn accept_all[&h, &l, &c](heap: &!h Heap, conn: conns.Table, listener: &!l Liste
                             st[p + 6] = 0;
                             // Waiting for a handshake's turn is bounded by the whole request's time, not by the handshake's: a bound delays an honest peer.
                             st[p + 7] = now + shared.total_ms();
+                            st[p + tlsio.f_since()] = now;
                             st[p + tlsio.f_mode()] = tlsio.m_queued();
                         }
                         shared.session_begin(core, slot, now);
