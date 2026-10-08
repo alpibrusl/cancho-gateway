@@ -1042,7 +1042,7 @@ class T:
                 assert got_rule == rule, (raw, got_rule)
 
     def refusals_never_reach_the_upstream(gw, up):
-        before = up.connections
+        before = settled_connections(up)
         request(gw, b"GET /a/../b HTTP/1.1\r\nHost: a\r\n\r\n")
         request(gw, b"POST /x HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n")
         time.sleep(0.2)
@@ -1098,7 +1098,7 @@ class T:
         assert status == 200 and body == b"y" * 10, (status, body)
 
     def client_leaves_mid_body(gw, up):
-        fds = gw.fds()
+        fds = settled_fds(gw)
         s = socket.create_connection(("127.0.0.1", gw.port))
         s.sendall(b"POST /sink HTTP/1.1\r\nHost: a\r\nContent-Length: 100000\r\n\r\n" + b"a" * 5000)
         time.sleep(0.4)
@@ -1108,7 +1108,7 @@ class T:
         assert gw.fds() == fds, ("file descriptors", fds, gw.fds())
 
     def client_leaves_mid_response(gw, up):
-        fds = gw.fds()
+        fds = settled_fds(gw)
         s = socket.create_connection(("127.0.0.1", gw.port))
         s.sendall(GET % b"/trickle")
         s.recv(1000)
@@ -1604,6 +1604,31 @@ def heal(gw):
             return
         time.sleep(0.1)
     raise AssertionError("the circuit did not close")
+
+
+def settled_fds(gw):
+    """The gateway's descriptor count once it has stopped changing (two readings 0.7 s apart agree): the previous test's lingering refusals and
+    closing sessions are gone, so that a count taken before a test and one taken after it differ only by what the test left."""
+    last = gw.fds()
+    for _ in range(12):
+        time.sleep(0.7)
+        now = gw.fds()
+        if now == last:
+            return now
+        last = now
+    return last
+
+
+def settled_connections(up):
+    """The upstream's connection count once no connection has arrived for 0.7 s (a late dial of the previous test would otherwise be counted by this one)."""
+    last = up.connections
+    for _ in range(12):
+        time.sleep(0.7)
+        now = up.connections
+        if now == last:
+            return now
+        last = now
+    return last
 
 
 def quiesce(gw):
