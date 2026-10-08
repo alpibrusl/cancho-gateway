@@ -47,6 +47,49 @@ def check_examples(bad):
             bad.append("examples.html: the deployment shown for %s is not the file's content" % f.name)
 
 
+def check_seo(bad):
+    """What a search engine reads: one title and description of a useful length, a canonical URL that is the page's own, one h1, social tags, valid
+    JSON-LD, and a sitemap that lists every page."""
+    import json
+    base = "https://alpibrusl.github.io/cancho-gateway/"
+    names = sorted(p.name for p in DOCS.glob("*.html"))
+    for name in names:
+        s = (DOCS / name).read_text()
+        title = re.findall(r"<title>(.*?)</title>", s, re.S)
+        desc = re.findall(r'<meta name="description" content="(.*?)"', s)
+        canon = re.findall(r'<link rel="canonical" href="(.*?)"', s)
+        if len(title) != 1 or not 20 <= len(html.unescape(title[0])) <= 65:
+            bad.append("%s: one <title> of 20 to 65 characters" % name)
+        if len(desc) != 1 or not 70 <= len(html.unescape(desc[0])) <= 165:
+            bad.append("%s: one description of 70 to 165 characters" % name)
+        want = base + ("" if name == "index.html" else name)
+        if canon != [want]:
+            bad.append("%s: canonical must be %s" % (name, want))
+        if re.findall(r'<meta property="og:url" content="(.*?)"', s) != [want]:
+            bad.append("%s: og:url must equal the canonical" % name)
+        for tag in ("og:title", "og:description", "og:image"):
+            if 'property="%s"' % tag not in s:
+                bad.append("%s: missing %s" % (name, tag))
+        for tag in ("twitter:card", "twitter:title", "twitter:description", "twitter:image"):
+            if 'name="%s"' % tag not in s:
+                bad.append("%s: missing %s" % (name, tag))
+        if s.count("<h1") != 1:
+            bad.append("%s: exactly one h1" % name)
+        for block in re.findall(r'<script type="application/ld\+json">(.*?)</script>', s, re.S):
+            try:
+                json.loads(block)
+            except ValueError as e:
+                bad.append("%s: JSON-LD does not parse: %s" % (name, e))
+        if "application/ld+json" not in s:
+            bad.append("%s: no JSON-LD" % name)
+    sitemap = (DOCS / "sitemap.xml").read_text() if (DOCS / "sitemap.xml").exists() else ""
+    for name in names:
+        if "<loc>%s</loc>" % (base + ("" if name == "index.html" else name)) not in sitemap:
+            bad.append("sitemap.xml lacks %s" % name)
+    if "Sitemap: " + base + "sitemap.xml" not in ((DOCS / "robots.txt").read_text() if (DOCS / "robots.txt").exists() else ""):
+        bad.append("robots.txt must name the sitemap")
+
+
 def main():
     pages = {p.name: parse(p) for p in sorted(DOCS.glob("*.html"))}
     bad = []
@@ -69,6 +112,7 @@ def main():
             elif anchor and target in pages and anchor not in pages[target].ids:
                 bad.append("%s: %s (no such id in %s)" % (name, link, target))
     check_examples(bad)
+    check_seo(bad)
     for b in bad:
         print("BROKEN " + b)
     print("%d pages, %d links checked, %d broken" % (len(pages), sum(len(p.links) for p in pages.values()), len(bad)))
