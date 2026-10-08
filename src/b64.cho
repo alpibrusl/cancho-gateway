@@ -1,0 +1,62 @@
+edition 5;
+
+module gateway.b64;
+
+// Copied from cancho `examples/ocpp_ws/b64.cho` at the pinned commit (2fcf4cd); only the module name changed (docs/websocket.md section 2).
+
+// `b64` -- standard base64 with padding (RFC 4648 section 4), the encoding of `Sec-WebSocket-Accept`. Encoding only: the
+// handshake never needs to decode (`docs/websocket-spike.md` section 8 says where decoding is wanted).
+
+static alphabet: [byte] {
+    let a = alloc_slice[static](64, byte_of(0));
+    var i = 0;
+    while i < 26 {
+        a[i] = byte_of(65 + i);
+        a[26 + i] = byte_of(97 + i);
+        i = i + 1;
+    }
+    i = 0;
+    while i < 10 {
+        a[52 + i] = byte_of(48 + i);
+        i = i + 1;
+    }
+    a[62] = byte_of('+');
+    a[63] = byte_of('/');
+    return a;
+}
+
+// The length of the encoding of `n` bytes.
+pub fn encoded_len(n: int) -> [] int {
+    return (n + 2) / 3 * 4;
+}
+
+// `data` as base64 into `out`, which must hold `encoded_len(len(data))` bytes. Answers that length.
+pub fn encode[&d, &o](data: &d [byte], out: &!o [byte]) -> [] int {
+    var i = 0;
+    var o = 0;
+    while i + 2 < len(data) {
+        let v = int_of(data[i]) << 16 | int_of(data[i + 1]) << 8 | int_of(data[i + 2]);
+        out[o] = alphabet[v >> 18 & 63];
+        out[o + 1] = alphabet[v >> 12 & 63];
+        out[o + 2] = alphabet[v >> 6 & 63];
+        out[o + 3] = alphabet[v & 63];
+        i = i + 3;
+        o = o + 4;
+    }
+    if len(data) - i == 1 {
+        let v = int_of(data[i]) << 16;
+        out[o] = alphabet[v >> 18 & 63];
+        out[o + 1] = alphabet[v >> 12 & 63];
+        out[o + 2] = byte_of('=');
+        out[o + 3] = byte_of('=');
+        o = o + 4;
+    } else if len(data) - i == 2 {
+        let v = int_of(data[i]) << 16 | int_of(data[i + 1]) << 8;
+        out[o] = alphabet[v >> 18 & 63];
+        out[o + 1] = alphabet[v >> 12 & 63];
+        out[o + 2] = alphabet[v >> 6 & 63];
+        out[o + 3] = byte_of('=');
+        o = o + 4;
+    }
+    return o;
+}

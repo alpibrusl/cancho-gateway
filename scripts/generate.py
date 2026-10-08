@@ -42,12 +42,22 @@ TLS_RATE, TLS_RATE_RANGE = 50, (1, 100000)  # a handshake measured 12 ms of this
 TLS_HANDSHAKE_MS = 10000
 MAX_IDENTITIES = 16
 ENTROPY_FILE = "/dev/urandom"
+# WebSocket (docs/websocket.md section 3): idle and lifetime of a tunnel in milliseconds, and how many upgrades may be in progress or open at once
+# (a session holds two of the table's 256 slots, so no more than 127 sessions exist).
+WS_IDLE_MS, WS_IDLE_RANGE = 600000, (100, 86400000)
+WS_LIFETIME_MS, WS_LIFETIME_RANGE = 86400000, (100, 2592000000)
+WS_MAX_TUNNELS, WS_TUNNELS_RANGE = 64, (1, 127)
+MAX_SUBPROTOCOLS = 8
+MAX_ORIGINS = 16
+TOKEN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}")
+ORIGIN = re.compile(r"[a-z][a-z0-9+.-]*://[a-z0-9.-]+(:[0-9]{1,5})?")
 METHODS = ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
 KEYS = {
     "": ["listen", "header_timeout_ms", "connect_timeout_ms", "upstream_timeout_ms", "total_timeout_ms", "idle_timeout_ms", "pool_idle_max", "circuit_threshold", "circuit_open_ms", "log_failure", "admin_listen",
-           "tls_listen", "tls_dir", "tls_identities", "tls_handshakes", "tls_rate", "tls_handshake_ms"],
+           "tls_listen", "tls_dir", "tls_identities", "tls_handshakes", "tls_rate", "tls_handshake_ms",
+           "ws_idle_timeout_ms", "ws_max_lifetime_ms", "ws_max_tunnels"],
     "upstream": ["name", "addr"],
-    "route": ["name", "host", "path_prefix", "methods", "upstream", "max_body", "trust_forwarded"],
+    "route": ["name", "host", "path_prefix", "methods", "upstream", "max_body", "trust_forwarded", "websocket", "subprotocols", "origins"],
 }
 
 
@@ -259,8 +269,36 @@ def load(path):
         if not isinstance(trust, bool):
             refuse("config.route", "trust_forwarded must be true or false (docs/headers.md section 2)", "route", i, "trust_forwarded")
         mask = sum(1 << METHODS.index(m) for m in (methods or METHODS))
+        ws = r.get("websocket", False)
+        if not isinstance(ws, bool):
+            refuse("config.websocket", "websocket must be true or false (docs/websocket.md section 3)", "route", i, "websocket")
+        protocols, origins = r.get("subprotocols", []), r.get("origins", [])
+        for key in ("subprotocols", "origins"):
+            if key in r and not ws:
+                refuse("config.websocket", "%s needs websocket = true on the same route" % key, "route", i, key)
+        if ws and not mask & 1:
+            refuse("config.websocket", "a websocket route must allow GET: an upgrade is a GET", "route", i, "methods")
+        if not isinstance(protocols, list) or len(protocols) > MAX_SUBPROTOCOLS or len(set(map(str, protocols))) != len(protocols) or \
+                not all(isinstance(t, str) and TOKEN.fullmatch(t) for t in protocols):
+            refuse("config.websocket", "subprotocols must be at most %d distinct tokens of at most 64 bytes (letters, digits and !#$%%&'*+.^_`|~-)" % MAX_SUBPROTOCOLS,
+                   "route", i, "subprotocols")
+        if not isinstance(origins, list) or len(origins) > MAX_ORIGINS or len(set(map(str, origins))) != len(origins) or \
+                not all(isinstance(o, str) and len(o) <= 200 and ORIGIN.fullmatch(o) for o in origins):
+            refuse("config.websocket", "origins must be at most %d distinct strings of the form scheme://host[:port], lowercase, no path and no trailing slash" % MAX_ORIGINS,
+                   "route", i, "origins")
         routes.append({"host": host, "prefix": prefix, "mask": mask, "upstream": names[up], "max_body": body,
-                       "trust": 1 if trust else 0, "name": label})
+                       "trust": 1 if trust else 0, "name": label, "ws": 1 if ws else 0, "protocols": protocols, "origins": origins})
+    ws_keys = [k for k in ("ws_idle_timeout_ms", "ws_max_lifetime_ms", "ws_max_tunnels") if k in doc]
+    if ws_keys and not any(r["ws"] for r in routes):
+        refuse("config.websocket", "%s needs a route with websocket = true" % ws_keys[0], key=ws_keys[0])
+    wsopts = {}
+    for key, name, default, bounds in (("ws_idle_timeout_ms", "idle_ms", WS_IDLE_MS, WS_IDLE_RANGE), ("ws_max_lifetime_ms", "lifetime_ms", WS_LIFETIME_MS, WS_LIFETIME_RANGE),
+                                       ("ws_max_tunnels", "max_tunnels", WS_MAX_TUNNELS, WS_TUNNELS_RANGE)):
+        v = doc.get(key, default)
+        if not isinstance(v, int) or isinstance(v, bool) or not bounds[0] <= v <= bounds[1]:
+            refuse("config.websocket", "%s must be an integer in %d..%d" % ((key,) + bounds), key=key)
+        wsopts[name] = v
+    timeouts["ws"] = wsopts
     for j, b in enumerate(routes):
         for i, a in enumerate(routes[:j]):
             if a["host"] == b["host"] and a["prefix"] == b["prefix"] and a["mask"] & b["mask"]:
@@ -362,6 +400,11 @@ def render_deploy(listen, ups, timeouts):
         "pub fn tls_handshake_ms() -> [] int {", "    return %d;" % (timeouts["tls"]["handshake_ms"] if timeouts["tls"] else TLS_HANDSHAKE_MS), "}", "",
         "pub fn tls_identity_count() -> [] int {", "    return %d;" % (len(timeouts["tls"]["identities"]) if timeouts["tls"] else 0), "}", "",
         "pub fn tls_identity(i: int) -> [] &static [byte] {"] + tls_identity_lines(timeouts["tls"]) + ["}", "",
+        "// WebSocket (docs/websocket.md): a tunnel is closed after this long without a byte moving, or this long after it opened; at most this many",
+        "// upgrades are in progress or open at once.",
+        "pub fn ws_idle_ms() -> [] int {", "    return %d;" % timeouts["ws"]["idle_ms"], "}", "",
+        "pub fn ws_lifetime_ms() -> [] int {", "    return %d;" % timeouts["ws"]["lifetime_ms"], "}", "",
+        "pub fn ws_max_tunnels() -> [] int {", "    return %d;" % timeouts["ws"]["max_tunnels"], "}", "",
         "// The longest common prefix of the addresses, cut at a delimiter: what `narrow` would be given once",
         "// cancho has separate listen and connect bounds. Empty means no shared prefix.",
         "pub fn intended_egress_prefix() -> [] &static [byte] {", "    return %s;" % literal(prefix), "}", "",
@@ -378,8 +421,10 @@ def render_deploy(listen, ups, timeouts):
 
 
 def table_blob(routes):
-    """One line per route: host (or *), prefix, method bitmask, upstream index, max body, trust_forwarded (0 or 1), name; tab-separated, in file order."""
-    return "".join("%s\t%s\t%d\t%d\t%d\t%d\t%s\n" % (r["host"] or "*", r["prefix"], r["mask"], r["upstream"], r["max_body"], r["trust"], r["name"]) for r in routes)
+    """One line per route: host (or *), prefix, method bitmask, upstream index, max body, trust_forwarded (0 or 1), name, websocket (0 or 1), subprotocols
+    (comma-separated), origins (comma-separated); tab-separated, in file order."""
+    return "".join("%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%s\t%s\n" % (r["host"] or "*", r["prefix"], r["mask"], r["upstream"], r["max_body"], r["trust"], r["name"],
+                                                                 r["ws"], ",".join(r["protocols"]), ",".join(r["origins"])) for r in routes)
 
 
 def render_routes(routes):
@@ -387,7 +432,8 @@ def render_routes(routes):
         "edition 5;", "", "module gateway.routes_table;", "",
         "// Generated by scripts/generate.py from a deployment file -- do not edit (docs/routes.md).",
         "// One line per route: host (`*` for any), path_prefix, method bitmask (GET 1, HEAD 2, POST 4, PUT 8, DELETE 16,",
-        "// PATCH 32, OPTIONS 64), upstream index, max body, trust_forwarded (0 or 1), name. Tab-separated, in file order; `gateway.route` reads it.", "",
+        "// PATCH 32, OPTIONS 64), upstream index, max body, trust_forwarded (0 or 1), name, websocket (0 or 1), subprotocols and origins (comma-separated, possibly",
+        "// empty; docs/websocket.md). Tab-separated, in file order; `gateway.route` reads it.", "",
         "pub fn count() -> [] int {", "    return %d;" % len(routes), "}", "",
         "pub fn blob() -> [] &static [byte] {", "    return %s;" % literal(table_blob(routes)), "}", ""])
 
@@ -424,9 +470,13 @@ def main():
             t = timeouts["tls"]
             print("tls on port %d: certificates beneath %s (identities: %s); reads exactly %s and that directory; %d handshakes at once, %d a second, %d ms each" % (
                 t["port"], t["dir"], ", ".join(i or "(the directory itself)" for i in t["identities"]), ENTROPY_FILE, t["handshakes"], t["rate"], t["handshake_ms"]))
+        if any(r["ws"] for r in routes):
+            w = timeouts["ws"]
+            print("websocket: tunnels close after %d ms idle or %d ms; at most %d at once" % (w["idle_ms"], w["lifetime_ms"], w["max_tunnels"]))
         print("intended egress prefix: %s" % (repr(prefix) if prefix else "none (no shared prefix)"))
         for n, r in enumerate(routes):
-            print("route %d: %s %s -> %s (max body %d%s)" % (n, r["host"] or "*", r["prefix"], ups[r["upstream"]][0], r["max_body"], ", trusts forwarding headers" if r["trust"] else ""))
+            print("route %d: %s %s -> %s (max body %d%s)" % (n, r["host"] or "*", r["prefix"], ups[r["upstream"]][0], r["max_body"], ", trusts forwarding headers" if r["trust"] else "") +
+                  ("; websocket, subprotocols %s, origins %s" % (r["protocols"] or "none", r["origins"] or "none") if r["ws"] else ""))
         return 0
     target = out_dir or ROOT / "generated"
     if "--check" in flags:

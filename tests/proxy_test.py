@@ -23,7 +23,7 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LEX = os.environ.get("CANCHO", "cancho")
-SOURCES = ["out", "accesslog", "problem", "framing", "chunked", "route", "response", "forward", "egress", "admin", "metrics", "tlsids", "tlsio", "shared", "adminloop", "proxy", "version", "gateway"]
+SOURCES = ["out", "accesslog", "problem", "framing", "chunked", "route", "response", "sha1", "b64", "websocket", "forward", "egress", "admin", "metrics", "tlsids", "tlsio", "shared", "adminloop", "proxy", "version", "gateway"]
 
 
 def dependencies():

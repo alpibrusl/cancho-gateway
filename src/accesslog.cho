@@ -42,8 +42,8 @@ fn put_number[&o](out: &!o [byte], at: int, key: &static [byte], value: int) -> 
     return out.put_int(out, k, value);
 }
 
-// The line for one request (`secure`: its client spoke TLS), with its newline, from offset 0 of `out`; answers its length, or `0 - 1` if `out` is too small.
-pub fn line[&o, &i, &m, &p, &r, &u, &l](out: &!o [byte], t: int, id: &i [byte], method: &m [byte], path: &p [byte], route: &r [byte], upstream: &u [byte], status: int, rule: &l [byte], outcome: int, ms: int, upstream_ms: int, bytes_in: int, bytes_out: int, secure: bool) -> [] int {
+// The line for one request (`secure`: its client spoke TLS; `upgrade`: it became a WebSocket tunnel), with its newline, from offset 0 of `out`; answers its length, or `0 - 1` if `out` is too small.
+pub fn line[&o, &i, &m, &p, &r, &u, &l](out: &!o [byte], t: int, id: &i [byte], method: &m [byte], path: &p [byte], route: &r [byte], upstream: &u [byte], status: int, rule: &l [byte], outcome: int, ms: int, upstream_ms: int, bytes_in: int, bytes_out: int, secure: bool, upgrade: bool) -> [] int {
     var k = out.put(out, 0, "{\"t\":");
     k = out.put_int(out, k, t);
     k = put_field(out, k, "id", id, 64, 64);
@@ -66,6 +66,10 @@ pub fn line[&o, &i, &m, &p, &r, &u, &l](out: &!o [byte], t: int, id: &i [byte], 
     if secure {
         // Only a connection that spoke TLS carries the field, so a deployment without `tls_listen` writes the lines it always wrote.
         k = out.put(out, k, ",\"tls\":true");
+    }
+    if upgrade {
+        // Only a request that became a WebSocket tunnel carries the field, and it is last (docs/websocket.md section 11).
+        k = out.put(out, k, ",\"upgrade\":\"websocket\"");
     }
     k = out.put(out, k, "}\n");
     return k;

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>cancho-gateway examples: routes, limits, TLS, metrics, download</title>
-<meta name="description" content="Seven runnable cancho-gateway examples: deployment file, commands and output, from internal APIs and strict doors to HTTPS at the edge. Download the demo.">
+<meta name="description" content="Eight runnable cancho-gateway examples: deployment file, commands and output, from internal APIs and strict doors to HTTPS at the edge. Download the demo.">
 <link rel="canonical" href="https://alpibrusl.github.io/cancho-gateway/examples.html">
 <meta name="robots" content="index, follow, max-image-preview:large">
 <meta name="theme-color" content="#265e8d">
@@ -13,14 +13,14 @@
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://alpibrusl.github.io/cancho-gateway/examples.html">
 <meta property="og:title" content="cancho-gateway: examples and download">
-<meta property="og:description" content="Seven runnable examples with their deployment files, commands and output, plus the demo binary. Alpha.">
+<meta property="og:description" content="Eight runnable examples with their deployment files, commands and output, plus the demo binary. Alpha.">
 <meta property="og:image" content="https://alpibrusl.github.io/cancho-gateway/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="cancho-gateway: an auditable HTTP/1.1 reverse proxy. Strict parsing. Every limit refused by name. A report CI checks.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="cancho-gateway: examples and download">
-<meta name="twitter:description" content="Seven runnable examples with their deployment files, commands and output, plus the demo binary. Alpha.">
+<meta name="twitter:description" content="Eight runnable examples with their deployment files, commands and output, plus the demo binary. Alpha.">
 <meta name="twitter:image" content="https://alpibrusl.github.io/cancho-gateway/og.png">
 <script type="application/ld+json">
 {
@@ -29,7 +29,7 @@
   {
    "@type": "WebPage",
    "name": "cancho-gateway examples: routes, limits, TLS, metrics, download",
-   "description": "Seven runnable cancho-gateway examples: deployment file, commands and output, from internal APIs and strict doors to HTTPS at the edge. Download the demo.",
+   "description": "Eight runnable cancho-gateway examples: deployment file, commands and output, from internal APIs and strict doors to HTTPS at the edge. Download the demo.",
    "url": "https://alpibrusl.github.io/cancho-gateway/examples.html",
    "isPartOf": {
     "@type": "WebSite",
@@ -191,7 +191,7 @@ pre.out { background: var(--surface); border: 1px dashed var(--line); border-rad
 <div style="padding-top:3.5rem">
   <a class="badge" href="index.html#status"><i></i>Alpha · only what is built is shown here</a>
   <h1>Where it earns its place.</h1>
-  <p class="lead">Six situations. Each has the deployment file, the commands to run it in a terminal, and what you should see. Every command and every line of output below was run against the real gateway.</p>
+  <p class="lead">Eight situations. Each has the deployment file, the commands to run it in a terminal, and what you should see. Every command and every line of output below was run against the real gateway.</p>
 </div>
 
 <section id="download">
@@ -224,7 +224,7 @@ HTTP/1.1 400 Bad Request
 
 <section id="setup">
   <h2>Build from source, once</h2>
-  <p class="sub">Examples 1 to 7 build a gateway for each deployment file. That needs the pinned cancho compiler and Python 3. Nothing is installed system-wide, and <code>scripts/try.sh</code> builds in a temporary copy, so your checkout stays clean.</p>
+  <p class="sub">Examples 1 to 8 build a gateway for each deployment file. That needs the pinned cancho compiler and Python 3. Nothing is installed system-wide, and <code>scripts/try.sh</code> builds in a temporary copy, so your checkout stays clean.</p>
   <pre class="code" tabindex="0"><code>git clone https://github.com/alpibrusl/cancho &amp;&amp; git clone https://github.com/alpibrusl/cancho-gateway
 git -C cancho checkout "$(sed -n 's/^cancho *= *"\([0-9a-f]*\)".*/\1/p' cancho-gateway/cancho.toml)"
 (cd cancho &amp;&amp; cargo build --release -p cancho)
@@ -523,11 +523,86 @@ gateway-tls  args, clock, conn_accept, conn_read, conn_write, dir_read, file_rea
   <p class="note">A client that handshakes and then sends nothing gets <code>408</code> at <code>header_timeout_ms</code>; one that never finishes its handshake is dropped without an answer at <code>tls_handshake_ms</code>, because there is no HTTP to answer with. Handshakes are bounded (<code>tls_handshakes</code> at a time, <code>tls_rate</code> a second, oldest first), and a handshake measured 12 ms of CPU on the development machine: set <code>tls_rate</code> from yours (<code>docs/tls.md</code> section 10).</p>
 </section>
 
+<section id="ocpp">
+  <h2>8. EV chargers and a back office (OCPP over WebSocket)</h2>
+  <p class="sub">Chargers keep a WebSocket open to the back office for days and speak OCPP-J on it (<code>ocpp1.6</code> or <code>ocpp2.0.1</code>). The gateway checks the opening handshake and refuses what is wrong with a rule tag: a charger that offers a protocol the route does not serve, a browser page whose origin is not on the route&rsquo;s list, a key that is not a key. It checks that the back office&rsquo;s answer is a WebSocket answer to <em>this</em> request. After that the connection is a byte tunnel with an idle timeout and a lifetime. The gateway does not read the frames, so there is no message limit and no ping policy yet.</p>
+  <p class="note" style="margin-bottom:0">Deployment: <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/deploy/examples/ocpp.toml"><code>deploy/examples/ocpp.toml</code></a></p>
+  <pre class="code" tabindex="0"><code># Example 8: EV chargers (OCPP-J over WebSocket) connect to a back office through the gateway.
+listen = 8080
+ws_idle_timeout_ms = 600000      # a tunnel in which no byte moved for ten minutes is closed (two heartbeats at the usual 300 s)
+ws_max_lifetime_ms = 86400000    # and none lives longer than a day: chargers reconnect
+ws_max_tunnels = 64              # at most this many upgrades at once; the gateway's whole table holds 127 sessions
+
+[[upstream]]
+name = "csms"
+addr = "127.0.0.1:9000"
+
+[[route]]
+name = "ocpp"
+path_prefix = "/ocpp"
+upstream = "csms"
+websocket = true
+subprotocols = ["ocpp1.6", "ocpp2.0.1"]   # a charger that offers neither is refused at the edge
+# no `origins`: a browser (it always sends Origin) is refused here; a charger sends none and is admitted
+
+[[route]]
+name = "status"
+path_prefix = "/"
+upstream = "csms"</code></pre>
+<p class="step"><span>1</span>Terminal 1, a small back office that answers <code>BootNotification</code> and <code>Heartbeat</code> (it is not an OCPP implementation); terminal 2, the gateway:</p>
+  <pre class="code" tabindex="0"><code>python3 scripts/demo_ws_upstream.py 9000        # terminal 1
+scripts/try.sh deploy/examples/ocpp.toml        # terminal 2</code></pre>
+<p class="step"><span>2</span>Terminal 3, a charger. It offers <code>ocpp1.6</code>, sends two calls and closes:</p>
+  <pre class="code" tabindex="0"><code>python3 scripts/demo_ws_client.py localhost:8080 /ocpp/CP001 ocpp1.6</code></pre>
+  <pre class="out" tabindex="0"><code>HTTP/1.1 101 Switching Protocols
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Accept: Q8bt3OmIBQLW3OqjiHA3TXMX5Lk=
+Sec-WebSocket-Protocol: ocpp1.6
+Via: 1.1 cancho-gateway
+X-Request-Id: 211297-1f90-00000001
+accept value correct: True
+sent     [2, "1", "BootNotification", {"chargePointVendor": "demo", "chargePointModel": "d1"}]
+received [3, "1", {"currentTime": "2026-10-08T08:09:35Z", "interval": 300, "status": "Accepted"}]
+sent     [2, "2", "Heartbeat", {}]
+received [3, "2", {"currentTime": "2026-10-08T08:09:35Z"}]
+closed with 1000</code></pre>
+<p class="step"><span>3</span>What the back office was sent: the client&rsquo;s key, version and subprotocol as received, the gateway&rsquo;s own <code>Connection</code> and <code>Upgrade</code> last, and nothing about extensions (none is offered, so none can be negotiated):</p>
+  <pre class="out" tabindex="0"><code>upstream :9000 saw
+GET /ocpp/CP001 HTTP/1.1
+Host: localhost:8080
+Sec-WebSocket-Key: QodL1tRUz8ILScPJAZ2/XA==
+Sec-WebSocket-Version: 13
+Sec-WebSocket-Protocol: ocpp1.6
+Via: 1.1 cancho-gateway
+X-Forwarded-Host: localhost:8080
+X-Forwarded-Proto: http
+X-Request-Id: 211297-1f90-00000001
+Connection: Upgrade
+Upgrade: websocket</code></pre>
+<p class="step"><span>4</span>A charger that offers a protocol the route does not serve, and a browser page that is not on the (empty) list of origins, never reach the back office:</p>
+  <pre class="code" tabindex="0"><code>python3 scripts/demo_ws_client.py localhost:8080 /ocpp/CP002 mqtt
+curl -si localhost:8080/ocpp/CP003 -H 'Upgrade: websocket' -H 'Connection: Upgrade' -H 'Origin: https://evil.example' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' -H 'Sec-WebSocket-Protocol: ocpp1.6'</code></pre>
+  <pre class="out" tabindex="0"><code>HTTP/1.1 400 Bad Request
+...
+{"type":"about:blank","title":"Bad Request","status":400,"rule":"ws.subprotocol","request_id":"211297-1f90-00000002"}
+
+HTTP/1.1 403 Forbidden
+...
+{"type":"about:blank","title":"Forbidden","status":403,"rule":"ws.origin","request_id":"211297-1f90-00000003"}</code></pre>
+<p class="step"><span>5</span>The access log, in terminal 2. A tunnel&rsquo;s line is written when the tunnel <strong>ends</strong>, carries the tunnel&rsquo;s byte counts and ends with <code>"upgrade":"websocket"</code>; a refusal is a refusal like any other, and the ordinary route beside the WebSocket one answers as before:</p>
+  <pre class="out" tabindex="0"><code>{"t":1791446975888,"id":"211297-1f90-00000001","method":"GET","path":"/ocpp/CP001","route":"ocpp","upstream":"csms","status":101,"rule":"","outcome":"ok","ms":3,"upstream_ms":1,"bytes_in":130,"bytes_out":368,"upgrade":"websocket"}
+{"t":1791446975933,"id":"211297-1f90-00000002","method":"GET","path":"/ocpp/CP002","route":"ocpp","upstream":"csms","status":400,"rule":"ws.subprotocol","outcome":"refused","ms":0,"upstream_ms":0,"bytes_in":0,"bytes_out":261}
+{"t":1791446975945,"id":"211297-1f90-00000003","method":"GET","path":"/ocpp/CP003","route":"ocpp","upstream":"csms","status":403,"rule":"ws.origin","outcome":"refused","ms":1,"upstream_ms":0,"bytes_in":0,"bytes_out":252}</code></pre>
+  <p class="note">A tunnel that nobody closes ends at <code>ws_idle_timeout_ms</code> or <code>ws_max_lifetime_ms</code> (<code>"rule":"ws.idle-timeout"</code> or <code>"ws.lifetime"</code> in its line, <code>"outcome":"aborted"</code>), and the gateway sends no WebSocket Close frame when it does: it does not parse frames, so it cannot know where one ends. Open tunnels are counted in the metrics (<code>ws_tunnels_active</code>). Add <code>tls_listen</code> (example 7) and the same route serves <code>wss</code>. At most 127 tunnels fit in the gateway&rsquo;s slot table: ten thousand chargers need a different budget (<code>docs/websocket.md</code> section 9).</p>
+</section>
+
 <aside class="status" id="not-yet">
   <h2>What these cases do not cover yet</h2>
   <ul>
     <li><strong>Authentication</strong> and <strong>rate limiting</strong>: planned, not built. Do the check at your front for now.</li>
-    <li><strong>TLS</strong> reload and a TLS-only deployment: not built (example 7 has a plain and a TLS port; a renewed certificate means a restart). <strong>WebSocket</strong> (for example OCPP between chargers and a back office): planned, not built.</li>
+    <li><strong>TLS</strong> reload and a TLS-only deployment: not built (example 7 has a plain and a TLS port; a renewed certificate means a restart). <strong>WebSocket</strong> (example 8) is a byte tunnel: the handshake is checked, the frames are not read, so there is no message limit, no ping policy and no close handshake of the gateway&rsquo;s own, and at most 127 tunnels fit.</li>
     <li><strong>The admin port</strong> (metrics, health) binds every interface and has no authentication: firewall it. No alerting, no tracing.</li>
     <li><strong>Client addresses</strong> in logs and headers: the compiler does not provide one yet.</li>
     <li><strong>Changing a route</strong> means a new binary; there is no hot reload.</li>

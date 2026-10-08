@@ -379,7 +379,7 @@ build/gateway</code></pre>
   <h2>Alpha: we are trying to break it before you deploy it</h2>
   <p class="note" style="margin:.2rem 0 .6rem">Alpha means the interfaces may change and nothing here is certified for production.</p>
   <ul>
-    <li><strong>Not built yet:</strong> authentication, rate limiting, WebSocket (the OCPP case), and <strong>reloading a TLS certificate</strong> (a renewed one means a restart). TLS 1.3 is built (<code>tls_listen</code>, cancho&rsquo;s server written in cancho, ECDSA P-256, not independently reviewed; <code>docs/tls.md</code>) and a handshake costs 12 ms of CPU on the development machine.</li>
+    <li><strong>Not built yet:</strong> authentication, rate limiting, and <strong>reloading a TLS certificate</strong> (a renewed one means a restart). TLS 1.3 is built (<code>tls_listen</code>, cancho&rsquo;s server written in cancho, ECDSA P-256, not independently reviewed; <code>docs/tls.md</code>) and a handshake costs 12 ms of CPU on the development machine. <strong>WebSocket</strong> (the OCPP case) is built as a byte tunnel: the handshake is checked at the gateway, the frames are not read (no ping policy, no close handshake, no message limit), and at most 127 tunnels fit (<code>docs/websocket.md</code>).</li>
     <li><strong>Slower than HAProxy</strong> on most cells, and than nginx on a POST body; no client-side keep-alive, which is most of the gap.</li>
     <li>About 127 concurrent sessions, one core, no hot reload; a changed route is a new binary.</li>
     <li>No client address: the compiler gives none, so there is no <code>X-Forwarded-For</code> of the gateway&rsquo;s own and no client in the log.</li>

@@ -87,6 +87,20 @@ pub fn tls_identity(i: int) -> [] &static [byte] {
     return "";
 }
 
+// WebSocket (docs/websocket.md): a tunnel is closed after this long without a byte moving, or this long after it opened; at most this many
+// upgrades are in progress or open at once.
+pub fn ws_idle_ms() -> [] int {
+    return 600000;
+}
+
+pub fn ws_lifetime_ms() -> [] int {
+    return 86400000;
+}
+
+pub fn ws_max_tunnels() -> [] int {
+    return 64;
+}
+
 // The longest common prefix of the addresses, cut at a delimiter: what `narrow` would be given once
 // cancho has separate listen and connect bounds. Empty means no shared prefix.
 pub fn intended_egress_prefix() -> [] &static [byte] {
