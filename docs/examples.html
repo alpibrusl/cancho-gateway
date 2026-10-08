@@ -174,7 +174,7 @@ HTTP/1.1 400 Bad Request
 
 <section id="setup">
   <h2>Build from source, once</h2>
-  <p class="sub">Examples 1 to 6 build a gateway for each deployment file. That needs the pinned cancho compiler and Python 3. Nothing is installed system-wide, and <code>scripts/try.sh</code> builds in a temporary copy, so your checkout stays clean.</p>
+  <p class="sub">Examples 1 to 7 build a gateway for each deployment file. That needs the pinned cancho compiler and Python 3. Nothing is installed system-wide, and <code>scripts/try.sh</code> builds in a temporary copy, so your checkout stays clean.</p>
   <pre class="code" tabindex="0"><code>git clone https://github.com/alpibrusl/cancho &amp;&amp; git clone https://github.com/alpibrusl/cancho-gateway
 git -C cancho checkout "$(sed -n 's/^cancho *= *"\([0-9a-f]*\)".*/\1/p' cancho-gateway/cancho.toml)"
 (cd cancho &amp;&amp; cargo build --release -p cancho)
@@ -419,15 +419,65 @@ cancho_gateway_refusals_total{rule="route.method"} 1</code></pre>
   <pre class="code" tabindex="0"><code>python3 scripts/authority.py --check        # derives it with the compiler, fails if it differs from the recorded one
 cat manifests/gateway.authority.json              # the recorded report</code></pre>
   <pre class="out" tabindex="0"><code>gateway  args, clock, conn_accept, conn_read, conn_write, heap,
-         io_write, net_in(""), net_out(""), poll        # no files, no foreign calls</code></pre>
+         io_write, net_in(""), net_out(""), poll        # no foreign calls, no writes; reads files only for TLS (example 7)</code></pre>
   <p class="note">The id is also in the response header and in a refusal&rsquo;s body. The log goes to stdout, so journald, a file or a collector can take it; if that reader stops, so does the gateway (see the alpha notes). <strong>The admin port listens on every interface</strong> (the compiler offers no loopback-only bind): it shows route and upstream names and counters, no request data, but firewall it. The network bound is not narrowed (one bound covers listening and connecting), so the upstream set is enforced in code and tested.</p>
+</section>
+
+<section id="tls">
+  <h2>7. HTTPS at the edge</h2>
+  <p class="sub">The gateway terminates TLS 1.3 itself on a second port (<code>tls_listen</code>), with cancho&rsquo;s TLS server written in cancho. Its certificates are read once, at start, from a directory that is compiled into the binary; the authority report names exactly that directory and <code>/dev/urandom</code>. No reload yet: a renewed certificate means a restart. ECDSA P-256 certificates only.</p>
+  <p class="note" style="margin-bottom:0">Deployment: <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/deploy/examples/tls.toml"><code>deploy/examples/tls.toml</code></a></p>
+  <pre class="code" tabindex="0"><code># Example 7: the gateway as the edge for one internal service.
+listen = 8080
+tls_listen = 8443
+tls_dir = "/etc/cancho-gateway/tls"      # compiled into the binary: the program reads exactly this directory and /dev/urandom
+tls_identities = ["api"]                 # /etc/cancho-gateway/tls/api/{chain.pem,key.pem,names}
+
+[[upstream]]
+name = "app"
+addr = "127.0.0.1:9000"
+
+[[route]]
+name = "app"
+path_prefix = "/"
+upstream = "app"</code></pre>
+<p class="step"><span>1</span>Make a certificate (any P-256 certificate works; this one is for <code>localhost</code> and lasts 30 days):</p>
+  <pre class="code" tabindex="0"><code>mkdir -p /tmp/gw-tls/api
+openssl ecparam -name prime256v1 -genkey -noout | openssl pkcs8 -topk8 -nocrypt -out /tmp/gw-tls/api/key.pem
+openssl req -new -x509 -key /tmp/gw-tls/api/key.pem -out /tmp/gw-tls/api/chain.pem -days 30 \
+  -subj /CN=localhost -addext subjectAltName=DNS:localhost
+echo localhost &gt; /tmp/gw-tls/api/names</code></pre>
+<p class="step"><span>2</span>Point a copy of the deployment at that directory (the file names <code>/etc/cancho-gateway/tls</code>) and run it, with the upstream of example 2 in terminal 1:</p>
+  <pre class="code" tabindex="0"><code>sed 's#/etc/cancho-gateway/tls#/tmp/gw-tls#' deploy/examples/tls.toml &gt; /tmp/tls-demo.toml
+scripts/try.sh /tmp/tls-demo.toml</code></pre>
+<p class="step"><span>3</span>Ask over HTTPS. The upstream is told the client spoke TLS, and the access-log line says so:</p>
+  <pre class="code" tabindex="0"><code>curl --cacert /tmp/gw-tls/api/chain.pem https://localhost:8443/hello</code></pre>
+  <pre class="out" tabindex="0"><code>upstream :9000 saw
+GET /hello
+Host: localhost:8443
+Via: 1.1 cancho-gateway
+X-Forwarded-Host: localhost:8443
+X-Forwarded-Proto: https
+X-Request-Id: 444d37-1f90-00000001
+body bytes: 0
+
+# terminal 2, the access log:
+{"t":1791435851525,"id":"444d37-1f90-00000001","method":"GET","path":"/hello","route":"app","upstream":"app","status":200,"rule":"","outcome":"ok","ms":13,"upstream_ms":1,"bytes_in":0,"bytes_out":437,"tls":true}</code></pre>
+<p class="step"><span>4</span>The plain port still works beside it, and says <code>http</code>; and the report names the two paths:</p>
+  <pre class="code" tabindex="0"><code>curl -s localhost:8080/hello | grep Proto
+python3 scripts/authority.py --check</code></pre>
+  <pre class="out" tabindex="0"><code>X-Forwarded-Proto: http
+gateway-tls  args, clock, conn_accept, conn_read, conn_write, dir_read, file_read,
+             fs_read("/dev/urandom"), fs_read("/etc/cancho-gateway/tls"), heap, io_write,
+             net_in(""), net_out(""), poll</code></pre>
+  <p class="note">A client that handshakes and then sends nothing gets <code>408</code> at <code>header_timeout_ms</code>; one that never finishes its handshake is dropped without an answer at <code>tls_handshake_ms</code>, because there is no HTTP to answer with. Handshakes are bounded (<code>tls_handshakes</code> at a time, <code>tls_rate</code> a second, oldest first), and a handshake measured 12 ms of CPU on the development machine: set <code>tls_rate</code> from yours (<code>docs/tls.md</code> section 10).</p>
 </section>
 
 <aside class="status" id="not-yet">
   <h2>What these cases do not cover yet</h2>
   <ul>
-    <li><strong>Authentication</strong> and <strong>rate limiting</strong>: planned, not built. Do the check at the TLS front for now.</li>
-    <li><strong>TLS</strong> in the gateway itself: not built. cancho has a TLS 1.3 server now (<code>packages/tls</code>), so nothing in the language blocks it; wiring it in is planned and would let the gateway read one certificate directory, which its report does not allow today. <strong>WebSocket</strong> (for example OCPP between chargers and a back office): planned, not built.</li>
+    <li><strong>Authentication</strong> and <strong>rate limiting</strong>: planned, not built. Do the check at your front for now.</li>
+    <li><strong>TLS</strong> reload and a TLS-only deployment: not built (example 7 has a plain and a TLS port; a renewed certificate means a restart). <strong>WebSocket</strong> (for example OCPP between chargers and a back office): planned, not built.</li>
     <li><strong>The admin port</strong> (metrics, health) binds every interface and has no authentication: firewall it. No alerting, no tracing.</li>
     <li><strong>Client addresses</strong> in logs and headers: the compiler does not provide one yet.</li>
     <li><strong>Changing a route</strong> means a new binary; there is no hot reload.</li>
