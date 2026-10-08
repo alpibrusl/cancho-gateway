@@ -11,6 +11,7 @@ All of these pass before anything is called done (CI runs them, `.github/workflo
     python3 tests/generate_test.py
     python3 tests/response/run.py                # upstream response heads (docs/pool.md)
     python3 tests/proxy_test.py                  # the proxy core, end to end (docs/proxy.md)
+    python3 tests/websocket_test.py              # WebSocket handshake and tunnel, plain and over TLS (docs/websocket.md)
     python3 tests/route_test.py 12 400          # route selection vs the reference; also --fixed (docs/routes.md)
     cancho build
     cancho test

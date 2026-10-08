@@ -447,8 +447,12 @@ pub fn check_response[&s, &t, &e, &p](src: &s [byte], table: &t [int], expected:
 // request's id. Answers its length, or `0 - 1` if it does not fit.
 pub fn upgrade_response[&s, &t, &o, &d](src: &s [byte], table: &t [int], out: &!o [byte], id: &d [byte]) -> [] int {
     let count = table[2];
+    let acc = first_named(src, table, count, "sec-websocket-accept");
+    if acc < 0 {
+        return 0 - 1;
+    }
     var k = out.put(out, 0, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ");
-    k = out.put(out, k, value_of(src, table, first_named(src, table, count, "sec-websocket-accept")));
+    k = out.put(out, k, value_of(src, table, acc));
     let sp = first_named(src, table, count, "sec-websocket-protocol");
     if sp >= 0 {
         k = out.put(out, k, "\r\nSec-WebSocket-Protocol: ");

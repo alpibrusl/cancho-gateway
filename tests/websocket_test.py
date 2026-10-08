@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import pathlib
+import random
 import re
 import socket
 import ssl
@@ -262,7 +263,7 @@ def big_payload(n):
 
 class WsUpstream:
     """A WebSocket server. What it does is chosen by the last segment of the request path: echo (default), bigdown, slowsink, silent, speakfirst, closeafter,
-    resetafter (answers, then resets the connection after 0.3 s), slow101 (answers after 0.4 s), ticker (six frames, 0.4 s apart), and the misbehaviours badaccept, noaccept, twoaccept, noupgrade, noconn, cl, te, badproto, noproto, ext, 401, plain101. `/plain/ka` is a keep-alive HTTP
+    rawsink (reads bytes, not frames, until the connection closes, and records their hash), resetafter (answers, then resets the connection after 0.3 s), slow101 (answers after 0.4 s), ticker (six frames, 0.4 s apart), and the misbehaviours badaccept, noaccept, twoaccept, noupgrade, noconn, cl, te, badproto, noproto, ext, 401, plain101. `/plain/ka` is a keep-alive HTTP
     server for the pool test, `/plain/x` an ordinary HTTP answer."""
 
     def __init__(self, port):
@@ -385,6 +386,20 @@ class WsUpstream:
             for i in range(6):
                 time.sleep(0.4)
                 c.sendall(encode_frame(1, b"tick%d" % i, mask=False))
+        if mode == "rawsink":
+            digest, total = hashlib.sha256(), len(rest)
+            digest.update(rest)
+            c.settimeout(60)
+            while True:
+                d = c.recv(65536)
+                if not d:
+                    break
+                digest.update(d)
+                total += len(d)
+            with self.lock:
+                self.sunk.append((path, digest.hexdigest(), total))
+            self.note(path, "eof")
+            return
         if mode == "resetafter":
             time.sleep(0.3)
             c.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
@@ -482,6 +497,13 @@ subprotocols = ["ocpp1.6"]
 upstream = "up"
 
 [[route]]
+name = "lib"
+path_prefix = "/lib"
+websocket = true
+subprotocols = ["ocpp1.6"]
+upstream = "lib"
+
+[[route]]
 name = "plain"
 path_prefix = "/"
 upstream = "up"
@@ -489,7 +511,7 @@ upstream = "up"
 
 
 class Gateway:
-    def __init__(self, tmp, up_port, idle=20000, lifetime=60000, max_tunnels=120, circuit=0, tls=False, pool=4):
+    def __init__(self, tmp, up_port, lib_port, idle=20000, lifetime=60000, max_tunnels=120, circuit=0, tls=False, pool=4):
         self.tmp = pathlib.Path(tmp)
         self.port, self.admin = pt.free_port(), pt.free_port()
         self.tls_port = pt.free_port() if tls else None
@@ -517,7 +539,11 @@ ws_max_tunnels = %d
 [[upstream]]
 name = "up"
 addr = "127.0.0.1:%d"
-%s""" % (self.port, self.admin, tlsconf, pool, circuit, idle, lifetime, max_tunnels, up_port, ROUTES))
+
+[[upstream]]
+name = "lib"
+addr = "127.0.0.1:%d"
+%s""" % (self.port, self.admin, tlsconf, pool, circuit, idle, lifetime, max_tunnels, up_port, lib_port, ROUTES))
         out = self.tmp / "gen"
         subprocess.run([sys.executable, str(TREE / "scripts" / "generate.py"), str(deploy), "--out", str(out)], check=True)
         files = [str(out / n) for n in ("deploy.cho", "routes.cho", "tlsfiles.cho")] + pt.dependencies() + [str(TREE / "src" / (n + ".cho")) for n in pt.SOURCES]
@@ -637,6 +663,17 @@ class Main:
         assert ws.headers["via"] == ["1.1 cancho-gateway"] and re.fullmatch(r"[0-9a-f]+-[0-9a-f]+-[0-9a-f]{8,}", ws.headers["x-request-id"][0])
         assert ws.head.startswith(b"HTTP/1.1 101 Switching Protocols\r\n"), ws.head
         ws.close()
+
+    def the_accept_value_agrees_with_hashlib_for_the_rfc_key_and_three_hundred_random_ones(gw, up):
+        # The upstream computes the accept value with hashlib; the gateway computes it with its own SHA-1 and base64 and refuses the 101 if they differ.
+        # Every handshake below is therefore a comparison, and a gateway that gets one bit of SHA-1 wrong cannot complete any of them.
+        ws = connect_ws(gw, "/v16/CP0", key=b"dGhlIHNhbXBsZSBub25jZQ==")
+        assert ws.headers["sec-websocket-accept"] == ["s3pPLMBiTxaQ9kYGzzhZRbK+xOo="], ws.headers
+        ws.close()
+        for i in range(300):
+            ws = connect_ws(gw, "/v16/CP%d" % i)
+            ws.close()
+        settle_down(gw)
 
     def text_binary_ping_and_close_frames_go_both_ways(gw, up):
         ws = connect_ws(gw, "/v16/CP002")
@@ -888,6 +925,74 @@ class Main:
         settle_down(gw)
         assert gw.alive()
 
+    def bytes_that_are_not_frames_cross_a_tunnel_unchanged(gw, up):
+        # The gateway does not read frames: 3 MiB of random bytes that no WebSocket peer would accept are delivered exactly, and the connection is not judged.
+        n = len(up.sunk)
+        ws = connect_ws(gw, "/v16/rawsink", timeout=30)
+        junk = os.urandom(3 << 20)
+        ws.sock.sendall(junk)
+        ws.close()
+        end = time.time() + 6
+        while len(up.sunk) <= n and time.time() < end:
+            time.sleep(0.05)
+        assert len(up.sunk) > n, "the upstream never finished reading"
+        path, digest, total = up.sunk[n]
+        assert total == len(junk) and digest == hashlib.sha256(junk).hexdigest(), (total, len(junk))
+        settle_down(gw)
+
+    def hostile_upgrade_requests_leave_the_gateway_answering(gw, up):
+        rng = random.Random(15)
+        good, _ = request_bytes("/v16/CP1")
+        fds0 = gw.fds()
+        for i in range(500):
+            raw = bytearray(good)
+            kind = rng.randrange(7)
+            if kind == 0:
+                for _ in range(rng.randrange(1, 4)):
+                    raw[rng.randrange(len(raw))] = rng.randrange(256)
+            elif kind == 1:
+                raw = raw[:rng.randrange(1, len(raw))]
+            elif kind == 2:
+                lines = bytes(raw).split(b"\r\n")
+                del lines[rng.randrange(1, len(lines) - 2)]
+                raw = bytearray(b"\r\n".join(lines))
+            elif kind == 3:
+                lines = bytes(raw).split(b"\r\n")
+                k = rng.randrange(1, len(lines) - 2)
+                lines.insert(k, lines[rng.randrange(1, len(lines) - 2)])
+                raw = bytearray(b"\r\n".join(lines))
+            elif kind == 4:
+                raw = bytearray(os.urandom(rng.randrange(1, 300)))
+            elif kind == 5:
+                pos = bytes(raw).index(b"\r\n") + 2
+                raw[pos:pos] = rng.choice([b"X-J: a\r\n", b"Upgrade: websocket\r\n", b"Connection: close\r\n", b"Origin: x\r\n", b"Sec-WebSocket-Protocol: ocpp1.6\r\n",
+                                           b"Content-Length: 3\r\n", b"Transfer-Encoding: chunked\r\n", b"\r\n", b"\n", b"Sec-WebSocket-Key: " + b"A" * 22 + b"==\r\n"])
+            else:
+                raw += rng.choice([b"x", b"\r\n", encode_frame(1, b"q"), b"GET / HTTP/1.1\r\n\r\n"])
+            s = open_socket(gw, timeout=3)
+            try:
+                s.sendall(bytes(raw))
+                s.settimeout(0.15)
+                try:
+                    s.recv(4096)
+                except (socket.timeout, OSError):
+                    pass
+            except OSError:
+                pass
+            s.close()
+        end = time.time() + 12
+        while time.time() < end:
+            m = gw.metrics()
+            if m["sessions_active"] <= 1 and m["ws"]["tunnels_active"] == 0:
+                break
+            time.sleep(0.1)
+        ws = connect_ws(gw, "/v16/CP2")
+        echo_roundtrip(ws)
+        ws.close()
+        settle_down(gw, wait=8)
+        time.sleep(0.3)
+        assert gw.alive() and gw.fds() <= fds0 + 2, (gw.fds(), fds0)
+
     def a_client_reset_mid_tunnel_is_an_ordinary_end(gw, up):
         n = len(up.ended)
         ws = connect_ws(gw, "/v16/CP021")
@@ -1007,6 +1112,9 @@ class Main:
             raw, _ = request_bytes("/bad/" + mode)
             got = refused(raw_exchange(gw, raw))
             assert got == (502, tag), "%s: %s" % (mode, got)
+        # a subprotocol chosen on a route that serves none
+        raw, _ = request_bytes("/bare/badproto", protocols=())
+        assert refused(raw_exchange(gw, raw)) == (502, "ws.upstream-subprotocol")
         m = gw.metrics()["refusals"]
         for _, tag in cases:
             assert m.get(tag, 0) >= 1, tag
@@ -1067,6 +1175,89 @@ class Main:
         assert used < 0.05, "%.3fs of CPU in 1s with 11 tunnels at rest" % used
         for w in quiet + [reader]:
             w.close()
+        settle_down(gw)
+
+
+class Skip(Exception):
+    pass
+
+
+def third_party():
+    """The `websockets` library, if it is installed (pip install websockets): an implementation that is not ours."""
+    try:
+        import websockets
+        import asyncio
+    except ImportError:
+        raise Skip("the websockets library is not installed (python3 -m pip install websockets)")
+    return websockets, asyncio
+
+
+class LibServer:
+    """A `websockets` server (echo, subprotocol ocpp1.6) on its own thread: an upstream that is not ours."""
+
+    def __init__(self, websockets, asyncio, port):
+        self.loop = asyncio.new_event_loop()
+        ready = threading.Event()
+
+        async def echo(ws):
+            async for message in ws:
+                await ws.send(message)
+
+        async def start():
+            self.server = await websockets.serve(echo, "127.0.0.1", port, subprotocols=["ocpp1.6"], max_size=None)
+            ready.set()
+
+        def run():
+            asyncio.set_event_loop(self.loop)
+            self.loop.run_until_complete(start())
+            self.loop.run_forever()
+
+        threading.Thread(target=run, daemon=True).start()
+        ready.wait(10)
+
+    def stop(self):
+        self.loop.call_soon_threadsafe(self.loop.stop)
+
+
+class Interop:
+    """An implementation that is not ours, on each side of the gateway (needs `pip install websockets`; skipped without it)."""
+
+    def a_websockets_client_through_the_gateway(gw, up):
+        websockets, asyncio = third_party()
+        n = len(up.heads)
+
+        async def run():
+            async with websockets.connect("ws://127.0.0.1:%d/v16/third-party" % gw.port, subprotocols=["ocpp1.6"], max_size=None, open_timeout=10) as c:
+                assert c.subprotocol == "ocpp1.6", c.subprotocol
+                await c.send("hello")
+                assert await c.recv() == "hello"
+                blob = os.urandom(1 << 20)
+                await c.send(blob)
+                assert await c.recv() == blob
+                await asyncio.wait_for(await c.ping(b"abc"), 5)
+                await c.close(1000, "bye")
+                assert c.close_code == 1000, c.close_code
+
+        asyncio.run(run())
+        h = pt.heads_of(up.heads[n])
+        assert "sec-websocket-extensions" not in h, "the library offers permessage-deflate; the gateway must not pass it on: %r" % h
+        settle_down(gw)
+
+    def a_websockets_server_behind_the_gateway(gw, up):
+        third_party()
+        ws = connect_ws(gw, "/lib/x", timeout=20)
+        assert ws.protocol == "ocpp1.6"
+        echo_roundtrip(ws)
+        blob = os.urandom(1 << 20)
+        ws.send(2, blob)
+        ws.expect(2, blob)
+        ws.send(9, b"pp")
+        ws.expect(10, b"pp")
+        ws.send(8, struct.pack(">H", 1000) + b"bye")
+        op, payload = ws.recv()
+        assert op == 8 and payload[:2] == struct.pack(">H", 1000), (op, payload)
+        ws.eof()
+        ws.close()
         settle_down(gw)
 
 
@@ -1147,6 +1338,26 @@ class Timers:
         settle_down(gw)
         # a refused upgrade did not hold a place
         wss = [connect_ws(gw, "/v16/CP06%d" % i) for i in range(3)]
+        for w in wss:
+            w.close()
+        settle_down(gw)
+
+    def upgrades_still_waiting_for_their_101_hold_a_place(gw, up):
+        pending = []
+        for i in range(3):         # three upgrades whose upstream answers only after 0.4 s: none is a tunnel yet
+            raw, key = request_bytes("/v16/slow101")
+            s = open_socket(gw)
+            s.sendall(raw)
+            pending.append((s, key))
+        time.sleep(0.15)
+        raw, _ = request_bytes("/v16/CP080")
+        assert refused(raw_exchange(gw, raw)) == (503, "ws.limit"), "a fourth upgrade must be refused while three wait for their 101"
+        wss = []
+        for s, key in pending:
+            head, rest = read_head(s)
+            ws = Ws(s, head, rest, key)
+            assert ws.status == 101
+            wss.append(ws)
         for w in wss:
             w.close()
         settle_down(gw)
@@ -1266,7 +1477,7 @@ class Wss:
 
 
 def main():
-    groups = {"Main": Main, "Timers": Timers, "Wss": Wss}
+    groups = {"Main": Main, "Timers": Timers, "Wss": Wss, "Interop": Interop}
     wanted = sys.argv[1:]
     todo = []
     for gname, cls in groups.items():
@@ -1280,17 +1491,25 @@ def main():
         print("no such test: %s" % ", ".join(unknown))
         return 2
     failures = 0
+    skipped = 0
     with tempfile.TemporaryDirectory() as t1, tempfile.TemporaryDirectory() as t2, tempfile.TemporaryDirectory() as t3:
         up = WsUpstream(pt.free_port())
+        lib_port = pt.free_port()
+        lib = None
+        try:
+            lib = LibServer(*third_party(), lib_port)
+        except Skip:
+            pass
         needed = {g for g, _, _ in todo}
         gws = {}
         try:
-            if "Main" in needed:
-                gws["Main"] = Gateway(t1, up.port)
+            if "Main" in needed or "Interop" in needed:
+                gws["Main"] = Gateway(t1, up.port, lib_port)
+                gws["Interop"] = gws["Main"]
             if "Timers" in needed:
-                gws["Timers"] = Gateway(t2, up.port, idle=1000, lifetime=4000, max_tunnels=3, circuit=3)
+                gws["Timers"] = Gateway(t2, up.port, lib_port, idle=1000, lifetime=4000, max_tunnels=3, circuit=3)
             if "Wss" in needed:
-                gws["Wss"] = Gateway(t3, up.port, idle=1500, lifetime=4000, max_tunnels=100, tls=True)
+                gws["Wss"] = Gateway(t3, up.port, lib_port, idle=1500, lifetime=4000, max_tunnels=100, tls=True)
             for gname, cls, name in todo:
                 gw = gws[gname]
                 t0 = time.time()
@@ -1299,6 +1518,9 @@ def main():
                     if not gw.alive():
                         raise AssertionError("the gateway died")
                     print("ok    %-70s %.1fs" % (name, time.time() - t0))
+                except Skip as e:
+                    skipped += 1
+                    print("skip  %-70s %s" % (name, e))
                 except (AssertionError, OSError, EOFError, KeyError, IndexError) as e:
                     failures += 1
                     print("FAIL  %-70s %s: %s" % (name, type(e).__name__, e))
@@ -1306,10 +1528,12 @@ def main():
                         print("      the gateway died: exit %s %s" % (gw.proc.returncode, gw.proc.stderr.read()[:300]))
                         break
         finally:
-            for gw in gws.values():
+            for gw in {id(g): g for g in gws.values()}.values():
                 gw.stop()
             up.shutdown()
-    print("%d tests, %d failures" % (len(todo), failures))
+            if lib:
+                lib.stop()
+    print("%d tests, %d failures%s" % (len(todo), failures, ", %d skipped" % skipped if skipped else ""))
     return 1 if failures else 0
 
 

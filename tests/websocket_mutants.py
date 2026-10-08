@@ -31,7 +31,7 @@ def m(ident, path, old, new, kill, what):
 # ---- the handshake checks (src/websocket.cho), judged request by request
 m("w01", "src/websocket.cho", 'if !bytes.equal(http.method(src, table), "GET") {', "if false {", "unit", "the method is not checked")
 m("w02", "src/websocket.cho", "if http.version(table) != 11 {", "if false {", "unit", "HTTP/1.0 is admitted")
-m("w03", "src/websocket.cho", 'if count_named(src, table, count, "upgrade") != 1 || !is(', 'if count_named(src, table, count, "upgrade") < 1 || !is(', "unit", "two Upgrade headers are admitted")
+m("w03", "src/websocket.cho", 'if count_named(src, table, count, "upgrade") != 1 || !is(value_of(src, table, first_named(', 'if count_named(src, table, count, "upgrade") < 1 || !is(value_of(src, table, first_named(', "unit", "two Upgrade headers are admitted")
 m("w04", "src/websocket.cho", '!is(value_of(src, table, first_named(src, table, count, "upgrade")), "websocket")', "false", "unit", "any Upgrade protocol is admitted")
 m("w05", "src/websocket.cho", "} else if !loose && !is(tok, \"keep-alive\") {", "} else if false {", "unit", "any other Connection token is admitted")
 m("w06", "src/websocket.cho", 'if count_named(src, table, count, "connection") != 1 || !connection_upgrade(value_of(src, table, conn), false) {', 'if !connection_upgrade(value_of(src, table, conn), false) {', "unit", "two Connection headers are admitted")
@@ -48,7 +48,7 @@ m("w16", "src/websocket.cho", "if entries(protocols) == 0 && sp >= 0 {\n        
 m("w17", "src/websocket.cho", "if items > max_offered() {", "if items > 1000 {", "unit", "a list of 17 subprotocols is admitted")
 m("w18", "src/websocket.cho", "if origin >= 0 && !csv_has(origins, value_of(src, table, origin)) {", "if false {", "unit", "every Origin is admitted")
 m("w19", "src/websocket.cho", 'if count_named(src, table, count, "origin") > 1 {', 'if count_named(src, table, count, "origin") > 2 {', "unit", "two Origin headers are admitted")
-m("w20", "src/websocket.cho", "mask = mask | (1 << (j - 1));", "mask = mask | 1;", "unit", "the offered mask names the first subprotocol only")
+m("w20", "src/websocket.cho", "mask = mask | 1 << j - 1;", "mask = mask | 1;", "unit", "the offered mask names the first subprotocol only")
 # ---- the upstream's 101
 m("r01", "src/websocket.cho", "!bytes.equal(value_of(src, table, acc), expected)", "false", "unit", "the accept value is not compared")
 m("r02", "src/websocket.cho", "!bytes.equal(value_of(src, table, acc), expected)", "!bytes.equal(value_of(src, table, acc)[0..27], expected[0..27])", "unit", "the accept value is compared on a prefix")
@@ -56,7 +56,7 @@ m("r03", "src/websocket.cho", 'if count_named(src, table, count, "sec-websocket-
 m("r04", "src/websocket.cho", 'if count_named(src, table, count, "upgrade") != 1 || !is(value_of(src, table, up), "websocket") {', 'if false {', "unit", "a 101 without Upgrade: websocket is admitted")
 m("r05", "src/websocket.cho", 'if count_named(src, table, count, "connection") != 1 || !connection_upgrade(value_of(src, table, conn), true) {', 'if false {', "unit", "a 101 without Connection: Upgrade is admitted")
 m("r06", "src/websocket.cho", 'if count_named(src, table, count, "content-length") > 0 || count_named(src, table, count, "transfer-encoding") > 0 {\n        return 0 - 11;', 'if false {\n        return 0 - 11;', "unit", "a 101 with a body header is admitted")
-m("r07", "src/websocket.cho", "if bytes.equal(bytes.field(protocols, ',', j), chosen) && mask / (1 << (j - 1)) % 2 == 1 {", "if bytes.equal(bytes.field(protocols, ',', j), chosen) {", "unit", "a subprotocol the client did not offer is admitted")
+m("r07", "src/websocket.cho", "if bytes.equal(bytes.field(protocols, ',', j), chosen) && mask / (1 << j - 1) % 2 == 1 {", "if bytes.equal(bytes.field(protocols, ',', j), chosen) {", "unit", "a subprotocol the client did not offer is admitted")
 m("r08", "src/websocket.cho", "if sp < 0 {\n            return 0 - 13;\n        }", "if false {\n            return 0 - 13;\n        }", "unit", "no subprotocol is admitted where the route requires one")
 m("r09", "src/websocket.cho", "if entries(protocols) == 0 && sp >= 0 {\n        return 0 - 13;\n    }\n    if entries(protocols) > 0 {", "if false {\n        return 0 - 13;\n    }\n    if entries(protocols) > 0 {", "unit", "a subprotocol is admitted where the route serves none")
 m("r10", "src/websocket.cho", 'if count_named(src, table, count, "sec-websocket-extensions") > 0 {', "if false {", "unit", "an unsolicited extension is admitted")
@@ -99,7 +99,7 @@ m("p24", "src/proxy.cho", "    st[pc + 3] = 6;\n", "    st[pc + 3] = 3;\n", ["te
 m("p25", "src/shared.cho", "st[p + tlsio.f_mode()] != 0, st[p + ws_mode()] == 2);", "st[p + tlsio.f_mode()] != 0, false);", ["the_access_log_line_of_a_tunnel"], "the log line has no upgrade key")
 m("p26", "src/shared.cho", "pub fn ws_accept_at() -> [] int {\n    return 252;", "pub fn ws_accept_at() -> [] int {\n    return 250;", ["a_long_path_is_logged_whole_beside_the_accept_value"], "the accept value overlaps the path in the meta area")
 m("p27", "src/adminloop.cho", "g[metrics.ws_gauge()] = shared.tunnels(core, true);", "g[metrics.ws_gauge()] = 0;", ["metrics_count_the_tunnel_and_return_to_zero"], "the active gauge is not filled")
-m("p28", "src/shared.cho", "if st[p] == 1 && st[p + 1] == 1 && (st[p + ws_mode()] == 2 || st[p + ws_mode()] == 1 && !open) {", "if st[p] == 1 && st[p + 1] == 1 && st[p + ws_mode()] == 2 {", ["the_limit_refuses_the_fourth_and_frees_with_a_close"], "an upgrade in progress holds no place (equivalent unless several arrive at once)")
+m("p28", "src/shared.cho", "if st[p] == 1 && st[p + 1] == 1 && (st[p + ws_mode()] == 2 || st[p + ws_mode()] == 1 && !open) {", "if st[p] == 1 && st[p + 1] == 1 && st[p + ws_mode()] == 2 {", ["upgrades_still_waiting_for_their_101_hold_a_place"], "an upgrade in progress holds no place")
 m("p29", "src/proxy.cho", "                tunnel_up(tab, core, k, now);\n            } else {\n                pump_request(tab, core, k, now);", "                pump_request(tab, core, k, now);\n            } else {\n                pump_request(tab, core, k, now);", ["text_binary_ping_and_close_frames_go_both_ways"], "read_client does not call tunnel_up (pump_request dispatches there too: expected equivalent)")
 m("p30", "src/proxy.cho", "|| st[p + 3] == 6 && st[p + 4] < shared.buf_size() && st[p + 14] == 0 {\n                let before = st[p + tlsio.f_prog()];", "{\n                let before = st[p + tlsio.f_prog()];", ["one_mebibyte_each_way_over_tls", "eight_mebibytes_to_a_late_reader_over_tls", "a_wss_handshake_and_every_frame_type"], "the TLS turn does not read a tunnel's client again")
 m("p31", "src/proxy.cho", "|| st[p + 3] == 6 && st[p + 4] < shared.buf_size() && st[p + 14] == 0 {\n            want = want + 1;", "{\n            want = want + 1;", ["text_binary_ping_and_close_frames_go_both_ways"], "a tunnel's client is not watched for reading")
@@ -109,7 +109,6 @@ m("g02", "scripts/generate.py", 'ORIGIN = re.compile(r"[a-z][a-z0-9+.-]*://[a-z0
 m("g03", "scripts/generate.py", "if ws_keys and not any(r[\"ws\"] for r in routes):", "if False:", "gen", "ws_* keys are accepted without a websocket route")
 m("g04", "scripts/generate.py", "WS_TUNNELS_RANGE = 64, (1, 127)", "WS_TUNNELS_RANGE = 64, (1, 500)", "gen", "more tunnels than the table holds")
 
-m("p18", "src/proxy.cho", "        if want % 2 == 1 && st[p + tlsio.f_cin()] > 0 && st[p + tlsio.f_mode()] != 0 {", "        if want % 2 == 1 && st[p + tlsio.f_cin()] > 7777777 && st[p + tlsio.f_mode()] != 0 {", ["a_wss_handshake_and_every_frame_type"], "(TLS) a read watch kept while ciphertext is held that the engine cannot take: spin (not about WebSocket; the TLS mutants of docs/tls.md argued it)")
 
 
 def tree(tmp):
