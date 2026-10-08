@@ -36,7 +36,8 @@ One JSON object per request, one line, written when the request ends, in this ke
 | `ms` | accept to the end of the request |
 | `upstream_ms` | from the request being routed to the first byte of the upstream's response; `0` if there was none |
 | `bytes_in`, `bytes_out` | request-body bytes forwarded to the upstream, response bytes (head and body) queued for the client; over TLS these are plaintext bytes |
-| `tls` | `true`, **only** on a connection that spoke TLS on `tls_listen` (`docs/tls.md`); absent otherwise, so a deployment without `tls_listen` writes the lines it always wrote. It is the last key |
+| `tls` | `true`, **only** on a connection that spoke TLS on `tls_listen` (`docs/tls.md`); absent otherwise, so a deployment without `tls_listen` writes the lines it always wrote. It comes after `bytes_out` |
+| `upgrade` | `"websocket"`, **only** on a request that became a WebSocket tunnel (`docs/websocket.md` section 11), and then the last key, after `tls`. The line is written when the tunnel **ends**; `status` is 101, `bytes_in` and `bytes_out` count the tunnel's bytes, `rule` is empty or `ws.idle-timeout` / `ws.lifetime`, `outcome` is `ok` if a peer closed it and `aborted` otherwise |
 
 **Escaping, so that a hostile request cannot make a line unparseable or longer than its bound:** in every string, `"` and `\` are backslash-escaped, every
 byte below 0x20 and 0x7f and every byte from 0x80 up is written as `\u00XX` (the byte read as Latin-1: always valid JSON, never invalid UTF-8). The path is cut at 128 input bytes **and** its escaped form at 256 output bytes (never in the middle of an escape), after which `"path_truncated":true` follows. A line is at most
@@ -91,6 +92,7 @@ Kept in one block of integers sized at start from the compiled-in counts (`route
 | `sessions_active`, `pool_idle`, `circuit_open` | (`upstream` for the last two) | gauges, read when scraped |
 | `log_dropped_total`, `log_write_failures_total` | | counters |
 | `tls_handshakes_total`, `tls_handshake_failures_total` | | counters (`docs/tls.md` section 10): handshakes that finished; TLS connections ended before theirs did. A failure is also counted in `refusals_total` under the engine's `tls-*` tag (or `tls.handshake-timeout`). The JSON has them as `"tls":{"handshakes":N,"failures":N}`, between `refusals` and `log` |
+| `ws_tunnels_total`, `ws_tunnels_active` | | WebSocket upgrades relayed as tunnels (counter) and tunnels open now (gauge; `docs/websocket.md` section 11). The JSON has them as `"ws":{"tunnels_total":N,"tunnels_active":N}`, between `tls` and `log` |
 
 **Labels are bounded by construction.** A route, an upstream and a class are compiled in. A rule is one of the tags the code can emit, but the tags live in several modules and there is no single table, so the rule counters sit in a small table filled as tags are first seen (at most 96 entries of 40 bytes; a tag past the 96th is counted under `other`, which cannot happen while the code has about 60). A client cannot make a label: it can only reach a tag the code already has. The table is searched linearly (96 comparisons) on a refusal, which is not the hot path.
 

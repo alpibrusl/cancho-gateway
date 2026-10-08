@@ -23,6 +23,9 @@ PREFIX = [
 
 UP = 'listen = 80\n[[upstream]]\nname = "a"\naddr = "10.0.0.1:1"\n'
 R = '[[route]]\nupstream = "a"\n'
+# A deployment with one websocket route, in two parts so that a deployment-wide key can be put between them (line 2).
+WS = 'listen = 80\n'
+WSR = '[[upstream]]\nname = "a"\naddr = "10.0.0.1:1"\n[[route]]\nupstream = "a"\npath_prefix = "/"\nwebsocket = true\n'
 
 # (rule, line the refusal must name or None, deployment text)
 REFUSALS = [
@@ -108,6 +111,42 @@ REFUSALS = [
     ("config.route-upstream", 7, UP + '[[route]]\npath_prefix = "/"\nupstream = "b"\n'),
     ("config.route-conflict", 10, UP + R + 'path_prefix = "/x"\n' + R + 'path_prefix = "/x"\n'),
     ("config.route-conflict", 11, UP + R + 'path_prefix = "/x"\nmethods = ["GET", "POST"]\n' + R + 'path_prefix = "/x"\nmethods = ["POST"]\n'),
+    # --- WebSocket (docs/websocket.md section 3)
+    ("config.websocket", 8, UP + R + 'path_prefix = "/"\nwebsocket = "yes"\n'),
+    ("config.websocket", 8, UP + R + 'path_prefix = "/"\nwebsocket = 1\n'),
+    ("config.websocket", 8, UP + R + 'path_prefix = "/"\nsubprotocols = ["ocpp1.6"]\n'),
+    ("config.websocket", 8, UP + R + 'path_prefix = "/"\norigins = ["https://a.example"]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nmethods = ["POST"]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = "ocpp1.6"\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["a b"]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["a,b"]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = [""]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["a", "a"]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = [1]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = [%s]\n' % ", ".join('"p%d"' % i for i in range(9))),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["%s"]\n' % ("x" * 65)),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\norigins = "https://a.example"\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\norigins = ["https://a.example/"]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\norigins = ["https://a.example/x"]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\norigins = ["HTTPS://a.example"]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\norigins = ["https://A.example"]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\norigins = ["a.example"]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\norigins = ["*"]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\norigins = ["https://a.example", "https://a.example"]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\norigins = [%s]\n' % ", ".join('"https://h%d.example"' % i for i in range(17))),
+    ("config.websocket", 2, 'listen = 80\nws_idle_timeout_ms = 5000\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n' + R + 'path_prefix = "/"\n'),
+    ("config.websocket", 2, 'listen = 80\nws_max_tunnels = 5\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n' + R + 'path_prefix = "/"\n'),
+    ("config.websocket", 2, 'listen = 80\nws_max_lifetime_ms = 5000\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n' + R + 'path_prefix = "/"\n'),
+    ("config.websocket", 2, WS + 'ws_idle_timeout_ms = 99\n' + WSR),
+    ("config.websocket", 2, WS + 'ws_idle_timeout_ms = 86400001\n' + WSR),
+    ("config.websocket", 2, WS + 'ws_idle_timeout_ms = "10m"\n' + WSR),
+    ("config.websocket", 2, WS + 'ws_max_lifetime_ms = 99\n' + WSR),
+    ("config.websocket", 2, WS + 'ws_max_lifetime_ms = 2592000001\n' + WSR),
+    ("config.websocket", 2, WS + 'ws_max_lifetime_ms = true\n' + WSR),
+    ("config.websocket", 2, WS + 'ws_max_tunnels = 0\n' + WSR),
+    ("config.websocket", 2, WS + 'ws_max_tunnels = 128\n' + WSR),
+    ("config.websocket", 2, WS + 'ws_max_tunnels = -1\n' + WSR),
+    ("config.websocket", 2, WS + 'ws_max_tunnels = "64"\n' + WSR),
     ("config.routes", None, UP + "".join('[[route]]\nupstream = "a"\npath_prefix = "/r%d"\n' % i for i in range(257))),
 ]
 
@@ -116,6 +155,13 @@ ACCEPTED = [
     UP + R + 'path_prefix = "/"\nhost = "a.example"\n' + R + 'path_prefix = "/"\n',
     UP + R + 'path_prefix = "/x"\nmethods = ["GET"]\n' + R + 'path_prefix = "/x"\nmethods = ["POST"]\n',
     UP + R + 'path_prefix = "/x"\nhost = "a.example"\n' + R + 'path_prefix = "/x"\nhost = "b.example"\n',
+    # WebSocket: the flag alone, then every key and every bound
+    WS + WSR,
+    WS + 'ws_idle_timeout_ms = 100\nws_max_lifetime_ms = 100\nws_max_tunnels = 1\n' + WSR,
+    WS + 'ws_idle_timeout_ms = 86400000\nws_max_lifetime_ms = 2592000000\nws_max_tunnels = 127\n' + WSR,
+    UP + R + 'path_prefix = "/ocpp"\nwebsocket = true\nmethods = ["GET", "POST"]\nsubprotocols = ["ocpp1.6", "ocpp2.0.1"]\norigins = []\n',
+    UP + R + 'path_prefix = "/ws"\nwebsocket = true\nsubprotocols = [%s]\norigins = [%s]\n' % (", ".join('"p%d"' % i for i in range(8)), ", ".join('"http://h%d.example:3000"' % i for i in range(16))),
+    UP + R + 'path_prefix = "/ws"\nwebsocket = false\n',
     # TLS: the directory alone, then identities and every bound
     'listen = 80\ntls_listen = 443\ntls_dir = "/etc/cancho/tls"\n[[upstream]]\nname = "a"\naddr = "10.0.0.1:1"\n[[route]]\nupstream = "a"\npath_prefix = "/"\n',
     'listen = 80\nadmin_listen = 9090\ntls_listen = 443\ntls_dir = "/srv/tls-1.2_x"\ntls_identities = ["a.example", "b-2"]\ntls_handshakes = 1000\ntls_rate = 100000\ntls_handshake_ms = 100\n[[upstream]]\nname = "a"\naddr = "10.0.0.1:1"\n[[route]]\nupstream = "a"\npath_prefix = "/"\n',

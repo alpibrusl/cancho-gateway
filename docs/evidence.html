@@ -357,7 +357,7 @@ nav a[aria-current] { color: var(--fg); font-weight: 650; }
   <ul>
     <li>No soak: a long run with faults has not been done. Short-lived tests are all there is.</li>
     <li>No independent review of the parsing; the corpus is the authors&rsquo;.</li>
-    <li>Not built: authentication, rate limiting, TLS (designed, not built: <code>docs/tls.md</code>), WebSocket.</li>
+    <li>Not built: authentication, rate limiting, TLS (designed, not built: <code>docs/tls.md</code>). WebSocket is built as a byte tunnel, and the gateway reads no frame (<code>docs/websocket.md</code>).</li>
     <li>One core, about 127 concurrent sessions, no client keep-alive.</li>
   </ul>
   <p class="note"><a href="index.html">Back to the overview</a> · <a href="https://github.com/alpibrusl/cancho-gateway/tree/main/docs">All design documents</a></p>

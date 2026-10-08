@@ -29,7 +29,14 @@ size and time limits; per-key rate limiting from the clock; API-key and HMAC/JWT
 ed25519, RSA and ECDSA); upstream connection reuse; health checks; an access log. HTTP/1.1, over plain TCP or TLS 1.3 from the client side.
 
 Not in v1: HTTP/2 and gRPC, TLS to the upstreams, client certificates, caching, response rewriting, dynamic upstream
-discovery, clustering. WebSockets (the OCPP use case) are a later stage built on cancho's WebSocket spike.
+discovery, clustering. WebSocket frames are not interpreted (below).
+
+**WebSocket, built 2026-10-08 (slice 1).** A route with `websocket = true` (and `subprotocols`, `origins`) admits an RFC 6455 opening handshake after the
+checks of `docs/websocket.md` section 4, forwards it on a fresh connection without extensions, checks the upstream's `101` (including the
+`Sec-WebSocket-Accept` value), and then carries the connection as a **byte tunnel**: the same back-pressure buffers, an idle timeout, a maximum lifetime,
+a bound on concurrent tunnels, over plain TCP or the TLS listener (`wss`). The use case is OCPP-J (`ocpp1.6`, `ocpp2.0.1`) between EV chargers and a back office.
+**Not done:** reading frames (no ping/pong policy, no close handshake, no message-size limit, no UTF-8 check), compression, a gateway-originated keepalive, TLS to the
+upstream, and more than 127 concurrent tunnels (the slot table's size).
 
 **TLS, built 2026-10-08.** This file used to say TLS "needs foreign code and would make the authority report unbounded". That
 reason stopped holding when cancho shipped a TLS 1.3 server written in cancho (`packages/tls`; cancho's own notes say it has not been

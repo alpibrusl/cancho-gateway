@@ -123,7 +123,8 @@ class T:
     def admin_metrics_json_names_every_family(gw, up):
         m = scrape(gw)
         assert list(m)[:3] == ["v", "uptime_ms", "sessions_active"] and m["v"] == 1, list(m)
-        assert list(m) == ["v", "uptime_ms", "sessions_active", "le_ms", "routes", "upstreams", "refusals", "tls", "log"], list(m)
+        assert list(m) == ["v", "uptime_ms", "sessions_active", "le_ms", "routes", "upstreams", "refusals", "tls", "ws", "log"], list(m)
+        assert m["ws"] == {"tunnels_total": 0, "tunnels_active": 0}, m["ws"]
         assert m["le_ms"] == BOUNDS
         assert [r["name"] for r in m["routes"]] == ["dead", "ka", "flap", "trusted", "main"], [r["name"] for r in m["routes"]]
         assert [u["name"] for u in m["upstreams"]] == ["up", "dead", "ka", "flap"]

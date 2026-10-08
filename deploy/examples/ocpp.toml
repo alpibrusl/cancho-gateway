@@ -1,0 +1,23 @@
+# Used by docs/examples.html. The back office is on this machine so it runs anywhere: python3 scripts/demo_ws_upstream.py 9000
+# Example 8: EV chargers (OCPP-J over WebSocket) connect to a back office through the gateway.
+listen = 8080
+ws_idle_timeout_ms = 600000      # a tunnel in which no byte moved for ten minutes is closed (two heartbeats at the usual 300 s)
+ws_max_lifetime_ms = 86400000    # and none lives longer than a day: chargers reconnect
+ws_max_tunnels = 64              # at most this many upgrades at once; the gateway's whole table holds 127 sessions
+
+[[upstream]]
+name = "csms"
+addr = "127.0.0.1:9000"
+
+[[route]]
+name = "ocpp"
+path_prefix = "/ocpp"
+upstream = "csms"
+websocket = true
+subprotocols = ["ocpp1.6", "ocpp2.0.1"]   # a charger that offers neither is refused at the edge
+# no `origins`: a browser (it always sends Origin) is refused here; a charger sends none and is admitted
+
+[[route]]
+name = "status"
+path_prefix = "/"
+upstream = "csms"

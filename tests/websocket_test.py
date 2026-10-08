@@ -262,7 +262,7 @@ def big_payload(n):
 
 class WsUpstream:
     """A WebSocket server. What it does is chosen by the last segment of the request path: echo (default), bigdown, slowsink, silent, speakfirst, closeafter,
-    and the misbehaviours badaccept, noaccept, twoaccept, noupgrade, noconn, cl, te, badproto, noproto, ext, 401, plain101. `/plain/ka` is a keep-alive HTTP
+    resetafter (answers, then resets the connection after 0.3 s), slow101 (answers after 0.4 s), ticker (six frames, 0.4 s apart), and the misbehaviours badaccept, noaccept, twoaccept, noupgrade, noconn, cl, te, badproto, noproto, ext, 401, plain101. `/plain/ka` is a keep-alive HTTP
     server for the pool test, `/plain/x` an ordinary HTTP answer."""
 
     def __init__(self, port):
@@ -369,6 +369,8 @@ class WsUpstream:
             lines.append("Sec-WebSocket-Protocol: " + chosen)
         response = ("\r\n".join(lines) + "\r\n\r\n").encode()
         reader = Reader(c, rest)
+        if mode == "slow101":
+            time.sleep(0.4)
         if mode == "speakfirst":
             c.sendall(response + encode_frame(1, b"hello first", mask=False))
         else:
@@ -378,6 +380,15 @@ class WsUpstream:
             while c.recv(4096):
                 pass
             self.note(path, "eof")
+            return
+        if mode == "ticker":
+            for i in range(6):
+                time.sleep(0.4)
+                c.sendall(encode_frame(1, b"tick%d" % i, mask=False))
+        if mode == "resetafter":
+            time.sleep(0.3)
+            c.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            self.note(path, "reset-by-us")
             return
         if mode == "closeafter":
             c.sendall(encode_frame(1, b"bye", mask=False))
@@ -815,6 +826,28 @@ class Main:
         assert not errors, errors
         ws.close()
 
+    def a_long_path_is_logged_whole_beside_the_accept_value(gw, up):
+        for n in (126, 127, 128):
+            path = "/v16/" + "p" * (n - 5)
+            n0 = len(gw.lines())
+            ws = connect_ws(gw, path)
+            echo_roundtrip(ws)
+            ws.close()
+            e = gw.find(n0, path=path)
+            assert e["path"] == path and "path_truncated" not in e and e["status"] == 101, e
+
+    def a_frame_sent_before_the_101_is_forwarded_after_it(gw, up):
+        raw, key = request_bytes("/v16/slow101")
+        s = open_socket(gw)
+        s.sendall(raw)
+        time.sleep(0.1)
+        s.sendall(encode_frame(1, b"early bird"))     # the upstream will not answer for 0.4 s: this waits in the kernel, not at the upstream
+        head, rest = read_head(s)
+        ws = Ws(s, head, rest, key)
+        assert ws.status == 101
+        ws.expect(1, b"early bird")
+        ws.close()
+
     def a_server_that_speaks_first_is_heard(gw, up):
         ws = connect_ws(gw, "/v16/speakfirst")
         ws.expect(1, b"hello first")
@@ -839,6 +872,21 @@ class Main:
         assert e["outcome"] == "ok" and e["status"] == 101 and e["upgrade"] == "websocket", e
         ws.close()
         settle_down(gw)
+
+    def an_upstream_that_resets_mid_tunnel_ends_the_session(gw, up):
+        n0 = len(gw.lines())
+        ws = connect_ws(gw, "/v16/resetafter", timeout=15)
+        try:
+            for _ in range(200):         # the client keeps writing into a connection whose far end is about to reset
+                ws.send(2, os.urandom(60000))
+                time.sleep(0.01)
+        except (OSError, EOFError):
+            pass
+        ws.close()
+        e = gw.find(n0, path="/v16/resetafter")
+        assert e["status"] == 101 and e["upgrade"] == "websocket" and e["outcome"] in ("ok", "aborted"), e
+        settle_down(gw)
+        assert gw.alive()
 
     def a_client_reset_mid_tunnel_is_an_ordinary_end(gw, up):
         n = len(up.ended)
@@ -1066,6 +1114,24 @@ class Timers:
         assert 3.7 < took < 5.0, "closed after %.2fs" % took
         e = gw.find(n0, path="/v16/CP041")
         assert e["rule"] == "ws.lifetime" and e["outcome"] == "aborted" and e["ms"] >= 3900, e
+        ws.close()
+
+    def traffic_from_the_upstream_alone_keeps_a_tunnel_open(gw, up):
+        ws = connect_ws(gw, "/v16/ticker")
+        t0 = time.time()
+        for i in range(6):        # a tick every 0.4 s for 2.4 s: more than two idle times, and the client says nothing
+            ws.expect(1, b"tick%d" % i)
+        took = ws.eof(6)
+        assert 0.8 < took < 2.6, took
+        ws.close()
+
+    def traffic_from_the_client_alone_keeps_a_tunnel_open(gw, up):
+        ws = connect_ws(gw, "/v16/silent")
+        for i in range(6):        # the upstream reads and says nothing
+            ws.text("note %d" % i)
+            time.sleep(0.4)
+        took = ws.eof(6)
+        assert 0.6 < took < 2.2, took
         ws.close()
 
     def the_limit_refuses_the_fourth_and_frees_with_a_close(gw, up):
