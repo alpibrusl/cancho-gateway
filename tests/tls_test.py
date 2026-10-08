@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import shutil
 import signal
 import socket
@@ -705,6 +706,9 @@ class T:
                 head, body = get(only)
                 assert head.startswith(b"HTTP/1.1 200") and body == b"ok", (head, body)
                 assert "X-Forwarded-Proto: https" in up.heads[h0].decode()
+                # The request id names the port the request came in on: with no plain listener, the TLS one.
+                rid = re.search(r"X-Request-Id: ([0-9a-f]+)-([0-9a-f]+)-([0-9a-f]+)", up.heads[h0].decode())
+                assert rid and int(rid.group(2), 16) == only.tls_port, up.heads[h0]
                 e = only.find(n0, status=200, tls=True)
                 assert e["tls"] is True and e["outcome"] == "ok", e
                 # A reload works here too, and an open connection is told close_notify when the process is asked to stop.

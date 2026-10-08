@@ -1179,7 +1179,7 @@ fn signal_turn[&h, &c, &w, &q, &k, &i](heap: &!h Heap, core: &!c shared.Core, wa
     return 0;
 }
 
-// Serve until the process is killed. Answers a non-zero status only if it could not start.
+// Serve until `SIGINT` or `SIGTERM` (status 0), or until the access log cannot be written (`log_failure = "exit"`, status 6). Answers a non-zero status also if it could not start.
 // `admin` is the admin listener's `tcp_listen` answer (`Listening::Failed` when the deployment has none): matched in place, so no second
 // copy of the loop is needed for a gateway without one.
 pub fn run[&h, &l, &a, &x, &q, &w, &n, &k, &i](heap: &!h Heap, listener: &!l Listening, admin: &!a Listening, secure: &!x Listening, tlsstate: tlsio.Tls, dirs: &q DirOpened, watch: &!w SignalWatch, net: &n Net(""), clock: &k Clock, io: &!i Io) -> [heap, conn_accept, conn_read, conn_write, poll, clock, io_write, err_write, dir_read, file_read, signals_read, net_out("")] int {
