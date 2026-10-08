@@ -142,8 +142,10 @@ def load(path):
             raise Refusal("config.unknown-key", "unknown key or table %r" % k, line=keys.get(("", 0, k), 1), key=k,
                           hint="did you mean %r?" % near[0] if near else None)
     unknown_keys("", 0, {k: v for k, v in doc.items() if k not in ("upstream", "route")})
-    listen = doc.get("listen")
-    if not isinstance(listen, int) or isinstance(listen, bool) or not 1 <= listen <= 65535:
+    # `listen` is optional so that a deployment can serve TLS only (docs/tls.md section 11): 0 means no plain listener. At least one of `listen` and
+    # `tls_listen` is required (checked once `tls_listen` is read, below).
+    listen = doc.get("listen", 0)
+    if "listen" in doc and (not isinstance(listen, int) or isinstance(listen, bool) or not 1 <= listen <= 65535):
         refuse("config.listen", "listen must be a port in 1..65535", key="listen")
     timeouts = {}
     for key, default in TIMEOUTS.items():
@@ -170,7 +172,7 @@ def load(path):
     admin = doc.get("admin_listen", 0)
     if not isinstance(admin, int) or isinstance(admin, bool) or not 0 <= admin <= 65535:
         refuse("config.admin", "admin_listen must be a port in 1..65535, or 0 for no admin listener (docs/observability.md section 7)", key="admin_listen")
-    if admin == listen:
+    if admin != 0 and admin == listen:
         refuse("config.admin", "admin_listen must differ from listen: the proxy's port is the public one", key="admin_listen")
     timeouts["admin_port"] = admin
     tls = None
@@ -202,6 +204,8 @@ def load(path):
                 refuse("config.tls", "%s must be an integer in %d..%d" % ((key,) + bounds), key=key)
             tls[name] = v
     timeouts["tls"] = tls
+    if listen == 0 and tls is None:
+        refuse("config.listeners", "a deployment needs a listener: set listen (plain HTTP), tls_listen (HTTPS), or both (docs/tls.md section 11)", key="listen")
     if not timeouts["header_timeout_ms"] <= timeouts["total_timeout_ms"] or not timeouts["connect_timeout_ms"] <= timeouts["total_timeout_ms"]:
         refuse("config.timeout", "total_timeout_ms must be at least the header and connect timeouts", key="total_timeout_ms")
     ups = doc.get("upstream", [])
@@ -336,6 +340,7 @@ def render_deploy(listen, ups, timeouts):
         "// The allowed upstreams are data compiled into the binary; the compiler's authority report cannot see",
         "// them (one Net, one bound shared by listen and connect: design section 2.1), so the gateway enforces",
         "// this list in code before every connect and `authority.toml` states the report is `net_out(\"\")`.", "",
+        "// The plain listener's port, 0 if the deployment is TLS only (docs/tls.md section 11).",
         "pub fn listen_port() -> [] int {", "    return %d;" % listen, "}", "",
         "pub fn upstream_count() -> [] int {", "    return %d;" % len(ups), "}", "",
         "// Milliseconds: the head must arrive, the upstream must connect, the upstream must start answering, the whole request",
@@ -417,7 +422,7 @@ def main():
     outputs = {"deploy.cho": render_deploy(listen, ups, timeouts), "routes.cho": render_routes(routes), "tlsfiles.cho": render_tlsfiles(timeouts["tls"])}
     if "--explain" in flags:
         prefix = intended_prefix([a for _, a in ups])
-        print("listen %d; %d upstream(s): %s" % (listen, len(ups), ", ".join(a for _, a in ups)))
+        print("listen %s; %d upstream(s): %s" % (listen or "none (TLS only)", len(ups), ", ".join(a for _, a in ups)))
         print("timeouts (ms): " + ", ".join("%s %d" % (k.replace("_timeout_ms", ""), v) for k, v in timeouts.items() if k.endswith("_ms")) +
               "; idle connections kept per upstream: %d; circuit: %d failures, open %d ms" % (timeouts["pool_idle_max"], timeouts["circuit_threshold"], timeouts["circuit_open_ms"]))
         if timeouts["tls"]:

@@ -79,6 +79,15 @@ REFUSALS = [
     ("config.tls", None, 'listen = 80\ntls_listen = 443\ntls_dir = "/etc/tls"\ntls_rate = 100001\n' + '[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
     ("config.tls", None, 'listen = 80\ntls_listen = 443\ntls_dir = "/etc/tls"\ntls_handshake_ms = 5\n' + '[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
     ("config.tls", None, 'listen = 80\ntls_listen = 443\ntls_dir = "/etc/tls"\ntls_handshakes = true\n' + '[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
+    # --- at least one of listen and tls_listen (docs/tls.md section 11)
+    ("config.listeners", None, '[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
+    ("config.listeners", None, 'admin_listen = 9090\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
+    ("config.listeners", None, 'header_timeout_ms = 2000\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
+    ("config.tls", None, 'tls_listen = 443\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
+    ("config.tls", None, 'tls_listen = 443\nadmin_listen = 443\ntls_dir = "/etc/tls"\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
+    ("config.tls", None, 'tls_dir = "/etc/tls"\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
+    ("config.listen", 1, 'listen = 70000\ntls_listen = 443\ntls_dir = "/etc/tls"\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
+    ("config.listen", 1, 'listen = 0\ntls_listen = 443\ntls_dir = "/etc/tls"\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
     ("config.log", 2, 'listen = 80\nlog_failure = true\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
     ("config.timeout", 3, 'listen = 80\nheader_timeout_ms = 5000\ntotal_timeout_ms = 1000\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n'),
     # --- routes, with the line they must name
@@ -118,6 +127,9 @@ ACCEPTED = [
     UP + R + 'path_prefix = "/x"\nhost = "a.example"\n' + R + 'path_prefix = "/x"\nhost = "b.example"\n',
     # TLS: the directory alone, then identities and every bound
     'listen = 80\ntls_listen = 443\ntls_dir = "/etc/cancho/tls"\n[[upstream]]\nname = "a"\naddr = "10.0.0.1:1"\n[[route]]\nupstream = "a"\npath_prefix = "/"\n',
+    # TLS only: no plain listener at all, with and without the admin one
+    'tls_listen = 443\ntls_dir = "/etc/cancho/tls"\n[[upstream]]\nname = "a"\naddr = "10.0.0.1:1"\n[[route]]\nupstream = "a"\npath_prefix = "/"\n',
+    'tls_listen = 443\nadmin_listen = 9090\ntls_dir = "/etc/cancho/tls"\ntls_identities = ["api"]\n[[upstream]]\nname = "a"\naddr = "10.0.0.1:1"\n[[route]]\nupstream = "a"\npath_prefix = "/"\n',
     'listen = 80\nadmin_listen = 9090\ntls_listen = 443\ntls_dir = "/srv/tls-1.2_x"\ntls_identities = ["a.example", "b-2"]\ntls_handshakes = 1000\ntls_rate = 100000\ntls_handshake_ms = 100\n[[upstream]]\nname = "a"\naddr = "10.0.0.1:1"\n[[route]]\nupstream = "a"\npath_prefix = "/"\n',
 ]
 
@@ -160,6 +172,20 @@ def main():
     pathlib.Path(f.name).unlink()
     if json.loads(first).get("hint") != "did you mean 'path_prefix'?" or first != second:
         print("FAIL the hint for a misspelt key, or the refusal is not byte-stable: %r" % first.strip())
+        failures += 1
+    # What a TLS-only deployment compiles: no plain port (0), the TLS port, and a report that says so.
+    tls_only = 'tls_listen = 8443\ntls_dir = "/etc/cancho/tls"\n[[upstream]]\nname = "a"\naddr = "10.0.0.1:1"\n[[route]]\nupstream = "a"\npath_prefix = "/"\n'
+    with tempfile.TemporaryDirectory() as tmp:
+        f = pathlib.Path(tmp) / "d.toml"
+        f.write_text(tls_only)
+        subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(f), "--out", tmp], check=True)
+        deploy = (pathlib.Path(tmp) / "deploy.cho").read_text()
+        explained = run(tls_only).stdout
+    if "pub fn listen_port() -> [] int {\n    return 0;\n}" not in deploy or "pub fn tls_port() -> [] int {\n    return 8443;\n}" not in deploy:
+        print("FAIL a TLS-only deployment must compile listen_port() = 0 and tls_port() = 8443")
+        failures += 1
+    if not explained.startswith("listen none (TLS only);"):
+        print("FAIL --explain must say a TLS-only deployment has no plain listener: %r" % explained[:60])
         failures += 1
     print("%d prefix cases, %d refusal cases, %d accepted, %d failures" % (len(PREFIX), len(REFUSALS), len(ACCEPTED), failures))
     return 1 if failures else 0
