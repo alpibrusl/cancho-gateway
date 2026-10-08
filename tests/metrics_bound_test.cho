@@ -29,7 +29,7 @@ fn fill[&s, &n, &g](stats: &!s [int], names: &!n [byte], gauge: &!g [int]) -> []
         names[i] = byte_of('x');
         i = i + 1;
     }
-    let rules = metrics.stats_len() - 196;
+    let rules = metrics.stats_len() - 198;
     i = 0;
     while i < 96 {
         stats[rules + 96 + i] = 40;

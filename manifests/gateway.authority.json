@@ -8,12 +8,15 @@
     "conn_read",
     "conn_write",
     "dir_read",
+    "err_write",
     "file_read",
     "heap",
     "io_write",
     "net_in",
     "net_out",
-    "poll"
+    "poll",
+    "signals",
+    "signals_read"
   ],
   "labels": [
     {
@@ -47,6 +50,11 @@
       "bounded": true
     },
     {
+      "name": "err_write",
+      "argument": null,
+      "bounded": true
+    },
+    {
       "name": "file_read",
       "argument": null,
       "bounded": true
@@ -75,6 +83,16 @@
       "name": "poll",
       "argument": null,
       "bounded": true
+    },
+    {
+      "name": "signals",
+      "argument": "HUP,INT,TERM",
+      "bounded": true
+    },
+    {
+      "name": "signals_read",
+      "argument": null,
+      "bounded": true
     }
   ],
   "foreign_symbols": [],
@@ -101,6 +119,7 @@
     "allowed",
     "alpn_cap",
     "alpn_list",
+    "any",
     "at",
     "b_alpn",
     "b_hs",
@@ -280,6 +299,8 @@
     "f_tls12",
     "f_write_protected",
     "fail",
+    "failed_errno",
+    "failed_file",
     "failed_tag",
     "failure",
     "failure",
@@ -309,6 +330,7 @@
     "group_p384",
     "group_x25519",
     "handshakes_in_progress",
+    "has",
     "has",
     "has_body",
     "has_header",
@@ -782,6 +804,8 @@
     "share_at",
     "share_group",
     "share_len",
+    "sighup",
+    "signal_token",
     "signature_algorithm",
     "signature_end",
     "signature_ok",
@@ -836,6 +860,7 @@
     "status",
     "status",
     "status",
+    "stop_signals",
     "stride",
     "stride",
     "stride",
@@ -969,7 +994,7 @@
     "z_of",
     "z_of"
   ],
-  "folded_operators": 130,
+  "folded_operators": 132,
   "folded_calls": 337,
-  "functions": 1326
+  "functions": 1342
 }

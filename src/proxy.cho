@@ -1,10 +1,12 @@
-edition 5;
+edition 6;
 
 module gateway.proxy;
 
 import std.bytes;
 import std.conns;
 import std.http;
+import std.io;
+import std.signals as sg;
 import gateway.accesslog;
 import gateway.admin;
 import gateway.chunked;
@@ -1155,15 +1157,45 @@ fn tls_turn[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, now: int, now_u
     return moved + 1000 * queued;
 }
 
+// The signals that arrived since the last turn: `SIGHUP` reads every TLS identity again (a deployment without `tls_listen` has nothing to reload and
+// ignores it), `SIGINT` and `SIGTERM` stop the gateway. Answers 1 to stop. The outcome of a reload is counted (`metrics.tls_reloaded`) and logged to
+// standard error by `tlsio.reload` (docs/tls.md section 11).
+fn signal_turn[&h, &c, &w, &q, &k, &i](heap: &!h Heap, core: &!c shared.Core, watch: &!w SignalWatch, dirs: &q DirOpened, clock: &k Clock, io: &!i Io) -> [heap, dir_read, file_read, err_write, signals_read, clock] int {
+    let mask = signals_pending(watch);
+    if sg.has(mask, sg.sighup()) {
+        match dirs {
+            DirOpened::Ok(d) => {
+                let done = tlsio.reload(heap, core.tls, d, clock_unix_ms(clock), io);
+                metrics.tls_reloaded(contents(core.stats), done % 1000, done / 1000);
+            }
+            DirOpened::Failed(e) => {
+            }
+        }
+    }
+    if sg.any(mask, sg.stop_signals()) {
+        io.error_all(io, "gateway: stopping\n");
+        return 1;
+    }
+    return 0;
+}
+
 // Serve until the process is killed. Answers a non-zero status only if it could not start.
 // `admin` is the admin listener's `tcp_listen` answer (`Listening::Failed` when the deployment has none): matched in place, so no second
 // copy of the loop is needed for a gateway without one.
-pub fn run[&h, &l, &a, &x, &n, &k, &i](heap: &!h Heap, listener: &!l Listener, admin: &!a Listening, secure: &!x Listening, tlsstate: tlsio.Tls, net: &n Net(""), clock: &k Clock, io: &!i Io) -> [heap, conn_accept, conn_read, conn_write, poll, clock, io_write, net_out("")] int {
+pub fn run[&h, &l, &a, &x, &q, &w, &n, &k, &i](heap: &!h Heap, listener: &!l Listening, admin: &!a Listening, secure: &!x Listening, tlsstate: tlsio.Tls, dirs: &q DirOpened, watch: &!w SignalWatch, net: &n Net(""), clock: &k Clock, io: &!i Io) -> [heap, conn_accept, conn_read, conn_write, poll, clock, io_write, err_write, dir_read, file_read, signals_read, net_out("")] int {
     match poller_new() {
         Polling::Ok(pl) => {
             var poller = pl;
             borrow mut poller as &!pw in {
-                poller_add_listener(pw, listener, 0);
+                poller_add_signals(pw, watch, shared.signal_token());
+                match listener {
+                    Listening::Ok(pl) => {
+                        listener_nonblocking(pl);
+                        poller_add_listener(pw, pl, 0);
+                    }
+                    Listening::Failed(e) => {
+                    }
+                }
                 match admin {
                     Listening::Ok(al) => {
                         listener_nonblocking(al);
@@ -1217,8 +1249,20 @@ pub fn run[&h, &l, &a, &x, &n, &k, &i](heap: &!h Heap, listener: &!l Listener, a
                         readiness = contents(cr.events)[2 * j + 1];
                     }
                     if token == 0 {
+                        match listener {
+                            Listening::Ok(pl) => {
+                                borrow mut core as &!cw in {
+                                    tab = accept_all(heap, tab, pl, cw, false, now);
+                                }
+                            }
+                            Listening::Failed(e) => {
+                            }
+                        }
+                    } else if token == shared.signal_token() {
                         borrow mut core as &!cw in {
-                            tab = accept_all(heap, tab, listener, cw, false, now);
+                            if signal_turn(heap, cw, watch, dirs, clock, io) == 1 {
+                                running = false;
+                            }
                         }
                     } else if token == shared.tls_token() {
                         match secure {
@@ -1304,6 +1348,12 @@ pub fn run[&h, &l, &a, &x, &n, &k, &i](heap: &!h Heap, listener: &!l Listener, a
                         running = false;
                         status = 6;
                     }
+                }
+            }
+            // Stopping or failing: every TLS connection that is up is told (close_notify), then the sockets are closed with the table.
+            borrow mut tab as &!tw in {
+                borrow mut core as &!cw in {
+                    tlsio.end_all(cw.tls, tw, contents(cw.state), shared.stride(), limit);
                 }
             }
             conns.drop(heap, tab);

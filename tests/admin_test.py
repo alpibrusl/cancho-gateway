@@ -135,6 +135,7 @@ class T:
             assert list(u) == ["name", "responses", "retries", "failures", "pool_idle", "circuit_open", "wait_ms"], list(u)
             assert u["wait_ms"]["count"] == sum(u["wait_ms"]["buckets"]) == u["responses"]
         assert set(m["log"]) == {"dropped", "write_failures"} and "other" in m["refusals"]
+        assert list(m["tls"]) == ["handshakes", "failures", "reloads", "reload_failures"] and set(m["tls"].values()) == {0}, m["tls"]
         assert m["uptime_ms"] > 0
 
     def admin_a_request_moves_exactly_the_counters_it_should(gw, up):
@@ -252,6 +253,9 @@ class T:
                 count = next(v for n, l, v in samples if n == hist + "_count" and l == key)
                 assert values[-1] == count, (key, values, count)
         assert any(n == "cancho_gateway_refusals_total" for n, _, _ in samples)
+        names = [n for n, _, _ in samples]
+        for counter in ("tls_handshakes_total", "tls_handshake_failures_total", "tls_reloads_total", "tls_reload_failures_total"):
+            assert names.count("cancho_gateway_" + counter) == 1, counter
 
     def admin_refuses_what_it_does_not_serve(gw, up):
         def rule(raw, **kw):
