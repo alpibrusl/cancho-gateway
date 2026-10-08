@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import shutil
+import signal
 import socket
 import ssl
 import subprocess
@@ -22,6 +23,7 @@ import threading
 import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import admin_test as ad  # noqa: E402
 import proxy_test as pt  # noqa: E402
 
 ROOT = pt.ROOT
@@ -44,14 +46,14 @@ def make_identity(directory, name, host):
 
 
 class Gateway:
-    def __init__(self, tmp, up_port):
+    def __init__(self, tmp, up_port, plain=True):
+        self.tmp = pathlib.Path(tmp)
         self.certs = pathlib.Path(tmp) / "certs"
         self.chain_api = make_identity(self.certs, "api", "api.example")
         self.chain_second = make_identity(self.certs, "second", "second.example")
-        self.port, self.tls_port, self.admin = pt.free_port(), pt.free_port(), pt.free_port()
+        self.port, self.tls_port, self.admin = (pt.free_port() if plain else None), pt.free_port(), pt.free_port()
         deploy = pathlib.Path(tmp) / "deploy.toml"
-        deploy.write_text("""listen = %d
-tls_listen = %d
+        deploy.write_text("""%stls_listen = %d
 admin_listen = %d
 tls_dir = "%s"
 tls_identities = ["api", "second"]
@@ -73,17 +75,23 @@ name = "main"
 path_prefix = "/"
 upstream = "up"
 max_body = 16777216
-""" % (self.port, self.tls_port, self.admin, self.certs, HANDSHAKES, HANDSHAKE_MS, RATE, up_port))
+""" % ("listen = %d\n" % self.port if plain else "", self.tls_port, self.admin, self.certs, HANDSHAKES, HANDSHAKE_MS, RATE, up_port))
         out = pathlib.Path(tmp) / "gen"
         subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(deploy), "--out", str(out)], check=True)
         files = [str(out / n) for n in ("deploy.cho", "routes.cho", "tlsfiles.cho")] + pt.dependencies() + [str(ROOT / "src" / (n + ".cho")) for n in SOURCES]
         built = subprocess.run([LEX, "build", "--std", *files, "-o", str(pathlib.Path(tmp) / "gateway")], capture_output=True, text=True)
         if built.returncode != 0:
             raise SystemExit("build failed: " + built.stderr[:600])
-        self.proc = subprocess.Popen([str(pathlib.Path(tmp) / "gateway")], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.log = []
+        self.err = []
         self.lock = threading.Lock()
-        threading.Thread(target=self.read_log, daemon=True).start()
+        self.start()
+
+    def start(self):
+        """Run the built binary (again, after a stop: the ports are compiled in, so a restart serves the same ones)."""
+        self.proc = subprocess.Popen([str(self.tmp / "gateway")], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        threading.Thread(target=self.read_log, args=(self.proc.stdout, self.log), daemon=True).start()
+        threading.Thread(target=self.read_log, args=(self.proc.stderr, self.err), daemon=True).start()
         for _ in range(100):
             try:
                 socket.create_connection(("127.0.0.1", self.tls_port), timeout=0.2).close()
@@ -91,13 +99,43 @@ max_body = 16777216
             except OSError:
                 time.sleep(0.05)
         else:
-            raise SystemExit("gateway did not start: %s" % self.proc.stderr.read()[:300])
+            raise SystemExit("gateway did not start: %s" % b"".join(self.err)[:300])
         time.sleep(0.3)
 
-    def read_log(self):
-        for raw in self.proc.stdout:
+    def read_log(self, stream, into):
+        for raw in stream:
             with self.lock:
-                self.log.append(raw)
+                into.append(raw)
+
+    def errors(self, n=0):
+        """The lines the gateway wrote to standard error after the first `n` (a reload's report goes there, never to the access log)."""
+        with self.lock:
+            return [raw.decode(errors="replace").rstrip("\n") for raw in self.err[n:]]
+
+    def err_find(self, n, text, wait=4):
+        end = time.time() + wait
+        while True:
+            for l in self.errors(n):
+                if text in l:
+                    return l
+            if time.time() > end:
+                raise AssertionError("no stderr line with %r among %r" % (text, self.errors(n)))
+            time.sleep(0.05)
+
+    def hup(self):
+        os.kill(self.proc.pid, signal.SIGHUP)
+
+    def reloaded(self, ok, failed, before, wait=4):
+        """Wait until the reload counters have moved by exactly `ok` and `failed` since `before` (the `tls` object of an earlier scrape)."""
+        end = time.time() + wait
+        while True:
+            t = self.metrics()["tls"]
+            if t["reloads"] - before["reloads"] >= ok and t["reload_failures"] - before["reload_failures"] >= failed:
+                assert (t["reloads"] - before["reloads"], t["reload_failures"] - before["reload_failures"]) == (ok, failed), (before, t)
+                return t
+            if time.time() > end:
+                raise AssertionError("reload counters %r after %r, wanted +%d ok +%d failed" % (t, before, ok, failed))
+            time.sleep(0.05)
 
     def lines(self):
         with self.lock:
@@ -151,12 +189,16 @@ max_body = 16777216
     def alive(self):
         return self.proc.poll() is None
 
-    def stop(self):
-        self.proc.terminate()
+    def stop(self, sig=signal.SIGTERM):
+        """Ask it to stop as an operator would; answers its exit status (0: stopped cleanly by the signal; `None`: it had to be killed)."""
+        if self.proc.poll() is None:
+            self.proc.send_signal(sig)
         try:
-            self.proc.wait(3)
+            return self.proc.wait(3)
         except subprocess.TimeoutExpired:
             self.proc.kill()
+            self.proc.wait()
+            return None
 
 
 def context(gw, cafile=None, alpn=("http/1.1",)):
@@ -559,6 +601,143 @@ class T:
         assert data.endswith(b"ok"), data
         s.close()
 
+    # ---- reload and stop (docs/tls.md section 11) ----
+
+    def sighup_replaces_the_certificate_new_connections_get_it_and_an_open_one_keeps_working(gw, up):
+        old = gw.chain_api.read_text()
+        old_der = ssl.PEM_cert_to_DER_cert(old)
+        held = connect(gw)  # established before the reload, request not yet sent
+        assert held.getpeercert(binary_form=True) == old_der
+        before, n_err = gw.metrics()["tls"], len(gw.errors())
+        (gw.certs / "old.pem").write_text(old)
+        new_chain = renew(gw, "api", "api.example")
+        assert new_chain != old
+        gw.hup()
+        gw.reloaded(2, 0, before)  # both identities are read again; the unchanged one is replaced by itself
+        assert gw.err_find(n_err, "gateway: tls reload api ok") and gw.err_find(n_err, "gateway: tls reload second ok")
+        # A new connection is sent the new certificate (and it verifies against the new chain, not the old one).
+        s = connect(gw, cafile=gw.chain_api)
+        assert s.getpeercert(binary_form=True) == ssl.PEM_cert_to_DER_cert(new_chain) != old_der
+        s.close()
+        try:
+            connect(gw, cafile=gw.certs / "old.pem").close()
+            raise AssertionError("the old chain still verifies the server")
+        except ssl.SSLCertVerificationError:
+            pass
+        # The connection that was open keeps working, with the certificate it was sent.
+        assert held.getpeercert(binary_form=True) == old_der
+        held.sendall(b"GET / HTTP/1.1\r\nHost: api.example\r\n\r\n")
+        head, body = read_response(held)
+        held.close()
+        assert head.startswith(b"HTTP/1.1 200") and body == b"ok", (head, body)
+
+    def a_refused_or_unreadable_replacement_leaves_the_old_identity_serving_and_is_counted(gw, up):
+        serving = ssl.PEM_cert_to_DER_cert(gw.chain_api.read_text())
+        key, chain = gw.certs / "api" / "key.pem", gw.chain_api
+        good_key, good_chain = key.read_text(), chain.read_text()
+        trusted = gw.certs / "serving.pem"  # the client's copy: the chain file itself is about to be damaged
+        trusted.write_text(good_chain)
+
+        def serves_the_same():
+            s = connect(gw, cafile=trusted)
+            try:
+                assert s.getpeercert(binary_form=True) == serving
+            finally:
+                s.close()
+
+        def attempt(label, expect, ok=1, failed=1):
+            before, n_err = gw.metrics()["tls"], len(gw.errors())
+            gw.hup()
+            gw.reloaded(ok, failed, before)
+            line = gw.err_find(n_err, "gateway: tls reload api ")
+            assert expect in line, (label, line)
+            assert gw.err_find(n_err, "gateway: tls reload second ok")
+            serves_the_same()
+            return line
+
+        try:
+            # 1. a key that is not a key
+            key.write_text("-----BEGIN PRIVATE KEY-----\nnot a key\n-----END PRIVATE KEY-----\n")
+            attempt("garbage key", " refused tls-server-")
+            # 2. a key that is not this certificate's (the pair the engine refuses mid-renewal)
+            other = pathlib.Path(gw.certs) / "second"
+            key.write_text((other / "key.pem").read_text())
+            attempt("mismatched pair", " refused tls-server-key-mismatch")
+            # 3. a file that is not there
+            key.unlink()
+            attempt("missing key", " unreadable key.pem errno=2")
+            # 4. an empty chain
+            key.write_text(good_key)
+            chain.write_text("")
+            attempt("empty chain", " refused tls-server-")
+        finally:
+            key.write_text(good_key)
+            chain.write_text(good_chain)
+        # Put back, it reloads, and the counters say so.
+        before = gw.metrics()["tls"]
+        gw.hup()
+        gw.reloaded(2, 0, before)
+        serves_the_same()
+
+    def reload_counters_are_in_the_prometheus_text_too(gw, up):
+        c = socket.create_connection(("127.0.0.1", gw.admin), timeout=5)
+        c.sendall(b"GET /metrics?format=prometheus HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+        data = b""
+        while True:
+            d = c.recv(65536)
+            if not d:
+                break
+            data += d
+        c.close()
+        text = data.decode()
+        t = gw.metrics()["tls"]
+        assert "\ncancho_gateway_tls_reloads_total %d\n" % t["reloads"] in text, text[-600:]
+        assert "\ncancho_gateway_tls_reload_failures_total %d\n" % t["reload_failures"] in text
+        assert "# TYPE cancho_gateway_tls_reloads_total counter" in text and "# TYPE cancho_gateway_tls_reload_failures_total counter" in text
+
+    def a_tls_only_deployment_listens_on_the_tls_port_alone_and_stops_cleanly_on_sigterm_and_sigint(gw, up):
+        with tempfile.TemporaryDirectory() as tmp:
+            only = Gateway(tmp, up.port, plain=False)
+            try:
+                assert only.port is None
+                assert ad.listening_ports(only.proc.pid) == {only.tls_port, only.admin}, ad.listening_ports(only.proc.pid)
+                h0, n0 = len(up.heads), len(only.lines())
+                head, body = get(only)
+                assert head.startswith(b"HTTP/1.1 200") and body == b"ok", (head, body)
+                assert "X-Forwarded-Proto: https" in up.heads[h0].decode()
+                e = only.find(n0, status=200, tls=True)
+                assert e["tls"] is True and e["outcome"] == "ok", e
+                # A reload works here too, and an open connection is told close_notify when the process is asked to stop.
+                before = only.metrics()["tls"]
+                only.hup()
+                only.reloaded(2, 0, before)
+                raw = socket.create_connection(("127.0.0.1", only.tls_port), timeout=8)
+                s = context(only).wrap_socket(raw, server_hostname="api.example", suppress_ragged_eofs=False)
+                t0 = time.time()
+                assert only.stop(signal.SIGTERM) == 0, "SIGTERM did not stop it with status 0"
+                assert time.time() - t0 < 2.5
+                assert s.recv(10) == b""  # close_notify, not a reset (SSLEOFError would be raised here)
+                s.close()
+                assert only.errors()[-1] == "gateway: stopping", only.errors()
+                # Again, with SIGINT, on a fresh process of the same binary.
+                only.start()
+                head, body = get(only)
+                assert head.startswith(b"HTTP/1.1 200"), head
+                assert only.stop(signal.SIGINT) == 0, "SIGINT did not stop it with status 0"
+            finally:
+                only.stop(signal.SIGKILL)
+
+
+def renew(gw, name, host):
+    """A new certificate and key for identity `name`, put in place the way a deploy hook does (each file replaced whole, the pair complete before the
+    signal is sent); answers the new chain as PEM text."""
+    with tempfile.TemporaryDirectory() as tmp:
+        fresh = make_identity(tmp, name, host).parent
+        for f in ("key.pem", "chain.pem"):
+            shutil.copy(fresh / f, gw.certs / name / (f + ".new"))
+            os.replace(gw.certs / name / (f + ".new"), gw.certs / name / f)
+    return (gw.certs / name / "chain.pem").read_text()
+
 
 def main():
     names = sys.argv[1:] or [n for n in vars(T) if not n.startswith("_")]
@@ -578,10 +757,13 @@ def main():
                     failures += 1
                     print("FAIL  %-70s %s" % (name, e))
                     if not gw.alive():
-                        print("      the gateway died: exit %s %s" % (gw.proc.returncode, gw.proc.stderr.read()[:300]))
+                        print("      the gateway died: exit %s %s" % (gw.proc.returncode, gw.errors()[-3:]))
                         break
         finally:
-            gw.stop()
+            status = gw.stop()
+        if status != 0:
+            failures += 1
+            print("FAIL  %-70s exit status %r" % ("sigterm_stops_the_gateway_cleanly_with_status_0", status))
     print("%d tests, %d failures" % (len(names), failures))
     sys.exit(1 if failures else 0)
 

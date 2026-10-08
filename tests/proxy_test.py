@@ -14,6 +14,7 @@ import os
 import pathlib
 import random
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -939,6 +940,22 @@ class T:
             time.sleep(0.1)
         assert gw.alive()
 
+    def sigterm_a_plain_gateway_ignores_sighup_and_stops_on_sigterm_with_status_0(gw, up):
+        # SIGHUP reloads TLS certificates; a deployment without tls_listen has none, so it is a no-op (not the default action, which would end the process).
+        assert split(request(gw, GET % b"/x"))[0] == 200
+        os.kill(gw.proc.pid, signal.SIGHUP)
+        time.sleep(0.3)
+        assert gw.alive() and split(request(gw, GET % b"/x"))[0] == 200
+        os.kill(gw.proc.pid, signal.SIGTERM)
+        assert gw.proc.wait(3) == 0, gw.proc.returncode
+        assert gw.proc.stderr.read() == b"gateway: stopping\n"
+
+    def sigint_a_plain_gateway_stops_on_sigint_with_status_0(gw, up):
+        assert split(request(gw, GET % b"/x"))[0] == 200
+        os.kill(gw.proc.pid, signal.SIGINT)
+        assert gw.proc.wait(3) == 0, gw.proc.returncode
+        assert gw.proc.stderr.read() == b"gateway: stopping\n"
+
     def chunked_body_echo(gw, up):
         parts = [os.urandom(random.randint(1, 20000)) for _ in range(12)]
         raw = b"".join(b"%x\r\n" % len(p) + p + b"\r\n" for p in parts) + b"0\r\n\r\n"
@@ -1613,7 +1630,7 @@ def main():
         gw0 = None
         extra = {}
         for prefix, kw in (("smallq_", dict(logq=1600)), ("pipe_", dict(read=False)), ("fullstdout_", dict(stdout=open("/dev/full", "wb"))),
-                           ("continueonfail_", dict(stdout=open("/dev/full", "wb"), log_failure="continue"))):
+                           ("continueonfail_", dict(stdout=open("/dev/full", "wb"), log_failure="continue")), ("sigterm_", dict()), ("sigint_", dict())):
             if any(n.startswith(prefix) for n in names):
                 extra[prefix] = Gateway(tempfile.mkdtemp(prefix="gwx"), free_port(), up_port, dead, ka_port, flap_port, **kw)
                 extra[prefix].ka = ka
@@ -1628,7 +1645,7 @@ def main():
                 g = gw0 if name.startswith("nopool_") else next((x for p, x in extra.items() if name.startswith(p)), gw)
                 try:
                     getattr(T, name)(g, up)
-                    if not g.alive() and not name.startswith("fullstdout_"):  # that one is about the gateway stopping
+                    if not g.alive() and not name.startswith(("fullstdout_", "sigterm_", "sigint_")):  # those are about the gateway stopping
                         raise AssertionError("the gateway died")
                     print("ok    %-52s %.1fs" % (name, time.time() - t0))
                 except (AssertionError, OSError) as e:
