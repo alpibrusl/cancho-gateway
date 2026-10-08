@@ -1,0 +1,464 @@
+edition 5;
+
+module gateway.websocket;
+
+import std.bytes;
+import std.http;
+import gateway.b64;
+import gateway.out;
+import gateway.sha1;
+
+// The WebSocket handshake at the gateway (task #15, docs/websocket.md): what a request must be to be admitted as an upgrade, what the upstream's `101` must be to
+// become a tunnel, and the one head the gateway writes itself. Pure: no effect, no allocation beyond two small regions for the accept value. It never reads a frame.
+//
+// `judge` answers a bitmask of the route's subprotocols the client offered (0 to 255) or `0 - rule`; `check_response` answers 0 or `0 - rule`. Every rule has a tag and a
+// status. The stance is the gateway's: one reading, or a refusal; where RFC 6455 allows more than one spelling, the conservative one is taken (docs/websocket.md section 4).
+
+pub fn rule_count() -> [] int {
+    return 16;
+}
+
+pub fn tag(rule: int) -> [] &static [byte] {
+    if rule == 1 {
+        return "ws.method";
+    }
+    if rule == 2 {
+        return "ws.http-version";
+    }
+    if rule == 3 {
+        return "ws.upgrade";
+    }
+    if rule == 4 {
+        return "ws.body";
+    }
+    if rule == 5 {
+        return "ws.early-data";
+    }
+    if rule == 6 {
+        return "ws.version";
+    }
+    if rule == 7 {
+        return "ws.key";
+    }
+    if rule == 8 {
+        return "ws.subprotocol";
+    }
+    if rule == 9 {
+        return "ws.origin";
+    }
+    if rule == 10 {
+        return "ws.limit";
+    }
+    if rule == 11 {
+        return "ws.upstream-upgrade";
+    }
+    if rule == 12 {
+        return "ws.upstream-accept";
+    }
+    if rule == 13 {
+        return "ws.upstream-subprotocol";
+    }
+    if rule == 14 {
+        return "ws.upstream-extensions";
+    }
+    if rule == 15 {
+        return "ws.idle-timeout";
+    }
+    if rule == 16 {
+        return "ws.lifetime";
+    }
+    return "";
+}
+
+// The status of a refusal; 0 for the two rules that close a tunnel and answer nothing.
+pub fn status(rule: int) -> [] int {
+    if rule == 6 {
+        return 426;
+    }
+    if rule == 9 {
+        return 403;
+    }
+    if rule == 10 {
+        return 503;
+    }
+    if rule >= 11 && rule <= 14 {
+        return 502;
+    }
+    if rule >= 1 && rule <= 8 {
+        return 400;
+    }
+    return 0;
+}
+
+// The rules of the two closing reasons.
+pub fn idle_rule() -> [] int {
+    return 15;
+}
+
+pub fn lifetime_rule() -> [] int {
+    return 16;
+}
+
+// How many subprotocols a route may list, and how many a client may offer.
+pub fn max_protocols() -> [] int {
+    return 8;
+}
+
+fn max_offered() -> [] int {
+    return 16;
+}
+
+fn guid() -> [] &static [byte] {
+    return "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+}
+
+// `Sec-WebSocket-Accept` for `key` (RFC 6455 4.2.2): the base64 of the SHA-1 of the key and the fixed GUID. `out` must hold 28 bytes; answers 28.
+pub fn accept_key[&k, &o](key: &k [byte], out: &!o [byte]) -> [] int {
+    region a {
+        let joined = alloc_slice[a](len(key) + 36, byte_of(0));
+        var i = 0;
+        while i < len(key) {
+            joined[i] = key[i];
+            i = i + 1;
+        }
+        let g = guid();
+        var j = 0;
+        while j < 36 {
+            joined[len(key) + j] = g[j];
+            j = j + 1;
+        }
+        let h = alloc_slice[a](20, byte_of(0));
+        sha1.digest(joined, h);
+        return b64.encode(h, out);
+    }
+}
+
+// `a` equals the lowercase literal `lower`, ignoring ASCII case.
+fn is[&a, &l](a: &a [byte], lower: &l [byte]) -> [] bool {
+    if len(a) != len(lower) {
+        return false;
+    }
+    var i = 0;
+    while i < len(a) {
+        if bytes.to_lower(int_of(a[i])) != int_of(lower[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Both parsers (`std.http` for a request, `gateway.response` for a response) lay their headers out from slot 16, four ints a header.
+fn name_of[&s, &t](src: &s [byte], table: &t [int], i: int) -> [] &s [byte] {
+    return src[table[16 + 4 * i]..table[16 + 4 * i + 1]];
+}
+
+fn value_of[&s, &t](src: &s [byte], table: &t [int], i: int) -> [] &s [byte] {
+    return bytes.trim(src[table[16 + 4 * i + 2]..table[16 + 4 * i + 3]]);
+}
+
+fn count_named[&s, &t, &l](src: &s [byte], table: &t [int], count: int, lower: &l [byte]) -> [] int {
+    var n = 0;
+    var i = 0;
+    while i < count {
+        if is(name_of(src, table, i), lower) {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+// The index of the first header named `lower`, or `0 - 1`.
+fn first_named[&s, &t, &l](src: &s [byte], table: &t [int], count: int, lower: &l [byte]) -> [] int {
+    var i = 0;
+    while i < count {
+        if is(name_of(src, table, i), lower) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn is_tchar(c: int) -> [] bool {
+    if bytes.is_alpha(c) || bytes.is_digit(c) {
+        return true;
+    }
+    return c == '!' || c == '#' || c == '$' || c == '%' || c == '&' || c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' || c == '|' || c == '~';
+}
+
+// An RFC 9110 token of 1 to 64 bytes.
+fn token_ok[&v](v: &v [byte]) -> [] bool {
+    if len(v) < 1 || len(v) > 64 {
+        return false;
+    }
+    var i = 0;
+    while i < len(v) {
+        if !is_tchar(int_of(v[i])) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn b64_char(c: int) -> [] bool {
+    return bytes.is_alpha(c) || bytes.is_digit(c) || c == '+' || c == '/';
+}
+
+// A key RFC 6455 4.1 asks for: 16 bytes in base64, canonically (22 characters whose last has no stray low bits, then `==`).
+fn key_ok[&k](v: &k [byte]) -> [] bool {
+    if len(v) != 24 {
+        return false;
+    }
+    var i = 0;
+    while i < 22 {
+        if !b64_char(int_of(v[i])) {
+            return false;
+        }
+        i = i + 1;
+    }
+    if int_of(v[22]) != '=' || int_of(v[23]) != '=' {
+        return false;
+    }
+    let c = int_of(v[21]);
+    return c == 'A' || c == 'Q' || c == 'g' || c == 'w';
+}
+
+// How many entries a comma-separated list has (0 for the empty list).
+fn entries[&c](csv: &c [byte]) -> [] int {
+    if len(csv) == 0 {
+        return 0;
+    }
+    return bytes.count_byte(csv, ',') + 1;
+}
+
+// Is `value` one of the entries of `csv`, exactly?
+fn csv_has[&c, &v](csv: &c [byte], value: &v [byte]) -> [] bool {
+    let n = entries(csv);
+    var j = 1;
+    while j <= n {
+        if bytes.equal(bytes.field(csv, ',', j), value) {
+            return true;
+        }
+        j = j + 1;
+    }
+    return false;
+}
+
+// Is `value`, the value of a `Connection` header, a list whose every token is `upgrade` or (if `loose` is false) `keep-alive`, and which lists `upgrade`? With `loose`, any
+// other token is allowed (a response may say what it likes about its own connection) but `upgrade` must still be there.
+fn connection_upgrade[&v](value: &v [byte], loose: bool) -> [] bool {
+    var upgrade = false;
+    var start = 0;
+    var at = 0;
+    while at <= len(value) {
+        if at == len(value) || int_of(value[at]) == ',' {
+            let tok = bytes.trim(value[start..at]);
+            if is(tok, "upgrade") {
+                upgrade = true;
+            } else if !loose && !is(tok, "keep-alive") {
+                return false;
+            }
+            start = at + 1;
+        }
+        at = at + 1;
+    }
+    return upgrade;
+}
+
+// A list of 1 to 16 tokens, as `Sec-WebSocket-Protocol` is: `0 - 1` if it is not, else the bitmask of the entries of `allowed` (comma-separated) it names.
+fn offered[&v, &p](value: &v [byte], allowed: &p [byte]) -> [] int {
+    var mask = 0;
+    var items = 0;
+    var start = 0;
+    var at = 0;
+    let n = entries(allowed);
+    while at <= len(value) {
+        if at == len(value) || int_of(value[at]) == ',' {
+            let tok = bytes.trim(value[start..at]);
+            if !token_ok(tok) {
+                return 0 - 1;
+            }
+            items = items + 1;
+            if items > max_offered() {
+                return 0 - 1;
+            }
+            var j = 1;
+            while j <= n {
+                if bytes.equal(bytes.field(allowed, ',', j), tok) {
+                    mask = mask | 1 << j - 1;
+                }
+                j = j + 1;
+            }
+            start = at + 1;
+        }
+        at = at + 1;
+    }
+    return mask;
+}
+
+// Does the request ask for an upgrade: an `Upgrade` header, or a `Connection` header that lists `upgrade`?
+pub fn asks_upgrade[&s, &t](src: &s [byte], table: &t [int]) -> [] bool {
+    let count = http.header_count(table);
+    if count_named(src, table, count, "upgrade") > 0 {
+        return true;
+    }
+    var i = 0;
+    while i < count {
+        if is(name_of(src, table, i), "connection") {
+            var start = 0;
+            var at = 0;
+            let v = value_of(src, table, i);
+            while at <= len(v) {
+                if at == len(v) || int_of(v[at]) == ',' {
+                    if is(bytes.trim(v[start..at]), "upgrade") {
+                        return true;
+                    }
+                    start = at + 1;
+                }
+                at = at + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+// The request (a head `std.http.parse` accepted, in `src`, which may hold more than the head) as a WebSocket opening handshake, for a route that serves the
+// subprotocols `protocols` and admits the origins `origins` (both comma-separated, possibly empty). Answers the bitmask of `protocols` the client offered (0 if the
+// route serves none), or `0 - rule`. The checks are in the order of docs/websocket.md section 4.
+pub fn judge[&s, &t, &p, &g](src: &s [byte], table: &t [int], protocols: &p [byte], origins: &g [byte]) -> [] int {
+    let count = http.header_count(table);
+    if !bytes.equal(http.method(src, table), "GET") {
+        return 0 - 1;
+    }
+    if http.version(table) != 11 {
+        return 0 - 2;
+    }
+    if count_named(src, table, count, "upgrade") != 1 || !is(value_of(src, table, first_named(src, table, count, "upgrade")), "websocket") {
+        return 0 - 3;
+    }
+    let conn = first_named(src, table, count, "connection");
+    if count_named(src, table, count, "connection") != 1 || !connection_upgrade(value_of(src, table, conn), false) {
+        return 0 - 3;
+    }
+    if count_named(src, table, count, "content-length") > 0 || count_named(src, table, count, "transfer-encoding") > 0 {
+        return 0 - 4;
+    }
+    if len(src) > http.body_start(table) {
+        return 0 - 5;
+    }
+    let version = first_named(src, table, count, "sec-websocket-version");
+    if count_named(src, table, count, "sec-websocket-version") != 1 || !bytes.equal(value_of(src, table, version), "13") {
+        return 0 - 6;
+    }
+    let key = first_named(src, table, count, "sec-websocket-key");
+    if count_named(src, table, count, "sec-websocket-key") != 1 || !key_ok(value_of(src, table, key)) {
+        return 0 - 7;
+    }
+    let sp = first_named(src, table, count, "sec-websocket-protocol");
+    if count_named(src, table, count, "sec-websocket-protocol") > 1 {
+        return 0 - 8;
+    }
+    var mask = 0;
+    if sp >= 0 {
+        mask = offered(value_of(src, table, sp), protocols);
+        if mask < 0 {
+            return 0 - 8;
+        }
+    }
+    if entries(protocols) > 0 && mask == 0 {
+        return 0 - 8;
+    }
+    if entries(protocols) == 0 && sp >= 0 {
+        return 0 - 8;
+    }
+    let origin = first_named(src, table, count, "origin");
+    if count_named(src, table, count, "origin") > 1 {
+        return 0 - 9;
+    }
+    if origin >= 0 && !csv_has(origins, value_of(src, table, origin)) {
+        return 0 - 9;
+    }
+    return mask;
+}
+
+// The accept value the request's key calls for, into `out` (28 bytes); answers 28, or `0 - 1` if the request has no key. `judge` has already said it has one.
+pub fn accept_for[&s, &t, &o](src: &s [byte], table: &t [int], out: &!o [byte]) -> [] int {
+    let i = first_named(src, table, http.header_count(table), "sec-websocket-key");
+    if i < 0 {
+        return 0 - 1;
+    }
+    return accept_key(value_of(src, table, i), out);
+}
+
+// A `101` (a head `gateway.response.parse_upgrade` accepted, in `src`) as the answer to the handshake: `expected` is the accept value (28 bytes) the request's key calls
+// for, `mask` what `judge` answered, `protocols` the route's. Answers 0 or `0 - rule`.
+pub fn check_response[&s, &t, &e, &p](src: &s [byte], table: &t [int], expected: &e [byte], mask: int, protocols: &p [byte]) -> [] int {
+    let count = table[2];
+    let up = first_named(src, table, count, "upgrade");
+    let conn = first_named(src, table, count, "connection");
+    if count_named(src, table, count, "upgrade") != 1 || !is(value_of(src, table, up), "websocket") {
+        return 0 - 11;
+    }
+    if count_named(src, table, count, "connection") != 1 || !connection_upgrade(value_of(src, table, conn), true) {
+        return 0 - 11;
+    }
+    if count_named(src, table, count, "content-length") > 0 || count_named(src, table, count, "transfer-encoding") > 0 {
+        return 0 - 11;
+    }
+    let acc = first_named(src, table, count, "sec-websocket-accept");
+    if count_named(src, table, count, "sec-websocket-accept") != 1 || !bytes.equal(value_of(src, table, acc), expected) {
+        return 0 - 12;
+    }
+    let sp = first_named(src, table, count, "sec-websocket-protocol");
+    if count_named(src, table, count, "sec-websocket-protocol") > 1 {
+        return 0 - 13;
+    }
+    if entries(protocols) == 0 && sp >= 0 {
+        return 0 - 13;
+    }
+    if entries(protocols) > 0 {
+        if sp < 0 {
+            return 0 - 13;
+        }
+        let chosen = value_of(src, table, sp);
+        var chosen_ok = false;
+        var j = 1;
+        while j <= entries(protocols) {
+            if bytes.equal(bytes.field(protocols, ',', j), chosen) && mask / (1 << j - 1) % 2 == 1 {
+                chosen_ok = true;
+            }
+            j = j + 1;
+        }
+        if !chosen_ok {
+            return 0 - 13;
+        }
+    }
+    if count_named(src, table, count, "sec-websocket-extensions") > 0 {
+        return 0 - 14;
+    }
+    return 0;
+}
+
+// The head the client is sent for a checked `101`, into `out` from offset 0: only fields the checks have read (the accept value, the chosen subprotocol), then `Via` and the
+// request's id. Answers its length, or `0 - 1` if it does not fit.
+pub fn upgrade_response[&s, &t, &o, &d](src: &s [byte], table: &t [int], out: &!o [byte], id: &d [byte]) -> [] int {
+    let count = table[2];
+    var k = out.put(out, 0, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ");
+    k = out.put(out, k, value_of(src, table, first_named(src, table, count, "sec-websocket-accept")));
+    let sp = first_named(src, table, count, "sec-websocket-protocol");
+    if sp >= 0 {
+        k = out.put(out, k, "\r\nSec-WebSocket-Protocol: ");
+        k = out.put(out, k, value_of(src, table, sp));
+    }
+    k = out.put(out, k, "\r\nVia: 1.1 cancho-gateway\r\nX-Request-Id: ");
+    k = out.put(out, k, id);
+    k = out.put(out, k, "\r\n\r\n");
+    if k < 0 {
+        return 0 - 1;
+    }
+    return k;
+}

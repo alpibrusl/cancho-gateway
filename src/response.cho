@@ -128,6 +128,16 @@ fn lists[&s, &l](src: &s [byte], vs: int, ve: int, token: &l [byte]) -> [] bool 
 }
 
 pub fn parse[&s, &t](src: &s [byte], table: &!t [int]) -> [] int {
+    return parse_with(src, table, false);
+}
+
+// `parse`, for the answer to a request that asked for a WebSocket upgrade (docs/websocket.md section 6): a `101` is accepted as a head (the caller checks it and, if it
+// passes, stops framing). Everywhere else a `101` stays refused.
+pub fn parse_upgrade[&s, &t](src: &s [byte], table: &!t [int]) -> [] int {
+    return parse_with(src, table, true);
+}
+
+fn parse_with[&s, &t](src: &s [byte], table: &!t [int], upgrade: bool) -> [] int {
     let n = len(src);
     var limit = n;
     if limit > head_limit() {
@@ -160,7 +170,7 @@ pub fn parse[&s, &t](src: &s [byte], table: &!t [int]) -> [] int {
         return 0 - 1;
     }
     let code = (int_of(src[9]) - '0') * 100 + (int_of(src[10]) - '0') * 10 + int_of(src[11]) - '0';
-    if code < 100 || code == 101 {
+    if code < 100 || code == 101 && !upgrade {
         return 0 - 3;
     }
     // The reason runs to the end of the line: visible bytes, spaces and tabs.

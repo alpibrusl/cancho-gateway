@@ -20,6 +20,7 @@ import gateway.route;
 import gateway.shared;
 import gateway.adminloop;
 import gateway.tlsio;
+import gateway.websocket;
 
 // The proxy core, first slice (task #5, docs/proxy.md): one thread, one poller, memory sized at start.
 //
@@ -40,6 +41,7 @@ import gateway.tlsio;
 //     2  the peer slot, or -1
 //     3  phase. Client: 0 reading the head, 1 wants an upstream connection, 2 connecting, 3 streaming, 4 sending an error,
 //                5 lingering after one (input read and discarded)
+//                6 a WebSocket tunnel
 //                Upstream: 0 connecting, 1 connected
 //     4  bytes in `bufs[k]` read from this connection and not yet passed on
 //     5  bytes in `pends[k]` waiting to be written to this connection
@@ -70,6 +72,11 @@ import gateway.tlsio;
 //    29  client: the status it was sent (a refusal's, or the upstream's), 0 if none
 //    30  client: flags, 1 the gateway refused it, 2 its response was relayed whole, 4 its access-log line is written
 //    31  client: its route's index + 1, 0 if none was selected
+//    32..39  client: TLS's (`gateway.tlsio`)
+//    40  client: 0 not an upgrade, 1 a WebSocket upgrade asked for and not yet answered, 2 a tunnel (docs/websocket.md)
+//    41  client: the route's subprotocols it offered, as a bitmask
+//
+// A tunnel is client phase 6 (bytes in `bufs[k]` are bound for the upstream) and upstream state 16 = 2 (bytes in `bufs[u]` are bound for the client): neither is framed any more.
 //
 // Per slot `k`, `meta[256k..256k+256]` is the client's: byte 0 the length of its request id, 1 of the rule tag it was refused with, 2 of its
 // method, 3 of its path; then the id (64 bytes at 4), the tag (40 at 68), the method (16 at 108) and the path up to `?` (128 at 124).
@@ -98,7 +105,7 @@ fn settle[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> [poll]
     if st[p + 1] == 1 {
         // A client is read while its head or its body is arriving, or while it is lingering after a refusal; afterwards only a
         // hang-up matters, and the loop does not look for one (an HTTP client may half-close after its request).
-        if st[p + 3] == 0 || st[p + 3] == 5 || st[p + 3] == 3 && st[p + 10] == 0 && st[p + 4] < shared.buf_size() && st[p + 14] == 0 {
+        if st[p + 3] == 0 || st[p + 3] == 5 || st[p + 3] == 3 && st[p + 10] == 0 && st[p + 4] < shared.buf_size() && st[p + 14] == 0 || st[p + 3] == 6 && st[p + 4] < shared.buf_size() && st[p + 14] == 0 {
             want = want + 1;
         }
         if want % 2 == 1 && st[p + tlsio.f_cin()] > 0 && st[p + tlsio.f_mode()] != 0 {
@@ -251,7 +258,7 @@ fn upstream_lost[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, no
         return 0;
     }
     let pc = shared.stride() * client;
-    if st[p + 16] == 1 {
+    if st[p + 16] >= 1 {
         shared.drop_session(tab, core, client);
         return 0;
     }
@@ -388,6 +395,153 @@ fn finish_response[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, 
     return 0;
 }
 
+// Where client `k`'s accept value is in the meta area.
+fn k_accept(k: int) -> [] int {
+    return k * shared.meta_size() + shared.ws_accept_at();
+}
+
+// The upstream `u` answered an upgrade request with a `101` whose head is the first `r` bytes of its buffer (docs/websocket.md sections 6 and 7): check it against what
+// the request called for; if it passes, tell the client, and from here both connections are a tunnel and nothing is framed.
+fn upgrade_answered[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, r: int, now: int) -> [conn_write, poll] int {
+    let st = contents(core.state);
+    let bf = contents(core.bufs);
+    let pd = contents(core.pends);
+    let tb = contents(core.table);
+    let m = contents(core.meta);
+    let pu = shared.stride() * u;
+    let client = st[pu + 2];
+    let pc = shared.stride() * client;
+    let ub = u * shared.buf_size();
+    let cb = client * shared.pend_size();
+    let accept = k_accept(client);
+    let view = bf[ub..ub + st[pu + 4]];
+    let verdict = websocket.check_response(view[0..r], tb, m[accept..accept + 28], st[pc + shared.ws_mask()], route.subprotocols(st[pc + 31] - 1));
+    if verdict < 0 {
+        health_fail(tab, core, st[pu + 11], now);
+        refuse(tab, core, client, websocket.status(0 - verdict), websocket.tag(0 - verdict), now);
+        return 0;
+    }
+    health_ok(core, st[pu + 11]);
+    let n = websocket.upgrade_response(view[0..r], tb, pd[cb + st[pc + 5]..cb + shared.pend_size()], shared.meta_get(core, client, 4, 0));
+    if n < 0 {
+        shared.drop_session(tab, core, client);
+        return 0;
+    }
+    st[pc + 5] = st[pc + 5] + n;
+    st[pc + 27] = st[pc + 27] + n;
+    st[pc + 13] = 1;
+    st[pc + 26] = now;
+    st[pc + 29] = 101;
+    // The tunnel's clocks replace the request's: idle (reset by every byte that moves) and lifetime (not).
+    st[pc + 3] = 6;
+    st[pc + 7] = now + deploy.ws_idle_ms();
+    st[pc + 12] = now + deploy.ws_lifetime_ms();
+    st[pc + shared.ws_mode()] = 2;
+    st[pu + 16] = 2;
+    copy_into(bf[ub..ub + st[pu + 4] - r], bf[ub + r..ub + st[pu + 4]]);
+    st[pu + 4] = st[pu + 4] - r;
+    metrics.ws_opened(contents(core.stats));
+    return tunnel_down(tab, core, u, now);
+}
+
+// The tunnel, upstream to client: what the upstream `u` has said goes to its client's queue as far as there is room, and is written; when the upstream has closed and all it said
+// has been passed on, the tunnel ends once the client has been sent it.
+fn tunnel_down[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, now: int) -> [conn_write, poll] int {
+    let st = contents(core.state);
+    let bf = contents(core.bufs);
+    let pd = contents(core.pends);
+    let pu = shared.stride() * u;
+    let client = st[pu + 2];
+    if client < 0 || st[shared.stride() * client] != 1 {
+        close_slot(tab, core, u);
+        return 0;
+    }
+    let pc = shared.stride() * client;
+    let ub = u * shared.buf_size();
+    let cb = client * shared.pend_size();
+    var going = true;
+    while going {
+        going = false;
+        var take = st[pu + 4];
+        let room = shared.pend_size() - st[pc + 5];
+        if take > room {
+            take = room;
+        }
+        if take > 0 {
+            copy_into(pd[cb + st[pc + 5]..cb + st[pc + 5] + take], bf[ub..ub + take]);
+            copy_into(bf[ub..ub + st[pu + 4] - take], bf[ub + take..ub + st[pu + 4]]);
+            st[pu + 4] = st[pu + 4] - take;
+            st[pc + 5] = st[pc + 5] + take;
+            st[pc + 27] = st[pc + 27] + take;
+            st[pc + 7] = now + deploy.ws_idle_ms();
+            let before = st[pc + 5];
+            if flush(tab, core, client, now) == 1 {
+                return 0;
+            }
+            going = st[pc + 5] < before && st[pu + 4] > 0;
+        }
+    }
+    if st[pu + 14] == 1 && st[pu + 4] == 0 {
+        st[pc + 8] = 1;
+        if flush(tab, core, client, now) == 1 {
+            return 0;
+        }
+    }
+    settle(tab, core, client);
+    settle(tab, core, u);
+    return 0;
+}
+
+// The tunnel, client to upstream: what the client has sent goes to the upstream's queue as far as there is room, and is written; when the client has closed and all it sent has
+// been written, the tunnel ends.
+fn tunnel_up[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: int) -> [conn_write, poll] int {
+    let st = contents(core.state);
+    let bf = contents(core.bufs);
+    let pd = contents(core.pends);
+    let p = shared.stride() * k;
+    let u = st[p + 2];
+    if u < 0 || st[shared.stride() * u] != 1 {
+        shared.drop_session(tab, core, k);
+        return 0;
+    }
+    let pu = shared.stride() * u;
+    let cb = k * shared.buf_size();
+    let ub = u * shared.pend_size();
+    var moving = true;
+    while moving {
+        moving = false;
+        var take = st[p + 4];
+        let room = shared.pend_size() - st[pu + 5];
+        if take > room {
+            take = room;
+        }
+        if take > 0 {
+            copy_into(pd[ub + st[pu + 5]..ub + st[pu + 5] + take], bf[cb..cb + take]);
+            copy_into(bf[cb..cb + st[p + 4] - take], bf[cb + take..cb + st[p + 4]]);
+            st[p + 4] = st[p + 4] - take;
+            st[pu + 5] = st[pu + 5] + take;
+            st[p + 28] = st[p + 28] + take;
+            st[p + 7] = now + deploy.ws_idle_ms();
+            let before = st[pu + 5];
+            if flush(tab, core, u, now) == 1 {
+                return 0;
+            }
+            moving = st[pu + 5] < before && st[p + 4] > 0;
+        }
+    }
+    // Room has opened in the upstream's queue, or nothing was taken: write what is queued.
+    if st[pu + 5] > 0 && flush(tab, core, u, now) == 1 {
+        return 0;
+    }
+    if st[p + 14] == 1 && st[p + 4] == 0 && st[pu + 5] == 0 {
+        shared.drop_session(tab, core, k);
+        return 0;
+    }
+    settle(tab, core, k);
+    settle(tab, core, u);
+    return 0;
+}
+
 // Move what the upstream `u` has said to its client: first its head (parsed, rewritten, interim responses passed on), then its
 // body as its framing says, as far as the client's queue has room.
 fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, now: int) -> [conn_write, poll] int {
@@ -405,17 +559,28 @@ fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, no
     let pc = shared.stride() * client;
     let ub = u * shared.buf_size();
     let cb = client * shared.pend_size();
+    if st[pu + 16] == 2 {
+        return tunnel_down(tab, core, u, now);
+    }
     var going = true;
     while going {
         going = false;
         if st[pu + 16] == 0 {
             if st[pu + 4] > 0 {
                 let view = bf[ub..ub + st[pu + 4]];
-                let r = response.parse(view, tb);
+                var r = 0;
+                if st[pc + shared.ws_mode()] == 1 {
+                    r = response.parse_upgrade(view, tb);
+                } else {
+                    r = response.parse(view, tb);
+                }
                 if r < 0 {
                     health_fail(tab, core, st[pu + 11], now);
                     refuse(tab, core, client, response.status(0 - r), response.tag(0 - r), now);
                     return 0;
+                }
+                if r > 0 && response.code(tb) == 101 {
+                    return upgrade_answered(tab, core, u, r, now);
                 }
                 if r > 0 && shared.pend_size() - st[pc + 5] >= r + 64 {
                     if response.interim(tb) {
@@ -534,6 +699,9 @@ fn pump_request[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now
     if u < 0 || st[shared.stride() * u] != 1 || st[shared.stride() * u + 3] != 1 {
         return 0;
     }
+    if st[p + 3] == 6 {
+        return tunnel_up(tab, core, k, now);
+    }
     let pu = shared.stride() * u;
     var moving = true;
     while moving {
@@ -624,6 +792,23 @@ fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: 
     // The route is known: the access log names it and its upstream even if the request is refused from here on.
     st[p + 31] = sel + 1;
     st[p + 11] = route.upstream(sel);
+    if route.websocket(sel) == 1 && websocket.asks_upgrade(view, tb) {
+        // A WebSocket upgrade (docs/websocket.md section 4): all of it is checked here, before anything else is decided about the request. It has no body (`ws.body`).
+        let w = websocket.judge(view, tb, route.subprotocols(sel), route.origins(sel));
+        if w < 0 {
+            refuse(tab, core, k, websocket.status(0 - w), websocket.tag(0 - w), now);
+            return 0;
+        }
+        if shared.tunnels(core, false) >= deploy.ws_max_tunnels() {
+            refuse(tab, core, k, websocket.status(10), websocket.tag(10), now);
+            return 0;
+        }
+        let m = contents(core.meta);
+        let at = k_accept(k);
+        websocket.accept_for(view, tb, m[at..at + 28]);
+        st[p + shared.ws_mode()] = 1;
+        st[p + shared.ws_mask()] = w;
+    }
     let max_body = route.max_body(sel);
     if http.is_chunked(tb) {
         chunked.init(ch[k * chunked.state_len()..k * chunked.state_len() + chunked.state_len()], max_body);
@@ -670,6 +855,11 @@ fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: 
     if bytes.equal(method, "HEAD") {
         st[p + 18] = 1;
     }
+    if st[p + shared.ws_mode()] == 1 {
+        // An upgrade is never sent again and never takes a pooled connection (docs/websocket.md section 10).
+        st[p + 16] = 0;
+        st[p + 17] = 1;
+    }
     st[p + 3] = 1;
     st[p + 7] = now + shared.connect_ms();
     settle(tab, core, k);
@@ -692,7 +882,12 @@ fn attach[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, slot: int
     if http.parse(view, tb) < 0 {
         failed = 1;
     } else {
-        let m = forward.rewrite(view, tb, pd[slot * shared.pend_size()..slot * shared.pend_size() + shared.pend_size()], shared.pool_max() > 0, st[p + 23] % 2 == 1, st[p + tlsio.f_mode()] != 0, shared.meta_get(core, k, 4, 0));
+        var m = 0;
+        if st[p + shared.ws_mode()] == 1 {
+            m = forward.rewrite_upgrade(view, tb, pd[slot * shared.pend_size()..slot * shared.pend_size() + shared.pend_size()], st[p + 23] % 2 == 1, st[p + tlsio.f_mode()] != 0, shared.meta_get(core, k, 4, 0));
+        } else {
+            m = forward.rewrite(view, tb, pd[slot * shared.pend_size()..slot * shared.pend_size() + shared.pend_size()], shared.pool_max() > 0, st[p + 23] % 2 == 1, st[p + tlsio.f_mode()] != 0, shared.meta_get(core, k, 4, 0));
+        }
         if m < 0 {
             failed = 0 - m + 1;
         } else {
@@ -843,12 +1038,19 @@ fn read_client[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now:
             st[p + 4] = st[p + 4] + got;
             if st[p + 3] == 0 {
                 head_ready(tab, core, k, now);
+            } else if st[p + 3] == 6 {
+                tunnel_up(tab, core, k, now);
             } else {
                 pump_request(tab, core, k, now);
             }
         }
         Received::End => {
-            if st[p + 3] == 0 || st[p + 10] == 0 {
+            if st[p + 3] == 6 {
+                // The client closed the tunnel: what it sent is forwarded, then both ends close (cancho has no half-close).
+                st[p + 14] = 1;
+                shared.flag_set(core, k, 2);
+                tunnel_up(tab, core, k, now);
+            } else if st[p + 3] == 0 || st[p + 10] == 0 {
                 // It left before its request was whole.
                 shared.drop_session(tab, core, k);
             } else {
@@ -877,6 +1079,10 @@ fn read_upstream[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, no
         }
         Received::End => {
             st[p + 14] = 1;
+            if st[p + 16] == 2 && st[p + 2] >= 0 {
+                // The upstream closed a tunnel: an ending by a peer, not by a failure (docs/websocket.md section 7).
+                shared.flag_set(core, st[p + 2], 2);
+            }
             pump_response(tab, core, u, now);
         }
         Received::Again => {
@@ -943,7 +1149,7 @@ fn step[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, readiness: 
                 return 0;
             }
         }
-        if readiness % 2 == 1 && (st[p + 3] == 0 || st[p + 3] == 3 && st[p + 10] == 0) {
+        if readiness % 2 == 1 && (st[p + 3] == 0 || st[p + 3] == 3 && st[p + 10] == 0 || st[p + 3] == 6) {
             read_client(tab, core, k, now);
         }
         return 0;
@@ -1009,6 +1215,16 @@ fn sweep[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, now: int) -> [conn
         if st[p] == 1 && st[p + 1] == 1 && (st[p + tlsio.f_mode()] == tlsio.m_queued() || st[p + tlsio.f_mode()] == tlsio.m_handshake()) {
             // Before the handshake is done there is no HTTP to answer with: a client that is too slow is dropped, as the engine would drop it.
             if now >= st[p + 7] {
+                shared.drop_session(tab, core, k);
+            }
+        } else if st[p] == 1 && st[p + 1] == 1 && st[p + 3] == 6 {
+            // A tunnel: closed when it is older than `ws_max_lifetime_ms`, or nothing has moved for `ws_idle_timeout_ms` (docs/websocket.md section 7). No Close frame
+            // is sent: the gateway does not parse frames, so it cannot know where one ends.
+            if st[p + 12] != 0 && now >= st[p + 12] {
+                shared.meta_put(core, k, 68, 40, 1, websocket.tag(websocket.lifetime_rule()));
+                shared.drop_session(tab, core, k);
+            } else if st[p + 7] != 0 && now >= st[p + 7] {
+                shared.meta_put(core, k, 68, 40, 1, websocket.tag(websocket.idle_rule()));
                 shared.drop_session(tab, core, k);
             }
         } else if st[p] == 1 && st[p + 1] == 1 {
@@ -1140,7 +1356,7 @@ fn tls_turn[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, now: int, now_u
             queued = queued + 1;
         }
         if st[p] == 1 && st[p + 1] == 1 && st[p + tlsio.f_more()] == 1 && st[p + tlsio.f_mode()] >= tlsio.m_handshake() {
-            if st[p + 3] == 0 || st[p + 3] == 3 && st[p + 10] == 0 && st[p + 4] < shared.buf_size() && st[p + 14] == 0 {
+            if st[p + 3] == 0 || st[p + 3] == 3 && st[p + 10] == 0 && st[p + 4] < shared.buf_size() && st[p + 14] == 0 || st[p + 3] == 6 && st[p + 4] < shared.buf_size() && st[p + 14] == 0 {
                 let before = st[p + tlsio.f_prog()];
                 read_client(tab, core, k, now);
                 settle(tab, core, k);

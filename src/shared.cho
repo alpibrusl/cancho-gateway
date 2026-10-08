@@ -36,11 +36,26 @@ pub fn pend_size() -> [] int {
 }
 
 pub fn stride() -> [] int {
+    return 48;
+}
+
+// Client slot fields 40 to 47 are the WebSocket's (docs/websocket.md): 40 `ws_mode` (0 not an upgrade, 1 an upgrade asked for and not yet answered, 2 a tunnel),
+// 41 `ws_mask` (the route's subprotocols the client offered, as a bitmask). Fields 32 to 39 are TLS's (`gateway.tlsio`).
+pub fn ws_mode() -> [] int {
     return 40;
 }
 
+pub fn ws_mask() -> [] int {
+    return 41;
+}
+
+// The meta area of a client: 252 bytes of the request's record (see `gateway.proxy`), then the 28-byte accept value its upgrade is waiting for.
 pub fn meta_size() -> [] int {
-    return 256;
+    return 288;
+}
+
+pub fn ws_accept_at() -> [] int {
+    return 252;
 }
 
 // The access-log queue: lines wait here until the loop writes them (docs/observability.md section 3).
@@ -157,6 +172,21 @@ pub res struct Core {
     tls: tlsio.Tls,
 }
 
+// How many clients have an upgrade in progress (`open` false: and every tunnel) or only tunnels (`open` true).
+pub fn tunnels[&c](core: &c Core, open: bool) -> [] int {
+    let st = contents(core.state);
+    var n = 0;
+    var k = 0;
+    while k < slot_limit() {
+        let p = stride() * k;
+        if st[p] == 1 && st[p + 1] == 1 && (st[p + ws_mode()] == 2 || st[p + ws_mode()] == 1 && !open) {
+            n = n + 1;
+        }
+        k = k + 1;
+    }
+    return n;
+}
+
 pub fn token_of(k: int) -> [] int {
     return k + 1;
 }
@@ -212,6 +242,11 @@ pub fn session_begin[&c](core: &!c Core, k: int, now: int) -> [] int {
     st[p + 29] = 0;
     st[p + 30] = 0;
     st[p + 31] = 0;
+    var w = 40;
+    while w < 48 {
+        st[p + w] = 0;
+        w = w + 1;
+    }
     let base = k * meta_size();
     m[base + 1] = byte_of(0);
     m[base + 2] = byte_of(0);
@@ -270,7 +305,7 @@ pub fn log_end[&c](core: &!c Core, k: int) -> [] int {
     }
     var n = 0 - 1;
     if logq_size() - at >= accesslog.max_line() {
-        n = accesslog.line(q[at..at + accesslog.max_line()], ids[2] + st[p + 24], meta_get(core, k, 4, 0), meta_get(core, k, 108, 2), meta_get(core, k, 124, 3), route_name, upstream_name, st[p + 29], meta_get(core, k, 68, 1), outcome, now - st[p + 24], upstream_ms, st[p + 28], st[p + 27], st[p + tlsio.f_mode()] != 0);
+        n = accesslog.line(q[at..at + accesslog.max_line()], ids[2] + st[p + 24], meta_get(core, k, 4, 0), meta_get(core, k, 108, 2), meta_get(core, k, 124, 3), route_name, upstream_name, st[p + 29], meta_get(core, k, 68, 1), outcome, now - st[p + 24], upstream_ms, st[p + 28], st[p + 27], st[p + tlsio.f_mode()] != 0, st[p + ws_mode()] == 2);
     }
     if n < 0 {
         ids[5] = ids[5] + 1;

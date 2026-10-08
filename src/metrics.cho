@@ -121,8 +121,13 @@ fn tls_base() -> [] int {
     return rule_base() + 2 * rule_cap() + 2;
 }
 
-pub fn stats_len() -> [] int {
+// After the TLS counters: WebSocket upgrades relayed as tunnels (docs/websocket.md section 11).
+fn ws_base() -> [] int {
     return tls_base() + 2;
+}
+
+pub fn stats_len() -> [] int {
+    return ws_base() + 1;
 }
 
 pub fn names_len() -> [] int {
@@ -130,6 +135,11 @@ pub fn names_len() -> [] int {
 }
 
 pub fn gauge_len() -> [] int {
+    return 6 + 2 * upstreams();
+}
+
+// The gauge after the per-upstream pairs: WebSocket tunnels open.
+pub fn ws_gauge() -> [] int {
     return 5 + 2 * upstreams();
 }
 
@@ -251,6 +261,12 @@ pub fn tls_refused[&s, &n, &r](stats: &!s [int], names: &!n [byte], tag: &r [byt
         }
         stats[at] = stats[at] + 1;
     }
+    return 0;
+}
+
+// A WebSocket upgrade was relayed: the connection is a tunnel from here.
+pub fn ws_opened[&s](stats: &!s [int]) -> [] int {
+    stats[ws_base()] = stats[ws_base()] + 1;
     return 0;
 }
 
@@ -396,6 +412,10 @@ pub fn json[&o, &s, &n, &g](out: &!o [byte], at: int, stats: &s [int], names: &n
     k = jnum(out, k, "handshakes", stats[tls_base()]);
     k = out.put(out, k, ",");
     k = jnum(out, k, "failures", stats[tls_base() + 1]);
+    k = out.put(out, k, "},\"ws\":{");
+    k = jnum(out, k, "tunnels_total", stats[ws_base()]);
+    k = out.put(out, k, ",");
+    k = jnum(out, k, "tunnels_active", gauge[ws_gauge()]);
     k = out.put(out, k, "},\"log\":{");
     k = jnum(out, k, "dropped", gauge[3]);
     k = out.put(out, k, ",");
@@ -565,6 +585,10 @@ pub fn prometheus[&o, &s, &n, &g](out: &!o [byte], at: int, stats: &s [int], nam
     k = plain(out, k, "tls_handshakes_total", stats[tls_base()]);
     k = family(out, k, "tls_handshake_failures_total", "counter", "TLS connections ended before their handshake finished.");
     k = plain(out, k, "tls_handshake_failures_total", stats[tls_base() + 1]);
+    k = family(out, k, "ws_tunnels_total", "counter", "WebSocket upgrades relayed as tunnels.");
+    k = plain(out, k, "ws_tunnels_total", stats[ws_base()]);
+    k = family(out, k, "ws_tunnels_active", "gauge", "WebSocket tunnels open.");
+    k = plain(out, k, "ws_tunnels_active", gauge[ws_gauge()]);
     k = family(out, k, "log_dropped_total", "counter", "Access-log lines dropped because the queue was full.");
     k = plain(out, k, "log_dropped_total", gauge[3]);
     k = family(out, k, "log_write_failures_total", "counter", "Access-log writes that failed.");
@@ -653,11 +677,11 @@ pub fn frame[&o](out: &!o [byte], status: int, ctype: &static [byte], end: int) 
 }
 
 // An upper bound on the response to a scrape, for this deployment: what the buffer is sized to, and within a tenth of the largest answer there
-// can be (the unit test checks both). In the Prometheus text, which is the larger format: the families' comments and the four plain
-// lines (2,161 bytes, rounded up), a line for each rule and one for `other` (98 bytes: the name's 40 and an 18-digit number), per route
+// can be (the unit test checks both). In the Prometheus text, which is the larger format: the families' comments and the six plain
+// lines (2,6xx bytes, rounded up), a line for each rule and one for `other` (98 bytes: the name's 40 and an 18-digit number), per route
 // 24 lines (1,836 bytes and its name 24 times), per upstream 21 lines (1,615 bytes and its name 21 times).
 pub fn worst_case() -> [] int {
-    var bytes = head_room() + 2304 + 384 + (rule_cap() + 1) * 98 + 64;
+    var bytes = head_room() + 2624 + 384 + (rule_cap() + 1) * 98 + 64;
     var i = 0;
     while i < routes() {
         bytes = bytes + 1836 + 24 * len(route.name(i));
