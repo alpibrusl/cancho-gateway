@@ -6,6 +6,7 @@ outcome is "done" (the message ends; `consumed` bytes belong to it), "more" (val
 
 RFC = "RFC 9112 7.1"
 KETTLE = "Kettle 2019, 'HTTP Desync Attacks: Request Smuggling Reborn'"
+LLHTTP = "llhttp test/request (nodejs/llhttp), the malformed-request cases"
 
 CASES = [
     ("simple", b"5\r\nhello\r\n0\r\n\r\n", 100, "done", 15, 5, RFC),
@@ -48,4 +49,9 @@ CASES = [
     ("over-limit-across-chunks", b"3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n", 5, "refuse", "limit.body", None, "the total, not each chunk"),
     ("exactly-at-limit", b"5\r\nhello\r\n0\r\n\r\n", 5, "done", 15, 5, "the limit is inclusive"),
     ("huge-declared-size", b"FFFFFFFF\r\n", 1000000, "refuse", "limit.body", None, "a declared 4 GiB chunk is refused at the size line, not buffered"),
+    # --- llhttp's malformed chunked bodies (test/request/transfer-encoding.md), byte for byte
+    ("llhttp-ext-no-semicolon", b"2 erfrferferf\r\naa\r\n0 rrrr\r\n\r\n", 100, "refuse", "framing.chunk-size", None, LLHTTP + ": spaces where the size line ends"),
+    ("llhttp-ext-only-semicolon", b"2;\r\naa\r\n0\r\n\r\n", 100, "refuse", "framing.chunk-extension", None, LLHTTP + ": a chunk extension is refused, empty or not"),
+    ("llhttp-size-not-crlf", b"5\r\r;ABCD\r\n34\r\nE\r\n0\r\n\r\n", 100, "refuse", "framing.chunk-framing", None, LLHTTP + ": a bare CR after the size"),
+    ("llhttp-data-not-crlf", b"5\r\nABCDE0\r\n\r\n", 100, "refuse", "framing.chunk-framing", None, LLHTTP + ": the data runs past its size into the terminator"),
 ]

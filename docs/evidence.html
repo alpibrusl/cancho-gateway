@@ -194,7 +194,7 @@ nav a[aria-current] { color: var(--fg); font-weight: 650; }
   <h2>What is claimed, and what is not</h2>
   <div class="cols">
     <div><h3>Claimed, and measured</h3><ul>
-      <li>Requests with ambiguous framing are refused, each with a rule, against a corpus of 60 head cases and 39 chunked-body cases.</li>
+      <li>Requests with ambiguous framing are refused, each with a rule, against a corpus of 67 head cases (RFC 9112, Kettle 2019, and the llhttp malformed-request fixtures) and 43 chunked-body cases.</li>
       <li>No input in 3,000 fuzzed heads and bodies reaches a trap.</li>
       <li>Routing agrees with an independent reference on 4,800 generated requests.</li>
       <li>Header behaviour agrees with nginx 1.24 except where a table says why not.</li>
@@ -204,7 +204,7 @@ nav a[aria-current] { color: var(--fg); font-weight: 650; }
       <li>That the compiler proves the upstream set. It cannot narrow outbound addresses yet; the set is enforced in code and tested.</li>
       <li>That it is fast. It is slower than HAProxy on four of five cells and than nginx on POST bodies.</li>
       <li>That it is safe on the public internet: no TLS, no independent security review.</li>
-      <li>That the smuggling corpus is complete: it comes from RFC 9112 and one 2019 paper. The llhttp and nginx test suites have not been consulted, and framing has no differential against nginx (headers do).</li>
+      <li>That the smuggling corpus is complete: llhttp&rsquo;s request fixtures are absorbed (all 89 ran through the probe; the 11 that bear on framing are corpus cases), but the nginx test suite has not been consulted, and framing has no differential against nginx (headers do).</li>
     </ul></div>
   </div>
 </section>

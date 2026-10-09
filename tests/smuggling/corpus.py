@@ -9,6 +9,7 @@ issue #3; cases from them are added when they are read, and listed here by their
 H = b"Host: a\r\n"
 RFC9112 = "RFC 9112"
 KETTLE = "Kettle 2019, 'HTTP Desync Attacks: Request Smuggling Reborn' (PortSwigger)"
+LLHTTP = "llhttp test/request (nodejs/llhttp): the malformed-request fixtures, decoded the way its own runner decodes them"
 
 CASES = [
     # --- must be accepted: the baseline a proxy exists for
@@ -78,4 +79,14 @@ CASES = [
     ("head-at-limit", b"GET / HTTP/1.1\r\n" + H + b"X: " + b"a" * (16384 - 16 - len(H) - 3 - 2 - 2) + b"\r\n\r\n", 16, "accept", None, "design section 4 (limit.head): exactly 16384 bytes"),
     ("head-over-limit", b"GET / HTTP/1.1\r\n" + H + b"X: " + b"a" * (16384 - 16 - len(H) - 3 - 2 - 2 + 1) + b"\r\n\r\n", 16, "refuse", 431, "design section 4 (limit.head): 16385 bytes"),
     ("no-blank-line-over-limit", b"GET / HTTP/1.1\r\n" + H + b"X: " + b"a" * 16400, 16, "refuse", 431, "design section 4: a peer must not make the gateway buffer without bound"),
+    # --- llhttp's malformed requests (nodejs/llhttp test/request), byte for byte where the gateway is stricter
+    ("llhttp-cl-spaces-two-values", b"POST / HTTP/1.1\r\n" + H + b"Content-Length: 4 2\r\n\r\nq=42", 16, "refuse", 400, LLHTTP + " (content-length.md): one length only"),
+    ("llhttp-at-in-name", b"GET / HTTP/1.1\r\n" + H + b"Fo@: Failure\r\n\r\n", 16, "refuse", 400, LLHTTP + " (invalid.md): @ is not a token character"),
+    ("llhttp-ctrl-in-name", b"GET / HTTP/1.1\r\n" + H + b"Foo\x01\ttest: Bar\r\n\r\n", 16, "refuse", 400, LLHTTP + " (invalid.md): a control byte in a field name"),
+    ("llhttp-empty-name-2", b"GET / HTTP/1.1\r\n" + H + b": Bar\r\n\r\n", 16, "refuse", 400, LLHTTP + " (invalid.md): an empty field name"),
+    ("llhttp-illegal-fold", b"GET / HTTP/1.1\r\n" + H + b"name\r\n : value\r\n\r\n", 16, "refuse", 400, LLHTTP + " (invalid.md): a line fold in a field name"),
+    ("llhttp-corrupted-conn", b"GET / HTTP/1.1\r\n" + H + b"Connection\r\x1b5\xd5eep-Alive\r\n\r\n", 16, "refuse", 400, LLHTTP + " (invalid.md): control bytes inside a header"),
+    ("llhttp-corrupted-name", b"GET / HTTP/1.1\r\n" + H + b"X-Some-Header\r\x1b5\xd5eep-Alive\r\n\r\n", 16, "refuse", 400, LLHTTP + " (invalid.md): control bytes inside a header name"),
+    # llhttp accepts these in lenient mode and the gateway does not: its bare-lf, obs-fold and lenient-version
+    # fixtures are already covered above (bare-lf, te-in-obs-fold) or as policy decisions (framing.version).
 ]

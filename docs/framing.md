@@ -1,23 +1,27 @@
 # Request framing (task #3): what `std.http` already refuses, and what the gateway adds
 
-Status: **request-head framing (sections 1-5) and chunked-body framing (section 7) built and measured; the nginx
-differential and the llhttp/nginx corpora are not done** (section 6). Every number here is reproduced by `tests/smuggling/run.py` against the pinned compiler.
+Status: **request-head framing (sections 1-5) and chunked-body framing (section 7) built and measured; the llhttp request
+corpus is absorbed (section 1); the nginx differential is not done** (section 6). Every number here is reproduced by `tests/smuggling/run.py` against the pinned compiler.
 
 ## 1. Method
 
-`tests/smuggling/corpus.py` holds 60 cases, each with the request bytes, what the gateway must do (`accept`, `refuse` with a
+`tests/smuggling/corpus.py` holds 67 cases, each with the request bytes, what the gateway must do (`accept`, `refuse` with a
 status, or `more` for an incomplete head) and the source that makes it a case. `src/framing_probe.cho` is a small program
 (authority `args`, `io_write`; gated like the gateway) that takes the request as hex and answers one line, either through
 `std.http.parse` alone (the default) or through `gateway.framing.judge` (`gateway`). The corpus ran against `std.http`
 **first**, before any framing code was written; the gaps below are what it found.
 
-**Sources.** RFC 9112 sections (cited per case), RFC 9110 5.1/5.5/7.2, RFC 3986 2, and James Kettle, "HTTP Desync Attacks:
-Request Smuggling Reborn" (PortSwigger, 2019) for the Transfer-Encoding obfuscations. **Not yet consulted:** the llhttp and
-nginx test suites named in issue #3; no case claims to come from them.
+**Sources.** RFC 9112 sections (cited per case), RFC 9110 5.1/5.5/7.2, RFC 3986 2, James Kettle, "HTTP Desync Attacks:
+Request Smuggling Reborn" (PortSwigger, 2019) for the Transfer-Encoding obfuscations, and the llhttp request fixtures
+(nodejs/llhttp `test/request/`, decoded the way its own runner decodes them: newlines become CRLF, then escaped `\r \n \t \f \xHH`).
+**llhttp, absorbed:** all 89 request fixtures were run through the probe; the 11 that the gateway rules on -- bytes llhttp
+also rejects, or accepts only in a lenient mode the gateway does not enable -- are corpus cases, byte for byte. The rest
+are fixture-format artifacts (a head without its blank line is `more`, not a refusal), llhttp `pause` events (CONNECT/upgrade,
+a proxy decision, not framing), or pipelining. **Not yet consulted:** the nginx test suite named in issue #3.
 
 ## 2. `std.http` alone (measured)
 
-`python3 tests/smuggling/run.py`: **54 of 60 cases agree.** It already refuses: both-lengths (`Content-Length` with
+`python3 tests/smuggling/run.py`: **61 of 67 cases agree.** It already refuses: both-lengths (`Content-Length` with
 `Transfer-Encoding`), differing duplicate `Content-Length`, every malformed `Content-Length` (letters, sign, hex, empty, list,
 overflow), obfuscated or unknown `Transfer-Encoding` (including a space before the colon, a leading space, obs-fold), bare
 LF/CR, NUL and DEL in names or values, a space before a colon, missing or repeated `Host`, a header over the caller's limit,
@@ -86,7 +90,7 @@ here; `limit.head` triggers at 16 KiB, well under it.
 ## 6. Not done
 
 - **The differential run against nginx and one more parser.** nginx was not run here, for heads or bodies.
-- **The llhttp and nginx corpora**, and any case beyond the 60 head cases and 39 chunked cases.
+- **The nginx corpus**, and any case beyond the 67 head cases and 43 chunked cases. The llhttp request fixtures are absorbed (section 1); its chunked cases were checked against `chunked.advance` (four are now corpus cases) and its response fixtures against the response corpus are not done.
 - **The relay itself** (#5): `chunked.advance` frames and counts; copying the bytes to an upstream is the proxy core's job.
 - Status for `framing.version` on `HTTP/1.0` with `Transfer-Encoding` (RFC 9112 6.1: a 1.0 request must not carry it) is
   not decided: today it is treated like 1.1.
