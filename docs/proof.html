@@ -262,7 +262,7 @@ python3 -m http.server 9000
 <span class="r">HTTP/1.1 501 ... "rule":"framing.method-unsupported"</span>
 <span class="b">curl -i http://127.0.0.1:8080/ -H 'Host: a' --data-binary @2MB</span>
 <span class="r">HTTP/1.1 413 ... "rule":"limit.body"</span></pre></div>
-  <p>Every one of these closes the connection. The framing rules are deliberately stricter than the RFC where tolerance is a smuggling lever: chunk extensions refused, trailer fields refused, no whitespace around a chunk size. <a href="evidence.html#framing">The evidence page</a> has the corpus (60 head cases, 39 chunked-body cases) and what running it found.</p>
+  <p>Every one of these closes the connection. The framing rules are deliberately stricter than the RFC where tolerance is a smuggling lever: chunk extensions refused, trailer fields refused, no whitespace around a chunk size. <a href="evidence.html#framing">The evidence page</a> has the corpus (67 head cases, 43 chunked-body cases, llhttp&rsquo;s among them) and what running it found.</p>
   <p class="note">The demo binary&rsquo;s own report ships with the release: <code>cancho-gateway-demo.authority.json</code>, built in CI from the same committed sources (<a href="examples.html#download">download</a>).</p>
   <p class="note">Or send your bytes from the browser: <a href="lab.html">the refusal lab</a> &mdash; the same framing judge, verified against the probe&rsquo;s recorded answers on every load.</p>
 </section>
