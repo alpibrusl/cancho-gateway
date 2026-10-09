@@ -143,7 +143,7 @@ nav a[aria-current] { color: var(--fg); font-weight: 650; }
 <header class="top"><div class="wrap">
   <a class="brand" href="index.html"><img class="mark" src="mark.png" alt="" width="30" height="30">cancho-gateway</a>
   <nav aria-label="Sections">
-    <a href="index.html" class="opt">Overview</a><a href="examples.html" class="opt">Examples</a><a href="evidence.html" class="opt">Evidence</a><a href="proof.html" aria-current="page">Proof</a><a href="index.html#numbers" class="opt">Numbers</a><a href="examples.html#download">Download</a>
+    <a href="index.html" class="opt">Overview</a><a href="examples.html" class="opt">Examples</a><a href="evidence.html" class="opt">Evidence</a><a href="proof.html" aria-current="page">Proof</a><a href="lab.html">Lab</a><a href="index.html#numbers" class="opt">Numbers</a><a href="examples.html#download">Download</a>
     <a href="https://github.com/alpibrusl/cancho-gateway" class="opt">GitHub</a>
   </nav>
 </div></header>
@@ -257,6 +257,7 @@ python3 -m http.server 9000
 <span class="r">HTTP/1.1 413 ... "rule":"limit.body"</span></pre></div>
   <p>Every one of these closes the connection. The framing rules are deliberately stricter than the RFC where tolerance is a smuggling lever: chunk extensions refused, trailer fields refused, no whitespace around a chunk size. <a href="evidence.html#framing">The evidence page</a> has the corpus (60 head cases, 39 chunked-body cases) and what running it found.</p>
   <p class="note">The demo binary&rsquo;s own report ships with the release: <code>cancho-gateway-demo.authority.json</code>, built in CI from the same committed sources (<a href="examples.html#download">download</a>).</p>
+  <p class="note">Or send your bytes from the browser: <a href="lab.html">the refusal lab</a> &mdash; the same framing judge, verified against the probe&rsquo;s recorded answers on every load.</p>
 </section>
 
 <section id="limits">

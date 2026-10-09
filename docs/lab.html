@@ -1,0 +1,633 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cancho-gateway lab: send bytes, get the refusal</title>
+<meta name="description" content="Send any request head and the gateway framing judge answers in your browser: accept, or refuse with a rule tag. Verified against the recorded corpus.">
+<link rel="canonical" href="https://alpibrusl.github.io/cancho-gateway/lab.html">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#265e8d">
+<meta property="og:site_name" content="cancho-gateway">
+<meta property="og:locale" content="en">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://alpibrusl.github.io/cancho-gateway/lab.html">
+<meta property="og:title" content="cancho-gateway: the refusal lab">
+<meta property="og:description" content="Send any request head at the gateway judge, in your browser: accept, a refusal with its rule tag, or read more. Verified against the recorded corpus on every load.">
+<meta property="og:image" content="https://alpibrusl.github.io/cancho-gateway/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="cancho-gateway: the refusal lab, in your browser.">>
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="cancho-gateway: the refusal lab">
+<meta name="twitter:description" content="Send any request head at the gateway judge, in your browser: accept, a refusal with its rule tag, or read more. Verified against the recorded corpus on every load.">
+<meta name="twitter:image" content="https://alpibrusl.github.io/cancho-gateway/og.png">
+<script type="application/ld+json">{ "@context": "https://schema.org", "@graph": [  {   "@type": "WebPage",   "name": "cancho-gateway lab: send bytes, get the refusal",   "description": "Send any request head and the gateway framing judge answers in your browser: accept, or refuse with a rule tag. Verified against the recorded corpus.",   "url": "https://alpibrusl.github.io/cancho-gateway/lab.html",   "isPartOf": { "@type": "WebSite", "name": "cancho-gateway", "url": "https://alpibrusl.github.io/cancho-gateway/" }  },  {   "@type": "BreadcrumbList",   "itemListElement": [    { "@type": "ListItem", "position": 1, "name": "cancho-gateway", "item": "https://alpibrusl.github.io/cancho-gateway/" },    { "@type": "ListItem", "position": 2, "name": "Lab", "item": "https://alpibrusl.github.io/cancho-gateway/lab.html" }   ]  } ]}</script>
+<meta name="color-scheme" content="light dark">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="icon" type="image/png" sizes="64x64" href="favicon.png">
+<style>
+
+:root {
+  --bg: #fbfbfc; --fg: #14171c; --muted: #566170; --line: #e1e4ea; --surface: #ffffff; --soft: #f0f3f6;
+  --accent: #265e8d; --accent-fg: #ffffff; --good: #0f7b5f; --warn: #92400e; --warn-bg: #fdf6e7; --warn-line: #e0b765; --bad: #d1362f;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0d1217; --fg: #e8eaee; --muted: #9ba5b3; --line: #232932; --surface: #141a21; --soft: #182029;
+    --accent: #6fa3d6; --accent-fg: #0a1522; --good: #4fd1a5; --warn: #f3c77a; --warn-bg: #1d1a12; --warn-line: #8a6a2a; --bad: #ff6b63; }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; scroll-padding-top: 4rem; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 1rem/1.6 var(--font); }
+a { color: var(--accent); text-underline-offset: .15em; }
+.wrap { width: 100%; max-width: 68rem; margin: 0 auto; padding: 0 20px; }
+.skip { position: absolute; left: 16px; top: -4rem; background: var(--accent); color: var(--accent-fg); padding: .5rem .8rem; border-radius: 6px; z-index: 9; }
+.skip:focus { top: 8px; }
+a:focus-visible, .btn:focus-visible, pre:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+header.top { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+header.top .wrap { display: flex; align-items: center; gap: 1.5rem; height: 3.4rem; }
+.brand { font: 700 1rem var(--mono); color: var(--fg); text-decoration: none; letter-spacing: -.01em; white-space: nowrap; }
+nav { display: flex; gap: 1.2rem; margin-left: auto; }
+nav a { color: var(--muted); text-decoration: none; font-size: .93rem; white-space: nowrap; }
+nav a:hover { color: var(--fg); }
+@media (max-width: 40rem) { nav a.opt { display: none; } }
+
+h1 { font-size: clamp(2.3rem, 6.2vw, 4rem); line-height: 1.04; letter-spacing: -.035em; margin: 0 0 1rem; font-weight: 750; }
+h2 { font-size: clamp(1.6rem, 3.4vw, 2.2rem); line-height: 1.15; letter-spacing: -.025em; margin: 0 0 .5rem; font-weight: 700; }
+h3 { font-size: 1.05rem; margin: 0 0 .25rem; }
+p { margin: 0 0 1rem; }
+section { padding: 4.5rem 0 0; }
+.lead { font-size: 1.2rem; color: var(--muted); max-width: 34rem; }
+.sub { color: var(--muted); max-width: 38rem; }
+code { font-family: var(--mono); font-size: .9em; background: var(--soft); padding: .1em .35em; border-radius: 5px; }
+
+.hero { padding: 4rem 0 0; display: grid; gap: 2.5rem; align-items: center; }
+@media (min-width: 58rem) { .hero { grid-template-columns: 1.05fr 1fr; } }
+.badge { display: inline-flex; gap: .5rem; align-items: center; font-size: .82rem; color: var(--warn); background: var(--warn-bg); border: 1px solid var(--warn-line); padding: .22rem .7rem; border-radius: 999px; margin-bottom: 1.2rem; text-decoration: none; }
+.badge i { width: .5rem; height: .5rem; border-radius: 50%; background: var(--warn-line); display: inline-block; }
+.cta { display: flex; flex-wrap: wrap; gap: .7rem; margin-top: 1.6rem; }
+.btn { display: inline-block; padding: .65rem 1.15rem; border-radius: 8px; font-weight: 600; text-decoration: none; border: 1px solid var(--accent); }
+.btn.primary { background: var(--accent); color: var(--accent-fg); }
+.btn.ghost { color: var(--accent); }
+.btn.ghost:hover { background: var(--soft); }
+
+.term { background: #0d1117; color: #d6dde8; border: 1px solid #262c36; border-radius: 12px; font: .84rem/1.65 var(--mono); padding: 1rem 1.1rem 1.1rem; box-shadow: 0 18px 50px -24px rgba(20, 30, 70, .55); overflow-x: auto; }
+.term .bar { display: flex; gap: .35rem; margin-bottom: .8rem; }
+.term .bar i { width: .65rem; height: .65rem; border-radius: 50%; background: #2d3440; display: block; }
+.term .c { color: #7d8797; } .term .g { color: #5fd3a6; } .term .b { color: #8cb0ff; } .term .y { color: #e8c170; } .term .r { color: #ff8b82; }
+.term pre { margin: 0; white-space: pre; }
+
+.three { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); margin-top: 3.2rem; }
+.three div { border-top: 3px solid var(--accent); padding-top: .8rem; }
+.three p { color: var(--muted); margin: 0; font-size: .96rem; }
+
+.figure { margin: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 1.2rem; }
+.figure.wide { margin-top: 2rem; }
+.figure svg, .figure img { display: block; width: 100%; height: auto; }
+.figure h3 { margin-bottom: .6rem; }
+.figure figcaption { color: var(--muted); font-size: .88rem; margin-top: .8rem; }
+.two { display: grid; gap: 1rem; grid-template-columns: 1fr; margin-top: 2rem; }
+@media (min-width: 52rem) { .two { grid-template-columns: 1fr 1fr; } }
+svg .t { fill: var(--fg); font: 600 13px var(--font); } svg .s { fill: var(--muted); font: 12px var(--font); }
+svg .box { fill: var(--surface); stroke: var(--line); stroke-width: 1.4; } svg .hot { fill: var(--soft); stroke: var(--accent); stroke-width: 2; }
+svg .ar { stroke: var(--muted); stroke-width: 1.5; fill: none; } svg .dash { stroke-dasharray: 5 4; }
+svg .dot { fill: var(--accent); } svg .axis { stroke: var(--line); stroke-width: 2; }
+svg .bar1 { fill: var(--accent); } svg .bar2 { fill: var(--line); }
+
+.grid { display: grid; gap: 1px; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); background: var(--line); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; margin-top: 2rem; }
+.grid div { background: var(--surface); padding: 1.1rem 1.2rem; }
+.grid p { color: var(--muted); font-size: .93rem; margin: 0; }
+
+.stats { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); margin: 2rem 0 0; }
+.stats div { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 1rem 1.1rem; }
+.stats b { display: block; font: 700 1.9rem/1.1 var(--font); letter-spacing: -.03em; }
+.stats span { color: var(--muted); font-size: .88rem; }
+.note { color: var(--muted); font-size: .88rem; margin-top: .9rem; }
+
+pre.code { background: var(--soft); border: 1px solid var(--line); border-radius: 12px; padding: 1rem 1.1rem; font: .86rem/1.65 var(--mono); overflow-x: auto; margin: 1.4rem 0 0; }
+.status { margin-top: 4.5rem; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 14px; padding: 1.3rem 1.5rem; }
+.status h2 { font-size: 1.2rem; letter-spacing: -.01em; }
+.status ul { margin: .4rem 0 0; padding-left: 1.2rem; color: var(--muted); }
+footer { margin-top: 4rem; border-top: 1px solid var(--line); padding: 1.6rem 0 2.6rem; color: var(--muted); font-size: .9rem; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: .5rem 1.6rem; }
+table.fit { width: 100%; border-collapse: collapse; margin-top: 2rem; font-size: .95rem; }
+table.fit th, table.fit td { text-align: left; padding: .8rem .9rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+table.fit thead th { color: var(--muted); font-weight: 600; font-size: .85rem; }
+table.fit tbody th { font-weight: 650; }
+table.fit td { color: var(--muted); }
+table.fit tr.us { background: var(--soft); } table.fit tr.us td, table.fit tr.us th { color: var(--fg); }
+@media (max-width: 44rem) { .fitwrap { overflow-x: auto; } table.fit.wide { min-width: 38rem; } }
+.cols { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); margin-top: 1.4rem; }
+.cols > div { border: 1px solid var(--line); border-radius: 14px; padding: 1.1rem 1.3rem; background: var(--surface); }
+.cols ul { margin: .4rem 0 0; padding-left: 1.1rem; color: var(--muted); } .cols li { margin: .25rem 0; }
+.cols .no h3 { color: var(--muted); }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+.logo { display: block; width: 11rem; height: auto; border-radius: 14px; background: #fff; padding: .35rem; border: 1px solid var(--line); margin-bottom: 1.4rem; }
+header.top img.mark { width: 1.9rem; height: 1.9rem; display: block; }
+header.top .brand { display: inline-flex; align-items: center; gap: .55rem; }
+table.fit.num td, table.fit.num th { white-space: nowrap; } table.fit.num td.n { text-align: right; font-variant-numeric: tabular-nums; }
+.good { color: var(--good); } .bad { color: var(--bad); }
+pre code { padding: 0; background: none; }
+.two { align-items: start; }
+h3[id] { margin-top: 2rem; }
+table.fit.wide tbody th { white-space: nowrap; }
+nav a[aria-current] { color: var(--fg); font-weight: 650; }
+
+/* lab */
+.labgrid { display: grid; gap: 1.4rem; margin-top: 1.6rem; }
+@media (min-width: 52rem) { .labgrid { grid-template-columns: 1.1fr 1fr; } }
+.labpanel { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 1rem 1.1rem; }
+.labpanel h3 { margin-bottom: .6rem; }
+textarea#labin { width: 100%; min-height: 11rem; font: .85rem/1.55 var(--mono); background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: .7rem; resize: vertical; }
+textarea#labin:focus-visible { outline: 3px solid var(--accent); outline-offset: 1px; }
+.labbar { display: flex; flex-wrap: wrap; gap: .5rem; margin: .7rem 0; align-items: center; }
+.labbar select { font: .9rem var(--font); background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: .3rem .4rem; }
+.verdict { font: 600 1rem var(--mono); padding: .45rem .8rem; border-radius: 8px; display: inline-block; margin: .2rem 0 .8rem; }
+.verdict.accept { color: var(--good); border: 1px solid var(--good); }
+.verdict.refuse { color: var(--bad); border: 1px solid var(--bad); }
+.verdict.more { color: var(--muted); border: 1px solid var(--muted); }
+.verdict.broken { color: var(--warn); border: 1px solid var(--warn); }
+#labout { font: .84rem/1.65 var(--mono); white-space: pre-wrap; word-break: break-word; margin: 0; }
+#labout .r { color: var(--bad); } #labout .g { color: var(--good); } #labout .c { color: var(--muted); } #labout .y { color: var(--warn); }
+.selfcheck { font-size: .88rem; color: var(--muted); border-top: 1px dashed var(--line); margin-top: .9rem; padding-top: .7rem; }
+.selfcheck b.ok { color: var(--good); } .selfcheck b.bad { color: var(--bad); }
+.replay { margin-top: .8rem; }
+.replay .bar0 { height: 8px; border-radius: 4px; background: var(--soft); border: 1px solid var(--line); overflow: hidden; }
+.replay .bar0 i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .05s linear; }
+.replay .cap { display: flex; justify-content: space-between; font: .78rem var(--mono); color: var(--muted); margin-top: .25rem; }
+.ctl { cursor: pointer; font: .88rem var(--font); padding: .3rem .8rem; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+.ctl:hover { border-color: var(--accent); }
+.ctl[disabled] { opacity: .45; cursor: default; }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top"><div class="wrap">
+  <a class="brand" href="index.html"><img class="mark" src="mark.png" alt="" width="30" height="30">cancho-gateway</a>
+  <nav aria-label="Sections">
+    <a href="index.html" class="opt">Overview</a><a href="examples.html" class="opt">Examples</a><a href="evidence.html" class="opt">Evidence</a><a href="proof.html" class="opt">Proof</a><a href="lab.html" aria-current="page">Lab</a><a href="proof.html">Proof</a><a href="index.html#numbers" class="opt">Numbers</a><a href="examples.html#download">Download</a>
+    <a href="https://github.com/alpibrusl/cancho-gateway" class="opt">GitHub</a>
+  </nav>
+</div></header>
+
+<main id="main" class="wrap">
+<div class="hero" id="top">
+  <div>
+    <a class="badge" href="#honesty"><i></i>Every verdict here is checked against the binary&rsquo;s own answers</a>
+    <h1>The refusal lab</h1>
+    <p class="lead">Type any HTTP request head &mdash; hostile, malformed, smuggled, or perfectly ordinary &mdash; and the gateway&rsquo;s framing judge answers in your browser: <strong>accept</strong>, <strong>refuse</strong> with a rule tag, or <strong>read more</strong>. No server, no binary download: the judge is the gateway&rsquo;s own decision code, ported byte for byte, and it proves on every load that it agrees with what the real probe answered.</p>
+    <div class="cta"><a class="btn primary" href="#lab">Send bytes</a><a class="btn ghost" href="proof.html">The proof behind it</a><a class="btn ghost" href="#honesty">What this is not</a></div>
+  </div>
+  <div class="term" role="img" aria-label="A sample verdict: two body lengths refused with rule framing.two-lengths"><div class="bar"><i></i><i></i><i></i></div><pre><span class="c">$ you type:</span>
+POST /x HTTP/1.1
+Host: a
+Content-Length: 5
+<span class="y">Transfer-Encoding: chunked</span>
+<span class="c">$ the gateway answers:</span>
+<span class="r">HTTP/1.1 400  "rule":"framing.two-lengths"</span></pre></div>
+</div>
+
+<section id="lab">
+  <h2>Send it</h2>
+  <p class="sub">In <strong>text</strong> mode your Enter becomes CRLF (a real gateway refuses the bare LF you can actually type &mdash; the corpus below proves it); escapes <code>\r</code> <code>\n</code> <code>\t</code> <code>\xHH</code> are read. In <strong>hex</strong> mode the bytes are exactly yours.</p>
+  <div class="labgrid">
+    <div class="labpanel">
+      <h3>Your bytes</h3>
+      <div class="labbar">
+        <select id="labmode" aria-label="Input mode"><option value="text">text</option><option value="hex">hex</option></select>
+        <label style="font-size:.88rem"><input type="checkbox" id="crlf" checked> Enter = CRLF</label>
+        <select id="labcase" aria-label="Load a corpus case"><option value="">load a corpus case&hellip;</option></select>
+      </div>
+      <textarea id="labin" spellcheck="false" aria-label="The request head to judge">GET / HTTP/1.1
+Host: a
+</textarea>
+      <div class="labbar">
+        <button class="ctl" id="go">Judge it</button>
+        <button class="ctl" id="replaybtn">Replay byte by byte</button>
+        <span class="cap" id="bytecount"></span>
+      </div>
+      <div class="replay" id="replaybox" hidden>
+        <div class="bar0"><i id="replaybar"></i></div>
+        <div class="cap"><span id="replayat">byte 0</span><span id="replayverdict"></span></div>
+      </div>
+    </div>
+    <div class="labpanel">
+      <h3>The gateway&rsquo;s answer</h3>
+      <div id="verdictbox"><span class="verdict more">type something</span></div>
+      <pre id="labout"><span class="c">the verdict and, on a refusal, the problem+json body the gateway
+would send, and the access-log line it would write.</span></pre>
+      <p class="selfcheck" id="selfcheck">self-check: running&hellip;</p>
+    </div>
+  </div>
+</section>
+
+<section id="corpus">
+  <h2>The corpus, agreed in advance</h2>
+  <p class="sub">The smuggling corpus of <code>tests/smuggling/corpus.py</code> &mdash; RFC 9112 and Kettle 2019 cases &mdash; was run through the real probe at the pinned compiler, and its 57 answers recorded in <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/docs/lab-corpus.json"><code>docs/lab-corpus.json</code></a> (regenerated and checked in CI). On every load this page re-judges all of them and shows the count above; a disagreement would show here in red, and the lab&rsquo;s claim would be dead.</p>
+  <p class="note">The three head-limit cases (16 KiB of padding) are constructed by the corpus runner, not carried in the file; the lab does not replay them.</p>
+</section>
+
+<section id="honesty">
+  <h2>What this is, honestly</h2>
+  <ul>
+    <li><strong>The judge is the gateway&rsquo;s decision code, ported</strong> &mdash; <code>std.http.parse</code> and <code>framing.judge</code>, the same branches in the same order &mdash; not a re-imagining. It is verified against the probe&rsquo;s recorded answers, which is a strong check, not a proof of equivalence on every input.</li>
+    <li><strong>Nothing here runs the binary.</strong> No socket, no gateway process, no authority report is involved in your browser session. The demo binary is in the <a href="examples.html#download">release</a>; the framing rules are <a href="evidence.html#framing">evidenced here</a>.</li>
+    <li><strong>The lab judges heads, not routes.</strong> A head that is accepted here still has to find a route, a method and an upstream &mdash; those refusals (<code>route.none</code>, <code>limit.body</code>, and the rest) are the proxy&rsquo;s, and they need the binary.</li>
+    <li><strong>Request ids are elided</strong> (<code>&hellip;</code>): a real one is issued per connection by the binary.</li>
+  </ul>
+</section>
+</main>
+<script>
+(function () {
+  "use strict";
+  var HEAD_LIMIT = 16384, STD_HEAD = 65536;
+
+  var CL = new Uint8Array(256);
+  for (var c = 0; c < 256; c++) {
+    var v = 0;
+    var letter = (c >= 65 && c <= 90) || (c >= 97 && c <= 122), digit = c >= 48 && c <= 57;
+    if (letter || digit || c === 33 || c === 35 || c === 36 || c === 37 || c === 38 || c === 39 || c === 42 ||
+        c === 43 || c === 45 || c === 46 || c === 94 || c === 95 || c === 96 || c === 124 || c === 126) v += 1;
+    if (c === 9 || (c >= 32 && c !== 127)) v += 2;
+    if (c > 32 && c < 127) v += 4;
+    CL[c] = v;
+  }
+  function tchar(b) { return (CL[b] & 1) !== 0; }
+  function vchar(b) { return (CL[b] & 2) !== 0; }
+  function ows(b) { return b === 32 || b === 9; }
+  function tget(b) { return (CL[b] & 4) !== 0; }
+  function lower(b) { return b >= 65 && b <= 90 ? b + 32 : b; }
+  function eqLower(src, s, e, lit) {
+    if (e - s !== lit.length) return false;
+    for (var i = 0; i < lit.length; i++) if (lower(src[s + i]) !== lit.charCodeAt(i)) return false;
+    return true;
+  }
+  function digitsValue(src, s, e) {
+    if (e <= s || e - s > 15) return -1;
+    var v = 0;
+    for (var i = s; i < e; i++) {
+      var b = src[i];
+      if (b < 48 || b > 57) return -1;
+      v = v * 10 + (b - 48);
+    }
+    return v;
+  }
+  function listsToken(src, s, e, tok) {
+    var at = s;
+    while (at < e) {
+      var stop = at;
+      while (stop < e && src[stop] !== 44) stop++;
+      var from = at, to = stop;
+      while (from < stop && ows(src[from])) from++;
+      while (to > from && ows(src[to - 1])) to--;
+      if (eqLower(src, from, to, tok)) return true;
+      at = stop + 1;
+    }
+    return false;
+  }
+  function headEnd(src, limit) {
+    for (var i = 3; i < limit; i++)
+      if (src[i] === 10 && src[i - 1] === 13 && src[i - 2] === 10 && src[i - 3] === 13) return i - 3;
+    return -1;
+  }
+
+  // std.http.parse: {accept: bodyStart, headers, version, length, chunked} | {more:true} | {fail: pos, code, headers}
+  function parse(src, capacity) {
+    var n = src.length, limit = n > STD_HEAD ? STD_HEAD : n;
+    var blank = headEnd(src, limit);
+    if (blank < 0) {
+      if (n >= STD_HEAD) return { fail: STD_HEAD, code: 10, headers: [] };
+      return { more: true };
+    }
+    var linesEnd = blank + 2, at = 0;
+    var headers = [];
+    while (at < linesEnd && tchar(src[at])) at++;
+    if (at === 0) return { fail: 0, code: 3, headers: headers };
+    if (src[at] !== 32) return { fail: at, code: 2, headers: headers };
+    var methodEnd = at; at++;
+    var targetStart = at, pathEnd = -1;
+    while (at < linesEnd && tget(src[at])) {
+      if (src[at] === 35) return { fail: at, code: 4, headers: headers };
+      if (pathEnd < 0 && src[at] === 63) pathEnd = at;
+      at++;
+    }
+    if (at === targetStart) return { fail: at, code: 4, headers: headers };
+    var targetEnd = at;
+    if (src[at] !== 32) return { fail: at, code: 2, headers: headers };
+    at++;
+    if (at + 10 > linesEnd) return { fail: at, code: 5, headers: headers };
+    if (!(src[at] === 72 && src[at + 1] === 84 && src[at + 2] === 84 && src[at + 3] === 80 && src[at + 4] === 47 &&
+          src[at + 5] === 49 && src[at + 6] === 46)) return { fail: at, code: 5, headers: headers };
+    var minor = src[at + 7], version = 0;
+    if (minor === 49) version = 11; else if (minor === 48) version = 10;
+    else return { fail: at + 7, code: 5, headers: headers };
+    at += 8;
+    if (src[at] !== 13 || src[at + 1] !== 10) return { fail: at, code: 2, headers: headers };
+    at += 2;
+    while (at < linesEnd) {
+      if (ows(src[at])) return { fail: at, code: 9, headers: headers };
+      var nameStart = at;
+      while (at < linesEnd && tchar(src[at])) at++;
+      if (at === nameStart || at >= linesEnd || src[at] !== 58) return { fail: at, code: 6, headers: headers };
+      var nameEnd = at; at++;
+      while (at < linesEnd && ows(src[at])) at++;
+      var valueStart = at;
+      while (at < linesEnd && vchar(src[at])) at++;
+      if (at + 1 >= linesEnd) return { fail: at, code: 6, headers: headers };
+      if (src[at] !== 13 || src[at + 1] !== 10) return { fail: at, code: 6, headers: headers };
+      var valueEnd = at;
+      while (valueEnd > valueStart && ows(src[valueEnd - 1])) valueEnd--;
+      if (headers.length >= capacity) return { fail: nameStart, code: 7, headers: headers };
+      headers.push({ ns: nameStart, ne: nameEnd, vs: valueStart, ve: valueEnd });
+      at += 2;
+    }
+    var length = -1, chunked = false, hosts = 0, closing = false, keeping = false;
+    for (var i = 0; i < headers.length; i++) {
+      var h = headers[i];
+      if (eqLower(src, h.ns, h.ne, "content-length")) {
+        var val = digitsValue(src, h.vs, h.ve);
+        if (val < 0) return { fail: h.vs, code: 8, headers: headers };
+        if (length >= 0 && length !== val) return { fail: h.vs, code: 8, headers: headers };
+        length = val;
+      } else if (eqLower(src, h.ns, h.ne, "transfer-encoding")) {
+        if (!eqLower(src, h.vs, h.ve, "chunked")) return { fail: h.vs, code: 11, headers: headers };
+        chunked = true;
+      } else if (eqLower(src, h.ns, h.ne, "host")) {
+        hosts++;
+      } else if (eqLower(src, h.ns, h.ne, "connection")) {
+        if (listsToken(src, h.vs, h.ve, "close")) closing = true;
+        if (listsToken(src, h.vs, h.ve, "keep-alive")) keeping = true;
+      }
+    }
+    if (chunked && length >= 0) return { fail: 0, code: 11, headers: headers };
+    if (version === 11 && hosts !== 1) return { fail: 0, code: 12, headers: headers };
+    return { accept: blank + 4, headers: headers, version: version, length: length, chunked: chunked,
+             methodEnd: methodEnd, targetStart: targetStart, targetEnd: targetEnd };
+  }
+
+  // framing.judge and its classify: the gateway's verdict on a head, at a capacity.
+  function wellFormedVersion(src) {
+    var end = 0;
+    while (end < src.length && src[end] !== 13 && src[end] !== 10) end++;
+    if (end < 8) return false;
+    var spaces = 0;
+    for (var k = 0; k < end; k++) if (src[k] === 32) spaces++;
+    if (spaces !== 2) return false;
+    var v = end - 8;
+    return src[v] === 72 && src[v + 1] === 84 && src[v + 2] === 84 && src[v + 3] === 80 && src[v + 4] === 47 &&
+           src[v + 5] >= 48 && src[v + 5] <= 57 && src[v + 6] === 46 && src[v + 7] >= 48 && src[v + 7] <= 57;
+  }
+  function countNamed(src, headers, name) {
+    var found = 0;
+    for (var i = 0; i < headers.length; i++) if (eqLower(src, headers[i].ns, headers[i].ne, name)) found++;
+    return found;
+  }
+  function classify(src, headers, fail) {
+    switch (fail.code) {
+      case 2: return 1;
+      case 3: return 2;
+      case 4: return 4;
+      case 5: return wellFormedVersion(src) ? 6 : 1;
+      case 6: return 7;
+      case 7: return 14;
+      case 8: return 9;
+      case 9: return 8;
+      case 10: return 15;
+      case 11:
+        if (countNamed(src, headers, "content-length") > 0) return 10;
+        if (countNamed(src, headers, "transfer-encoding") > 1) return 12;
+        return 11;
+      case 12: return 13;
+    }
+    return 1;
+  }
+  function methodIs(src, accept, word) {
+    if (accept.methodEnd !== word.length) return false;
+    for (var i = 0; i < word.length; i++) if (src[i] !== word.charCodeAt(i)) return false;
+    return true;
+  }
+  var TAGS = { 1: "framing.request-line", 2: "framing.method", 3: "framing.method-unsupported", 4: "framing.target",
+    5: "framing.target-form", 6: "framing.version", 7: "framing.header", 8: "framing.fold", 9: "framing.length",
+    10: "framing.two-lengths", 11: "framing.transfer-encoding", 12: "framing.transfer-encoding-repeated",
+    13: "framing.host", 14: "limit.headers", 15: "limit.head", 16: "framing.line-ending" };
+  function statusOf(rule) {
+    if (rule === 3 || rule === 11) return 501;
+    if (rule === 6) return 505;
+    if (rule === 14 || rule === 15) return 431;
+    if (rule >= 1 && rule <= 20) return 400;
+    return 0;
+  }
+  function judge(src, capacity) {
+    var r = parse(src, capacity);
+    if (r.more) {
+      if (src.length >= HEAD_LIMIT) return { outcome: "refuse", rule: 15 };
+      for (var i = 0; i < src.length; i++)
+        if (src[i] === 10 && (i === 0 || src[i - 1] !== 13)) return { outcome: "refuse", rule: 16 };
+      return { outcome: "more" };
+    }
+    if (r.fail !== undefined) {
+      var rule = classify(src, r.headers || [], r);
+      return { outcome: "refuse", rule: rule };
+    }
+    if (r.accept > HEAD_LIMIT) return { outcome: "refuse", rule: 15 };
+    if (methodIs(src, r, "CONNECT")) return { outcome: "refuse", rule: 3 };
+    if (r.targetEnd === r.targetStart) return { outcome: "refuse", rule: 4 };
+    if (src[r.targetStart] !== 47) {
+      if (!(methodIs(src, r, "OPTIONS") && r.targetEnd - r.targetStart === 1 && src[r.targetStart] === 42))
+        return { outcome: "refuse", rule: 5 };
+    }
+    if (countNamed(src, r.headers, "content-length") > 1) return { outcome: "refuse", rule: 9 };
+    if (countNamed(src, r.headers, "transfer-encoding") > 1) return { outcome: "refuse", rule: 12 };
+    return { outcome: "accept", at: r.accept, version: r.version, length: r.length, chunked: r.chunked };
+  }
+
+  // ---- UI ----
+  function $(id) { return document.getElementById(id); }
+  var mode = "text";
+  function unescapeText(t) {
+    var out = [], i = 0;
+    while (i < t.length) {
+      var ch = t.charAt(i);
+      if (ch === "\\" && i + 1 < t.length) {
+        var n = t.charAt(i + 1);
+        if (n === "r") { out.push(13); i += 2; continue; }
+        if (n === "n") { out.push(10); i += 2; continue; }
+        if (n === "t") { out.push(9); i += 2; continue; }
+        if (n === "x") {
+          var hex = t.substr(i + 2, 2);
+          if (/^[0-9a-fA-F]{2}$/.test(hex)) { out.push(parseInt(hex, 16)); i += 4; continue; }
+        }
+      }
+      var code = t.codePointAt(i);
+      if (code > 126) { showBroken("only bytes up to 0x7e can be typed; use \\xHH"); return null; }
+      out.push(code); i++;
+    }
+    return Uint8Array.from(out);
+  }
+  function textBytes() {
+    var t = $("labin").value;
+    if ($("crlf").checked) {
+      t = t.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\n/g, "\r\n");
+    }
+    return unescapeText(t);
+  }
+  function hexBytes() {
+    var t = $("labin").value.replace(/[^0-9a-fA-F]/g, "");
+    if (t.length % 2 !== 0) { showBroken("hex needs an even number of digits"); return null; }
+    var out = new Uint8Array(t.length / 2);
+    for (var i = 0; i < out.length; i++) out[i] = parseInt(t.substr(i * 2, 2), 16);
+    return out;
+  }
+  function currentBytes() { return mode === "hex" ? hexBytes() : textBytes(); }
+
+  function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+  function showBroken(msg) {
+    $("verdictbox").innerHTML = '<span class="verdict broken">cannot judge this</span>';
+    $("labout").innerHTML = '<span class="y">' + esc(msg) + "</span>";
+  }
+  function render(v) {
+    var box = $("verdictbox"), out = $("labout");
+    if (v.outcome === "accept") {
+      box.innerHTML = '<span class="verdict accept">accept</span>';
+      var body = v.chunked ? "a chunked body" : (v.length >= 0 ? "a body of " + v.length + " bytes" : "no body");
+      out.innerHTML = '<span class="g">well-framed.</span> The head ends at byte ' + v.at + ", " + body +
+        ", HTTP/1." + (v.version === 11 ? "1" : "0") + ".\n" +
+        '<span class="c">the gateway would now route it: host, path prefix, method (not judged here).</span>';
+    } else if (v.outcome === "more") {
+      box.innerHTML = '<span class="verdict more">read more</span>';
+      out.innerHTML = '<span class="c">not a whole head yet: no blank line (CRLF CRLF), so the gateway reads on.<br>in text mode, an empty line ends the head (with Enter = CRLF on, it is sent as CRLF CRLF).</span>';
+    } else {
+      var rule = TAGS[v.rule], status = statusOf(v.rule);
+      box.innerHTML = '<span class="verdict refuse">refuse &middot; ' + rule + "</span>";
+      var title = { 400: "Bad Request", 405: "Method Not Allowed", 431: "Request Header Fields Too Large",
+                    501: "Not Implemented", 505: "HTTP Version Not Supported", 413: "Content Too Large" }[status];
+      out.innerHTML =
+        '<span class="r">HTTP/1.1 ' + status + " " + title + "</span>\n" +
+        '<span class="y">Content-Type: application/problem+json</span>\n' +
+        '{"type":"about:blank","title":"' + title + '","status":' + status + ',"rule":"' + rule + '","request_id":"\u2026"}\n\n' +
+        '<span class="c">the access-log line:</span>\n' +
+        '{"t":0,"id":"\u2026","method":null,"path":null,"route":null,"upstream":null,"status":' + status +
+        ',"rule":"' + rule + '","outcome":"refused","ms":0}\n' +
+        '<span class="c">the connection is closed: after a refusal the stream cannot be trusted.</span>';
+    }
+  }
+  function show() {
+    var b = currentBytes();
+    if (!b) return;
+    $("bytecount").textContent = b.length + " bytes";
+    render(judge(b, 64));
+  }
+
+  // byte-by-byte replay: prefixes of a refused head never become an accept; the tick marks the first refusal.
+  var timer = null;
+  function replay() {
+    var b = currentBytes();
+    if (!b) return;
+    if (timer) { clearInterval(timer); timer = null; }
+    var box = $("replaybox");
+    box.hidden = false;
+    var i = 0, first = -1;
+    var step = Math.max(1, Math.ceil(b.length / 400));
+    timer = setInterval(function () {
+      var end = Math.min(b.length, i + step);
+      var v = judge(b.subarray(0, end), 64);
+      if (v.outcome === "refuse" && first < 0) first = end;
+      $("replaybar").style.width = (100 * end / b.length) + "%";
+      $("replayat").textContent = "byte " + end + " of " + b.length;
+      $("replayverdict").textContent = v.outcome === "accept" ? "accept"
+        : v.outcome === "more" ? "read more" : "refuse \u00b7 " + TAGS[v.rule];
+      i = end;
+      if (i >= b.length) {
+        clearInterval(timer); timer = null;
+        $("replayverdict").textContent += first < 0 ? "" : "  \u00b7 first refusal at byte " + first;
+      }
+    }, 16);
+  }
+
+  // ---- self-check against the recorded corpus ----
+  function selfCheck(corpus) {
+    var ok = 0, fails = [];
+    for (var i = 0; i < corpus.length; i++) {
+      var e = corpus[i];
+      var bytes = new Uint8Array(e.hex.length / 2);
+      for (var k = 0; k < bytes.length; k++) bytes[k] = parseInt(e.hex.substr(k * 2, 2), 16);
+      var v = judge(bytes, e.headers);
+      var agree = v.outcome === e.outcome &&
+        (e.outcome !== "refuse" || (TAGS[v.rule] === e.rule && statusOf(v.rule) === e.status));
+      if (agree) ok++; else fails.push(e.id + " (page says " + v.outcome +
+        (v.rule ? " " + TAGS[v.rule] + " " + statusOf(v.rule) : "") + ", the probe said " + e.outcome + ")");
+    }
+    var el = $("selfcheck");
+    el.innerHTML = fails.length === 0
+      ? 'self-check: <b class="ok">' + ok + " of " + corpus.length + "</b> cases agree with <code>build/framing_probe</code> at the pinned compiler (<code>docs/lab-corpus.json</code>, CI-checked)."
+      : 'self-check: <b class="bad">' + fails.length + " of " + corpus.length + " DISAGREE</b> \u2014 " + esc(fails.join("; ")) +
+        ". <b class=\"bad\">Do not trust this page&rsquo;s judge; the corpus is right and it is not.</b>";
+    var sel = $("labcase");
+    var accepts = [], refuses = {};
+    for (var i = 0; i < corpus.length; i++) {
+      var e = corpus[i];
+      if (e.outcome === "accept") accepts.push(e);
+      else (refuses[e.rule] = refuses[e.rule] || []).push(e);
+    }
+    var groups = [];
+    accepts.forEach(function (e) { groups.push(["accept \u00b7 " + e.id, e]); });
+    Object.keys(refuses).sort().forEach(function (rule) {
+      refuses[rule].forEach(function (e) { groups.push([rule + " \u00b7 " + e.id, e]); });
+    });
+    groups.forEach(function (g) {
+      var o = document.createElement("option");
+      o.value = g[1].hex;
+      o.textContent = g[0];
+      sel.appendChild(o);
+    });
+    sel.addEventListener("change", function () {
+      if (!sel.value) return;
+      $("labmode").value = "hex";
+      mode = "hex";
+      $("labin").value = sel.value;
+      show();
+    });
+  }
+
+  $("labmode").addEventListener("change", function () {
+    mode = $("labmode").value;
+    if (mode === "hex") {
+      var b = textBytes();
+      if (b) { var t = []; for (var i = 0; i < b.length; i++) t.push(b[i].toString(16).padStart(2, "0")); $("labin").value = t.join(""); }
+      $("crlf").disabled = true;
+    } else {
+      $("crlf").disabled = false;
+      var h = $("labin").value.replace(/[^0-9a-fA-F]/g, "");
+      if (h.length % 2 === 0 && h) {
+        var t2 = [];
+        for (var i = 0; i < h.length; i += 2) {
+          var byte = parseInt(h.substr(i, 2), 16);
+          t2.push(byte === 13 ? "\\r" : byte === 10 ? "\\n" : byte === 9 ? "\\t" : byte < 32 || byte > 126 ? "\\x" + byte.toString(16).padStart(2, "0") : String.fromCharCode(byte));
+        }
+        $("labin").value = t2.join("");
+      }
+    }
+    show();
+  });
+  $("go").addEventListener("click", show);
+  $("replaybtn").addEventListener("click", replay);
+  $("labin").addEventListener("input", show);
+
+  fetch("lab-corpus.json").then(function (r) { return r.json(); }).then(selfCheck)
+    .catch(function () {
+      $("selfcheck").innerHTML = 'self-check: <b class="bad">the corpus could not be loaded</b>; the judge answers but its agreement with the probe is not shown.';
+    });
+  show();
+})();
+</script>
+
+<footer><div class="wrap">
+  <a href="https://github.com/alpibrusl/cancho-gateway">Repository</a><a href="index.html">Overview</a>
+  <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/docs/bench.md">Benchmark protocol</a><span>Alpha · EUPL-1.2</span>
+</div></footer>
+</body>
+</html>
