@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cancho-gateway: the proof, from the compiler</title>
+<meta name="description" content="The authority report the cancho compiler derives for the gateway binary, committed and held by CI: every label explained, and honestly, what it does not prove.">
+<link rel="canonical" href="https://alpibrusl.github.io/cancho-gateway/proof.html">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#265e8d">
+<meta property="og:site_name" content="cancho-gateway">
+<meta property="og:locale" content="en">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://alpibrusl.github.io/cancho-gateway/proof.html">
+<meta property="og:title" content="cancho-gateway: the proof">
+<meta property="og:description" content="The compiler writes down what the binary may do; the report is committed and CI holds it. What each label means, and what is honestly not proved.">
+<meta property="og:image" content="https://alpibrusl.github.io/cancho-gateway/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="cancho-gateway: the proof, from the compiler.">>
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="cancho-gateway: the proof">
+<meta name="twitter:description" content="The compiler writes down what the binary may do; the report is committed and CI holds it. What each label means, and what is honestly not proved.">
+<meta name="twitter:image" content="https://alpibrusl.github.io/cancho-gateway/og.png">
+<script type="application/ld+json">{ "@context": "https://schema.org", "@graph": [  {   "@type": "WebPage",   "name": "cancho-gateway: the proof, from the compiler",   "description": "What the cancho-gateway binary can do is written down by the compiler, not promised by a policy page: the authority report, what each label means, and what it does not prove.",   "url": "https://alpibrusl.github.io/cancho-gateway/proof.html",   "isPartOf": { "@type": "WebSite", "name": "cancho-gateway", "url": "https://alpibrusl.github.io/cancho-gateway/" }  },  {   "@type": "BreadcrumbList",   "itemListElement": [    { "@type": "ListItem", "position": 1, "name": "cancho-gateway", "item": "https://alpibrusl.github.io/cancho-gateway/" },    { "@type": "ListItem", "position": 2, "name": "Proof", "item": "https://alpibrusl.github.io/cancho-gateway/proof.html" }   ]  } ]}</script>
+<meta name="color-scheme" content="light dark">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="icon" type="image/png" sizes="64x64" href="favicon.png">
+<style>
+
+:root {
+  --bg: #fbfbfc; --fg: #14171c; --muted: #566170; --line: #e1e4ea; --surface: #ffffff; --soft: #f0f3f6;
+  --accent: #265e8d; --accent-fg: #ffffff; --good: #0f7b5f; --warn: #92400e; --warn-bg: #fdf6e7; --warn-line: #e0b765; --bad: #d1362f;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0d1217; --fg: #e8eaee; --muted: #9ba5b3; --line: #232932; --surface: #141a21; --soft: #182029;
+    --accent: #6fa3d6; --accent-fg: #0a1522; --good: #4fd1a5; --warn: #f3c77a; --warn-bg: #1d1a12; --warn-line: #8a6a2a; --bad: #ff6b63; }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; scroll-padding-top: 4rem; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 1rem/1.6 var(--font); }
+a { color: var(--accent); text-underline-offset: .15em; }
+.wrap { width: 100%; max-width: 68rem; margin: 0 auto; padding: 0 20px; }
+.skip { position: absolute; left: 16px; top: -4rem; background: var(--accent); color: var(--accent-fg); padding: .5rem .8rem; border-radius: 6px; z-index: 9; }
+.skip:focus { top: 8px; }
+a:focus-visible, .btn:focus-visible, pre:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+header.top { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+header.top .wrap { display: flex; align-items: center; gap: 1.5rem; height: 3.4rem; }
+.brand { font: 700 1rem var(--mono); color: var(--fg); text-decoration: none; letter-spacing: -.01em; white-space: nowrap; }
+nav { display: flex; gap: 1.2rem; margin-left: auto; }
+nav a { color: var(--muted); text-decoration: none; font-size: .93rem; white-space: nowrap; }
+nav a:hover { color: var(--fg); }
+@media (max-width: 40rem) { nav a.opt { display: none; } }
+
+h1 { font-size: clamp(2.3rem, 6.2vw, 4rem); line-height: 1.04; letter-spacing: -.035em; margin: 0 0 1rem; font-weight: 750; }
+h2 { font-size: clamp(1.6rem, 3.4vw, 2.2rem); line-height: 1.15; letter-spacing: -.025em; margin: 0 0 .5rem; font-weight: 700; }
+h3 { font-size: 1.05rem; margin: 0 0 .25rem; }
+p { margin: 0 0 1rem; }
+section { padding: 4.5rem 0 0; }
+.lead { font-size: 1.2rem; color: var(--muted); max-width: 34rem; }
+.sub { color: var(--muted); max-width: 38rem; }
+code { font-family: var(--mono); font-size: .9em; background: var(--soft); padding: .1em .35em; border-radius: 5px; }
+
+.hero { padding: 4rem 0 0; display: grid; gap: 2.5rem; align-items: center; }
+@media (min-width: 58rem) { .hero { grid-template-columns: 1.05fr 1fr; } }
+.badge { display: inline-flex; gap: .5rem; align-items: center; font-size: .82rem; color: var(--warn); background: var(--warn-bg); border: 1px solid var(--warn-line); padding: .22rem .7rem; border-radius: 999px; margin-bottom: 1.2rem; text-decoration: none; }
+.badge i { width: .5rem; height: .5rem; border-radius: 50%; background: var(--warn-line); display: inline-block; }
+.cta { display: flex; flex-wrap: wrap; gap: .7rem; margin-top: 1.6rem; }
+.btn { display: inline-block; padding: .65rem 1.15rem; border-radius: 8px; font-weight: 600; text-decoration: none; border: 1px solid var(--accent); }
+.btn.primary { background: var(--accent); color: var(--accent-fg); }
+.btn.ghost { color: var(--accent); }
+.btn.ghost:hover { background: var(--soft); }
+
+.term { background: #0d1117; color: #d6dde8; border: 1px solid #262c36; border-radius: 12px; font: .84rem/1.65 var(--mono); padding: 1rem 1.1rem 1.1rem; box-shadow: 0 18px 50px -24px rgba(20, 30, 70, .55); overflow-x: auto; }
+.term .bar { display: flex; gap: .35rem; margin-bottom: .8rem; }
+.term .bar i { width: .65rem; height: .65rem; border-radius: 50%; background: #2d3440; display: block; }
+.term .c { color: #7d8797; } .term .g { color: #5fd3a6; } .term .b { color: #8cb0ff; } .term .y { color: #e8c170; } .term .r { color: #ff8b82; }
+.term pre { margin: 0; white-space: pre; }
+
+.three { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); margin-top: 3.2rem; }
+.three div { border-top: 3px solid var(--accent); padding-top: .8rem; }
+.three p { color: var(--muted); margin: 0; font-size: .96rem; }
+
+.figure { margin: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 1.2rem; }
+.figure.wide { margin-top: 2rem; }
+.figure svg, .figure img { display: block; width: 100%; height: auto; }
+.figure h3 { margin-bottom: .6rem; }
+.figure figcaption { color: var(--muted); font-size: .88rem; margin-top: .8rem; }
+.two { display: grid; gap: 1rem; grid-template-columns: 1fr; margin-top: 2rem; }
+@media (min-width: 52rem) { .two { grid-template-columns: 1fr 1fr; } }
+svg .t { fill: var(--fg); font: 600 13px var(--font); } svg .s { fill: var(--muted); font: 12px var(--font); }
+svg .box { fill: var(--surface); stroke: var(--line); stroke-width: 1.4; } svg .hot { fill: var(--soft); stroke: var(--accent); stroke-width: 2; }
+svg .ar { stroke: var(--muted); stroke-width: 1.5; fill: none; } svg .dash { stroke-dasharray: 5 4; }
+svg .dot { fill: var(--accent); } svg .axis { stroke: var(--line); stroke-width: 2; }
+svg .bar1 { fill: var(--accent); } svg .bar2 { fill: var(--line); }
+
+.grid { display: grid; gap: 1px; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); background: var(--line); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; margin-top: 2rem; }
+.grid div { background: var(--surface); padding: 1.1rem 1.2rem; }
+.grid p { color: var(--muted); font-size: .93rem; margin: 0; }
+
+.stats { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); margin: 2rem 0 0; }
+.stats div { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 1rem 1.1rem; }
+.stats b { display: block; font: 700 1.9rem/1.1 var(--font); letter-spacing: -.03em; }
+.stats span { color: var(--muted); font-size: .88rem; }
+.note { color: var(--muted); font-size: .88rem; margin-top: .9rem; }
+
+pre.code { background: var(--soft); border: 1px solid var(--line); border-radius: 12px; padding: 1rem 1.1rem; font: .86rem/1.65 var(--mono); overflow-x: auto; margin: 1.4rem 0 0; }
+.status { margin-top: 4.5rem; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 14px; padding: 1.3rem 1.5rem; }
+.status h2 { font-size: 1.2rem; letter-spacing: -.01em; }
+.status ul { margin: .4rem 0 0; padding-left: 1.2rem; color: var(--muted); }
+footer { margin-top: 4rem; border-top: 1px solid var(--line); padding: 1.6rem 0 2.6rem; color: var(--muted); font-size: .9rem; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: .5rem 1.6rem; }
+table.fit { width: 100%; border-collapse: collapse; margin-top: 2rem; font-size: .95rem; }
+table.fit th, table.fit td { text-align: left; padding: .8rem .9rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+table.fit thead th { color: var(--muted); font-weight: 600; font-size: .85rem; }
+table.fit tbody th { font-weight: 650; }
+table.fit td { color: var(--muted); }
+table.fit tr.us { background: var(--soft); } table.fit tr.us td, table.fit tr.us th { color: var(--fg); }
+@media (max-width: 44rem) { .fitwrap { overflow-x: auto; } table.fit.wide { min-width: 38rem; } }
+.cols { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); margin-top: 1.4rem; }
+.cols > div { border: 1px solid var(--line); border-radius: 14px; padding: 1.1rem 1.3rem; background: var(--surface); }
+.cols ul { margin: .4rem 0 0; padding-left: 1.1rem; color: var(--muted); } .cols li { margin: .25rem 0; }
+.cols .no h3 { color: var(--muted); }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+.logo { display: block; width: 11rem; height: auto; border-radius: 14px; background: #fff; padding: .35rem; border: 1px solid var(--line); margin-bottom: 1.4rem; }
+header.top img.mark { width: 1.9rem; height: 1.9rem; display: block; }
+header.top .brand { display: inline-flex; align-items: center; gap: .55rem; }
+table.fit.num td, table.fit.num th { white-space: nowrap; } table.fit.num td.n { text-align: right; font-variant-numeric: tabular-nums; }
+.good { color: var(--good); } .bad { color: var(--bad); }
+pre code { padding: 0; background: none; }
+.two { align-items: start; }
+h3[id] { margin-top: 2rem; }
+table.fit.wide tbody th { white-space: nowrap; }
+nav a[aria-current] { color: var(--fg); font-weight: 650; }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top"><div class="wrap">
+  <a class="brand" href="index.html"><img class="mark" src="mark.png" alt="" width="30" height="30">cancho-gateway</a>
+  <nav aria-label="Sections">
+    <a href="index.html" class="opt">Overview</a><a href="examples.html" class="opt">Examples</a><a href="evidence.html" class="opt">Evidence</a><a href="proof.html" aria-current="page">Proof</a><a href="index.html#numbers" class="opt">Numbers</a><a href="examples.html#download">Download</a>
+    <a href="https://github.com/alpibrusl/cancho-gateway" class="opt">GitHub</a>
+  </nav>
+</div></header>
+
+<main id="main" class="wrap">
+<div class="hero" id="top">
+  <div>
+    <a class="badge" href="#limits"><i></i>The proof is the compiler&rsquo;s, not this page&rsquo;s</a>
+    <h1>The proof, from the compiler</h1>
+    <p class="lead">A policy page can promise anything. This page shows what the cancho compiler says the gateway binary may do &mdash; a report it derives, a report committed in the repository, a report CI holds against a ceiling a person reviews. Every table below is spliced from that report by <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/scripts/proof.py"><code>scripts/proof.py</code></a>; if you edit this page by hand, CI fails.</p>
+    <div class="cta"><a class="btn primary" href="#report">The report</a><a class="btn ghost" href="#try">Break it yourself</a><a class="btn ghost" href="#limits">What it does not prove</a></div>
+  </div>
+  <div class="term" role="img" aria-label="A hostile request refused with a rule tag, and the access-log line it leaves on stdout"><div class="bar"><i></i><i></i><i></i></div><pre>$ curl -i http://127.0.0.1:8080/x \
+  -H 'Content-Length: 5' \
+  -H 'Transfer-Encoding: chunked'
+<span class="r">HTTP/1.1 400 Bad Request
+Content-Type: application/problem+json</span>
+<span class="y">{"type":"about:blank","title":"Bad Request",
+ "status":400,"rule":"framing.two-lengths",
+ "request_id":"1a-1f90-0000002a"}</span>
+<span class="c">Connection: close</span>
+
+$ <span class="c"># the same line the gateway wrote to stdout:</span>
+{"t":911,"id":"1a-1f90-0000002a","method":"GET","path":"/x",
+ "route":null,"upstream":null,"status":400,
+ "rule":"framing.two-lengths","outcome":"refused",
+ "ms":0,"upstream_ms":0,"bytes_in":0}</pre></div>
+</div>
+
+<section id="what">
+  <h2>What an authority report is</h2>
+  <p class="sub">The compiler does not only build the binary; it writes down what that binary can do. Not what it promises. Not what its documentation says. What its instructions can reach.</p>
+  <p>A capability can be released before the program starts &mdash; cancho&rsquo;s model is that the binary simply does not have it. The gateway&rsquo;s report is <strong>bounded</strong>: the compiler says so, and CI re-derives it on every push and fails if a change widens it past the ceiling in <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/authority.toml"><code>authority.toml</code></a>. To give the gateway a new capability is to write a diff a person must review.</p>
+  <div class="three">
+    <div><h3>Derived, not declared</h3><p>The report is what the compiler derives from the source. The committed file must equal it, byte for byte, or CI fails.</p></div>
+    <div><h3>Ceiling-checked</h3><p><code>authority.toml</code> is what a person reviews: a ceiling the derived set may be smaller than, never larger.</p></div>
+    <div><h3>Held in CI</h3><p><code>scripts/authority.py --check</code> re-derives the report on every push. Widening the gateway is a reviewable change, not an accident.</p></div>
+  </div>
+</section>
+
+<section id="report">
+  <h2>The report, every label explained</h2>
+  <p class="sub">Spliced from <code>manifests/</code> by <code>scripts/proof.py</code>; <code>--check</code> in CI fails if this page claims anything the reports do not say.</p>
+<!-- report:begin -->
+  <div class="stats">
+<div><b>0</b><span>files written, ever: <code>fs_write</code>, <code>file_write</code>, <code>dir_write</code> are not capabilities the binary has</span></div>
+<div><b>0</b><span>foreign calls: <code>ffi</code> is released at start; no C, no <code>unsafe</code></span></div>
+<div><b>929</b><span>pure functions the compiler counted in the gateway, of every function it has</span></div>
+<div><b>2</b><span>paths the TLS build reads: <code>/dev/urandom</code> and the certificate directory; the build without <code>tls_listen</code> reads none</span></div>
+  </div>
+  <div class="fitwrap"><table class="fit">
+    <thead><tr><th>The gateway, a build without TLS &middot; <code>gateway.authority.json</code></th><td>what it means</td><td>the compiler says</td></tr></thead>
+    <tbody>
+      <tr><th><code>args</code></th><td>the command line, for <code>--version</code></td><td class="good">bounded</td></tr>
+      <tr><th><code>clock</code></th><td>the clock, for deadlines (never logged as a timestamp)</td><td class="good">bounded</td></tr>
+      <tr><th><code>conn_accept</code></th><td>accepting connections on the listening sockets</td><td class="good">bounded</td></tr>
+      <tr><th><code>conn_read</code></th><td>reading from an open connection</td><td class="good">bounded</td></tr>
+      <tr><th><code>conn_write</code></th><td>writing to an open connection</td><td class="good">bounded</td></tr>
+      <tr><th><code>dir_read</code></th><td>reading a directory (the certificate directory, through a handle)</td><td class="good">bounded</td></tr>
+      <tr><th><code>file_read</code></th><td>reading a file through a directory handle</td><td class="good">bounded</td></tr>
+      <tr><th><code>heap</code></th><td>the heap: every slab is sized at start</td><td class="good">bounded</td></tr>
+      <tr><th><code>io_write</code></th><td>standard output: the access log (and standard error)</td><td class="good">bounded</td></tr>
+      <tr><th><code>net_in(&quot;&quot;)</code></th><td>listening: the network bound is shared with connecting and <strong>not narrowed</strong></td><td class="good">bounded</td></tr>
+      <tr><th><code>net_out(&quot;&quot;)</code></th><td>connecting: the upstream set is enforced in code and tested, not proved by the compiler</td><td class="good">bounded</td></tr>
+      <tr><th><code>poll</code></th><td>the poller: one thread, one loop</td><td class="good">bounded</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">The ceiling a person reviews is [gateway] in authority.toml; what the compiler derives may be smaller, never larger. This table is the derived set.</p>
+  <div class="fitwrap"><table class="fit">
+    <thead><tr><th>The same program, built for deploy/examples/tls.toml &middot; <code>gateway-tls.authority.json</code></th><td>what it means</td><td>the compiler says</td></tr></thead>
+    <tbody>
+      <tr><th><code>args</code></th><td>the command line, for <code>--version</code></td><td class="good">bounded</td></tr>
+      <tr><th><code>clock</code></th><td>the clock, for deadlines (never logged as a timestamp)</td><td class="good">bounded</td></tr>
+      <tr><th><code>conn_accept</code></th><td>accepting connections on the listening sockets</td><td class="good">bounded</td></tr>
+      <tr><th><code>conn_read</code></th><td>reading from an open connection</td><td class="good">bounded</td></tr>
+      <tr><th><code>conn_write</code></th><td>writing to an open connection</td><td class="good">bounded</td></tr>
+      <tr><th><code>dir_read</code></th><td>reading a directory (the certificate directory, through a handle)</td><td class="good">bounded</td></tr>
+      <tr><th><code>file_read</code></th><td>reading a file through a directory handle</td><td class="good">bounded</td></tr>
+      <tr><th><code>fs_read(&quot;/dev/urandom&quot;)</code></th><td>random bytes for TLS handshakes, exactly this device</td><td class="good">bounded</td></tr>
+      <tr><th><code>fs_read(&quot;/etc/cancho-gateway/tls&quot;)</code></th><td>the certificate directory compiled into the binary, exactly this path</td><td class="good">bounded</td></tr>
+      <tr><th><code>heap</code></th><td>the heap: every slab is sized at start</td><td class="good">bounded</td></tr>
+      <tr><th><code>io_write</code></th><td>standard output: the access log (and standard error)</td><td class="good">bounded</td></tr>
+      <tr><th><code>net_in(&quot;&quot;)</code></th><td>listening: the network bound is shared with connecting and <strong>not narrowed</strong></td><td class="good">bounded</td></tr>
+      <tr><th><code>net_out(&quot;&quot;)</code></th><td>connecting: the upstream set is enforced in code and tested, not proved by the compiler</td><td class="good">bounded</td></tr>
+      <tr><th><code>poll</code></th><td>the poller: one thread, one loop</td><td class="good">bounded</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">Exactly two named paths are added, and scripts/authority.py fails on any other fs_read. The generated modules replace the example&#x27;s, so this is the TLS deployment&#x27;s own report.</p>
+  <p>Never in any build: <code>ffi</code>, <code>fs_write</code>, <code>file_write</code>, <code>dir_write</code>, <code>exec</code>, <code>fork</code>. A change to either report fails CI before it fails a reader.
+<!-- report:end -->
+</section>
+
+<section id="try">
+  <h2>Break it yourself</h2>
+  <p class="sub">The demo binary from the latest release listens on 8080 and forwards to one upstream on 127.0.0.1:9000. Everything below is one of the gateway&rsquo;s own tests (<code>tests/proxy_test.py</code>), and every refusal carries a rule tag and a request id.</p>
+  <div class="term"><div class="bar"><i></i><i></i><i></i></div><pre><span class="c"># an upstream for the demo binary to forward to (terminal 1)</span>
+python3 -m http.server 9000
+
+<span class="c"># the demo gateway (terminal 2), or build your own deployment:</span>
+<span class="b">./cancho-gateway-demo-linux-x86_64</span>
+<span class="g">{"t":102,"id":"1a-1f90-00000014","method":"GET","path":"/", ... "status":200}</span>
+
+<span class="c"># now try to smuggle a request past it (terminal 3):</span>
+<span class="b">curl -i http://127.0.0.1:8080/x -H 'Content-Length: 5' -H 'Transfer-Encoding: chunked'</span>
+<span class="r">HTTP/1.1 400 ... "rule":"framing.two-lengths"</span>
+<span class="b">printf 'GET / HTTP/1.1\nHost: a\n\n' | nc 127.0.0.1 8080</span>
+<span class="r">HTTP/1.1 400 ... "rule":"framing.line-ending"</span>
+<span class="b">curl -i http://127.0.0.1:8080/ -H 'Host: a' -X CONNECT</span>
+<span class="r">HTTP/1.1 501 ... "rule":"framing.method-unsupported"</span>
+<span class="b">curl -i http://127.0.0.1:8080/ -H 'Host: a' --data-binary @2MB</span>
+<span class="r">HTTP/1.1 413 ... "rule":"limit.body"</span></pre></div>
+  <p>Every one of these closes the connection. The framing rules are deliberately stricter than the RFC where tolerance is a smuggling lever: chunk extensions refused, trailer fields refused, no whitespace around a chunk size. <a href="evidence.html#framing">The evidence page</a> has the corpus (60 head cases, 39 chunked-body cases) and what running it found.</p>
+  <p class="note">The demo binary&rsquo;s own report ships with the release: <code>cancho-gateway-demo.authority.json</code>, built in CI from the same committed sources (<a href="examples.html#download">download</a>).</p>
+</section>
+
+<section id="limits">
+  <h2>What this proof does not say</h2>
+  <p class="sub">A proof that hides its edges is marketing. These are the edges.</p>
+  <ul>
+    <li><strong>The upstream set is not compiler-proved.</strong> A cancho program has one network bound shared by listening and connecting, so the report says <code>net_out("")</code>: not narrowed. The upstream set is compiled in from the deployment file and enforced by exact match before every connect, and tested &mdash; but the compiler does not vouch for it. <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/docs/design.md">The design</a> says so in section 2.</li>
+    <li><strong>It is not a security review.</strong> The report bounds the binary&rsquo;s capabilities; it does not certify that the logic inside those bounds is free of bugs. The tests and the corpus are the other half of the story, and they are not a substitute for an external audit. Alpha: not for production.</li>
+    <li><strong>The admin port has no authentication.</strong> It binds every interface; firewall it. Inside the bounds, a bad decision is still a decision.</li>
+    <li><strong>The TLS engine is not independently reviewed.</strong> TLS 1.3, ECDSA P-256, written in cancho (<code>docs/tls.md</code>), reading exactly two paths &mdash; and no one outside has looked at it yet.</li>
+  </ul>
+</section>
+
+<section id="cancho">
+  <h2>Why this exists</h2>
+  <p class="sub">cancho is a typed systems language where the compiler writes down what a program may do. For code you did not write yourself &mdash; a proxy, a dependency, an agent&rsquo;s output &mdash; &ldquo;the report says what it can reach&rdquo; is the only sentence that scales with distrust.</p>
+  <p class="note" style="margin-bottom:0">The language: <a href="https://github.com/alpibrusl/cancho">cancho</a>. The gateway&rsquo;s sources: <a href="https://github.com/alpibrusl/cancho-gateway">this repository</a>. The manifesto: <a href="https://alpibru.com/manifesto">alpibru.com/manifesto</a>.</p>
+</section>
+</main>
+<footer><div class="wrap">
+  <a href="https://github.com/alpibrusl/cancho-gateway">Repository</a><a href="index.html">Overview</a>
+  <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/docs/bench.md">Benchmark protocol</a><span>Alpha · EUPL-1.2</span>
+</div></footer>
+</body>
+</html>

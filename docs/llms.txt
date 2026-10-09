@@ -5,6 +5,7 @@
 ## Read first
 - [Overview](https://alpibrusl.github.io/cancho-gateway/): what it is, where it fits, the numbers.
 - [Evidence](https://alpibrusl.github.io/cancho-gateway/evidence.html): what each test covers, what it found, how each number was measured, what is not claimed.
+- [Proof](https://alpibrusl.github.io/cancho-gateway/proof.html): the authority report the compiler derives for the binary, every label explained, and what it does not prove.
 - [Examples and download](https://alpibrusl.github.io/cancho-gateway/examples.html): eight situations with their deployment files and what the gateway answers and logs; the demo binary from the latest release.
 - [Design](https://github.com/alpibrusl/cancho-gateway/blob/main/docs/design.md): scope, the authority row, the bounds and their rule tags.
 

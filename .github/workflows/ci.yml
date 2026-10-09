@@ -116,4 +116,5 @@ jobs:
         working-directory: gateway
         run: |
           python3 scripts/figures.py --check
+          python3 scripts/proof.py --check
           python3 scripts/check_site.py
