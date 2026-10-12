@@ -304,12 +304,9 @@ fn claims_rule[&s, &t, &u, &i](doc: &s [byte], tape: &t [int], aud: &u [byte], i
     if l > max_leeway() {
         l = max_leeway();
     }
-    // The clock, cut at twice the largest time a token can name, so that `exp + l` and `t + l` below cannot overflow whatever the caller passes. (A negative clock needs no cut: it is
-    // below the floor and refused next.)
-    var t = now;
-    if t > 2 * json_claims.max_time() {
-        t = 2 * json_claims.max_time();
-    }
+    // The clock as given. No cut is needed to keep the sums below from overflowing: `exp + l` is at most 253,402,300,859; a clock past it is expired and refused before `t + l` is
+    // computed, and a negative clock is below the floor and refused first (`tests/jwt_test.cho` calls this with the ends of `int`).
+    let t = now;
     if t < clock_floor() {
         return 0 - 10;
     }

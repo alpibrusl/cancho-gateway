@@ -458,6 +458,10 @@ class Main:
         # And the other way: a token on a route that takes keys alone is a key that does not exist (the dots are in the alphabet), never a token.
         s, h, b, _ = get(gw, "/ao/token", [auth(tok())])
         assert s == 401 and gw.find(n0, path="/ao/token")["rule"] == "auth.invalid", (s, b)
+        # One dot, or four, is not the shape of a token: an API key that does not exist.
+        for i, odd in enumerate(("ck.a", "a.b.c.d", "ck_test.")):
+            s, h, b, _ = get(gw, "/both/odd%d" % i, ["Authorization: Bearer " + odd])
+            assert s == 401 and gw.find(n0, path="/both/odd%d" % i)["rule"] == "auth.invalid", (odd, s, b)
         # A credential of 257 bytes with no dots is an oversized key, as ever; with two dots it is a token and `jwt.malformed`.
         s, h, b, _ = get(gw, "/both/long", ["Authorization: Bearer " + "k" * 257])
         assert s == 401 and rule_of(b) == "auth.malformed" and h["www-authenticate"] == INVALID_REQUEST, (s, h)

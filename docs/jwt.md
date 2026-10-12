@@ -64,19 +64,22 @@ reviewable then; it is not paid speculatively.
 
 A token is `BASE64URL(header) "." BASE64URL(payload) "." BASE64URL(signature)` (RFC 7515 7.1). The parsing rules, each one with a refusal tag and a test:
 
-1. The credential is the token of `Authorization: Bearer <token>`, parsed by `docs/auth.md` section 3 (one header, `Bearer`, exactly one space), except that the credential may be up to **2,048 bytes** on a route that
-   accepts JWTs (256 on one that does not). The `token68` alphabet of that section already includes `.`. Anything else is `auth.missing` / `auth.malformed` exactly as for API keys.
+1. The credential is the token of `Authorization: Bearer <token>`, parsed by `docs/auth.md` section 3 (one header, `Bearer`, exactly one space, bytes of the `token68` alphabet, which includes `.`), except that a route that
+   accepts JWTs reads a credential of up to **16,384 bytes** off the header (`jwt.credential_cap()`, the connection buffer) where one that does not reads 256. *(Corrected in the build: the first design said 2,048 here, which made a token of
+   2,049 bytes `auth.malformed` with `error="invalid_request"` and a token of 2,048 `invalid_token`: two answers for "the token is too long". The header parser now lets any length through and `verify` refuses what is over
+   2,048 as `jwt.malformed`.)* A header that is missing, repeated, another scheme or has a byte outside `token68` (a space inside, a quote, a byte above 0x7f) is `auth.missing` / `auth.malformed` exactly as for API keys: it is the
+   *request* that is malformed (RFC 6750 2.1), and the challenge says `invalid_request`. A credential made only of `token68` bytes that is not a valid token is `invalid_token`, whatever is wrong with it.
 2. **Exactly two dots, three non-empty segments** (`jwt.malformed`): zero or one dot, three or more dots (a JWE has four), an empty segment, a leading or trailing dot.
 3. **Alphabet**: each segment is `[A-Za-z0-9_-]` only. `=` (padding), `+` and `/` (the standard alphabet) are refused. RFC 7515 2 defines the encoding without padding; accepting padding or the other alphabet would be a second
    spelling of the same token.
 4. **Canonical**: a segment's length modulo 4 must not be 1, and the unused low bits of its last character must be zero (so `AB` and `AC` do not both decode to the same byte). One spelling per byte string.
-5. **Size**: the header segment at most 256 characters (192 bytes decoded); the payload segment at most 1,366 characters (1,024 bytes decoded); the signature segment **exactly 86 characters** (64 bytes). The whole token at most 2,048.
+5. **Size**: the header segment at most 256 characters (192 bytes decoded); the payload segment at most 1,366 characters (1,024 bytes decoded); the signature segment **exactly 86 characters** (64 bytes). The whole token at most 2,048 (the segment caps already bound it at 256 + 1 + 1,366 + 1 + 86 = 1,710; the explicit cap makes the bound visible and stops the scan of a 16 KiB credential at its first byte).
    Each limit is a compiled constant; decoding writes into region buffers of exactly those sizes.
 6. **Header**: the decoded bytes are a JSON object (section 5). Members:
    - `alg`: required, a string, exactly `EdDSA` (section 3), else `jwt.alg`.
    - `crit`: **refused if present, with any value** (`jwt.header`). RFC 7515 4.1.11 says a recipient that does not understand an extension listed in `crit` must reject the token; this gateway understands none,
      and a present-but-empty or malformed `crit` is itself invalid, so "present" is the rule.
-   - `typ`: optional. If present it must be the string `JWT`, compared without regard to case (RFC 7515 4.1.9 media type names are case-insensitive); anything else (`at+jwt`, `JOSE`, a number) is `jwt.header`. Absent is accepted:
+   - `typ`: optional. If present it must be the string `JWT`, compared without regard to case (RFC 7515 4.1.9 media type names are case-insensitive); anything else (`at+jwt`, `JOSE`, a number, or `JWT` spelt with an escape such as `\u004aWT`) is `jwt.header`. Absent is accepted:
      many issuers omit it, and the audience and issuer checks are what bind a token to a use.
    - `kid`: optional string of 1 to 32 bytes; its use is section 6 step 4.
    - `jku`, `jwk`, `x5u`, `x5c`, `x5t`, `cty`, any other member: **ignored**. They are never dereferenced and never used to choose a key. (`cty` would announce a nested token; the payload is then not JSON claims and fails section 5.)
@@ -93,8 +96,8 @@ A token is `BASE64URL(header) "." BASE64URL(payload) "." BASE64URL(signature)` (
 | the document is at most 192 (header) or 1,024 (payload) bytes before it is parsed | `jwt.malformed` | the tape is `3 * (bytes + 1)` ints, at most 24 KiB for the payload: under the region limit |
 | the root is an **object** | `jwt.malformed` | a token whose payload is an array or a string has no claims |
 | nesting at most **4** levels (the root is level 1): `{"aud":["a"],"x":{"y":[1]}}` is level 4 | `jwt.malformed` | `std.json` allows 128; a claim set has no use for it, and a bound the gateway chose is one that a unit test can hit. The scan is a byte loop that tracks string state, so brackets inside strings do not count |
-| at most **64** members at the root, a name at most **64** bytes decoded | `jwt.malformed` | the duplicate check below is quadratic in the members; 64 is 2,016 comparisons of at most 64 bytes |
-| **no repeated name** at the root, compared **decoded** (so `"exp"` and `"exp"` are the same name) | `jwt.malformed` | `std.json.get` returns the first of two; another parser returns the last; a token must not say two things (the smuggling lesson of `docs/framing.md`). Names inside nested values are not read by anyone and are not checked |
+| at most **64** members in any object, a name at most **64** bytes decoded | `jwt.malformed` | the duplicate check below is quadratic in the members; 64 is 2,016 comparisons of at most 64 bytes |
+| **no repeated name** in **any object of the document**, the root and every object inside it, compared **decoded** (so `"exp"` and `"\u0065xp"` are the same name) | `jwt.malformed` | `std.json.get` returns the first of two; another parser returns the last; a token must not say two things (the smuggling lesson of `docs/framing.md`). *(Corrected: the first version looked at the root only, on the argument that nobody reads a nested name. `tests/jwt_differential.py` found it: its reference refused `{"a":{"x":1,"x":2}}` and the gateway accepted it. Nobody here reads a nested name, but an upstream that is given the token (`auth_forward`) might, and "refuse what two parsers could read differently" has no exception for names we happen not to read.)* The same name in two different objects is fine |
 | `exp`, `nbf`, `iat` are **JSON integers**: `fits_int`, so `1.0`, `1e3`, `-0.5` and numbers wider than 64 bits are not integers, and in `0 .. 253402300799` (the year 9999, RFC 7519 2 NumericDate bound to the integers) | `jwt.claims` | no float is ever compared with a time. A bound makes every sum below overflow-free |
 | `exp` present | `jwt.claims` | a token that never expires is refused, not defaulted |
 | `iss`, if the route configures one, is a string equal to it (decoded compare); `aud`, if the route configures one, is a string equal to it **or an array of at most 16 strings** one of which is | `jwt.iss`, `jwt.aud` | RFC 7519 4.1.1, 4.1.3. An array holding a non-string, or more than 16 elements, is refused as `jwt.aud`; a missing claim is a mismatch. There is no pattern, prefix or case folding |
@@ -105,15 +108,17 @@ The payload is parsed **before** the signature (section 6): everything it says i
 
 `jwt.verify(credential, ...)` does, in this order, stopping at the first failure; the **signature is last** because it is a thousand times the cost of everything else together (section 1):
 
-1. shape and sizes (section 4, rules 2 to 5);
+1. shape and sizes of the whole and of the header and payload segments (section 4, rules 2 and 5);
 2. decode and parse the header; `alg`, `crit`, `typ`;
 3. **`kid` and the key**: the route has an allowed set of public keys (all of the deployment's, or those it names with `jwt_keys`). A `kid` must equal the **name** of one of them exactly (`jwt.kid` otherwise); no `kid`
    is accepted **only if the route's set has exactly one key**, because then there is nothing to choose (a set of several and no `kid` is `jwt.kid`: the gateway does not try each key in turn, which would be a
    verification per key for a client's one request). The `kid` selects among a bounded compiled-in set; it is compared as bytes and never used as a path, a URL or a lookup in anything else;
-4. decode and parse the payload (section 5), then the claims: `exp`, `nbf`, `iss`, `aud` and the clock floor (section 7);
-5. **the signature**, with the key step 3 chose.
+4. the signature's text: exactly 86 characters, canonical base64url (after the header, so that `alg: none`, whose signature is empty, and an HS256 token, whose signature is 43 characters, are `jwt.alg`, the tag an
+   operator wants to read, and not `jwt.malformed`);
+5. decode and parse the payload (section 5), then the claims: the types of `exp`, `nbf` and `iat`, the clock floor, `exp`, `nbf`, `iss`, `aud` (section 7);
+6. **the signature**, with the key step 3 chose.
 
-The result is the key's index (success) or the refusal. Acceptance is the conjunction of every step: the claims read in step 4 are the bytes the signature in step 5 covers, so the order costs nothing in
+The result is the key's index (success) or the refusal. Acceptance is the conjunction of every step: the claims read in step 5 are the bytes the signature in step 6 covers, so the order costs nothing in
 security, and it means that an **expired token retried in a loop by a buggy client costs one JSON parse, not 4.6 ms**.
 
 **What the order reveals, honestly.** The response is the same for every failure (section 9) but its *time* is not: a token that fails before step 5 is answered in about 100 microseconds, one that reaches the
@@ -137,7 +142,7 @@ Checks, with `L` the route's `jwt_leeway` in seconds (0 to 60, default **0**; th
 
 **The floor.** The monotonic clock cannot step, but `ids[2]` is the wall clock *as read at start*. A host without a battery-backed clock that starts before time sync (an embedded charger, a VM from a snapshot) reads
 1970 or a stale date; with that offset **every token whose `exp` is in the future of the wrong date would be valid, including tokens that expired years ago**. That is a fail-*open* error of the worst kind, so the
-code compiles in `clock_floor()`, a date no earlier than the build (1,788,220,800 s, 2026-09-01) and refuses every token (`jwt.clock`, 401, counted) while the clock reads before it. The floor is a constant in
+code compiles in `clock_floor()`, a date shortly before the release (1,788,220,800 s, 2026-09-01) and refuses every token (`jwt.clock`, 401, counted) while the clock reads before it. The floor is a constant in
 `src/jwt.cho` that a release raises; it is not read from the build machine's clock because the generated files must be reproducible (`generate.py --check`). It cannot detect a clock that is wrong but later than the
 floor: nothing in the gateway can.
 
@@ -168,7 +173,7 @@ exactly. The end-to-end test cannot inject a clock into the built gateway, so it
     jwt_leeway = 5                          # seconds, 0 to 60, default 0
     auth_forward = false                    # as in slice 1: the Authorization header is removed before the upstream sees it
 
-The public key is **not a secret**: it may be in the deployment file, in the repository and in the binary. `scripts/mkjwt.py` (section 14) makes a key pair and signs test tokens; it never writes a private key to disk by
+The public key is **not a secret**: it may be in the deployment file, in the repository and in the binary. `scripts/mkjwt.py` makes a key pair and signs test tokens; it never writes a private key to disk by
 default.
 
 Refusals, all `config.auth` with the key and the line, each with one test in `tests/generate_test.py` (numbering continues `docs/auth.md` section 6, whose rules 6, 7, 11 and 12 are generalised as noted):

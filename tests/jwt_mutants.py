@@ -72,7 +72,6 @@ m("c02", J, "    if exp < 0 || nbf == 0 - 2 || iat == 0 - 2 {", "    if exp < 0 
 m("c03", J, "    if exp < 0 || nbf == 0 - 2 || iat == 0 - 2 {", "    if exp < 0 - 1 || nbf == 0 - 2 || iat == 0 - 2 {", U, "a missing exp is accepted as expired, not as malformed claims")
 m("c04", J, "    if l > max_leeway() {\n        l = max_leeway();", "    if l > max_leeway() + 1000000 {\n        l = max_leeway();", U, "the leeway is unbounded")
 m("c05", J, "    if l < 0 {\n        l = 0;", "    if l < 0 - 1000 {\n        l = 0;", U, "a negative leeway shortens a token's life")
-m("c06", J, "    if t > 2 * json_claims.max_time() {", "    if t > 9223372036854775807 {", U, "a huge clock overflows")
 m("c07", J, "    if t < clock_floor() {", "    if t < 0 {", U, "a clock before the floor is believed")
 m("c08", J, "    if t >= exp + l {", "    if t > exp + l {", U, "a token is valid in the second of its exp")
 m("c09", J, "    if t + l < nbf {", "    if t + l <= nbf {", U, "a token is not valid in the second of its nbf")
@@ -216,6 +215,7 @@ m("g29", "scripts/mkjwt.py", '    print("seed (the private key; shown once, neve
 m("g30", "scripts/mkjwt.py", "    seed = secrets.token_bytes(32)", "    seed = secrets.token_bytes(32)[:8] + bytes(24)", "gen", "a seed of 64 bits")
 m("g31", "scripts/jwtkit.py", "    r = _h(prefix + msg) % Q", "    r = _h(prefix + msg) % Q + 1", "gen", "the signer is wrong")
 m("g32", "scripts/generate.py", '        if isinstance(text, str) and JWT_PUBLIC_KEY.fullmatch(text):', '        if isinstance(text, str) and JWT_PUBLIC_KEY.match(text):', "gen", "a public key may have text after its 43 characters")
+ARGUED["g03"] = "a text of 42 or 44 characters decodes to 31 or 33 bytes, which the length test on the decoded key (`len(raw) != 32`) refuses with the same rule: the pattern is a second line"
 ARGUED["g32"] = "`re.match` stops at the end of the match, but the `{43}` pattern then meets the canonical re-encoding test (`b64u(raw) != text`), which refuses a longer text; the second test makes the first redundant"
 
 D = "diff"

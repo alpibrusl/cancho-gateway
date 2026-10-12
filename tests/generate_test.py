@@ -392,7 +392,9 @@ def jwt_cases():
     out.append(jwt_refusal("config.auth", 'name = "alice"', base + K1 + jkey('"alice"', '"%s"' % PKA) + JR + AR, last=True))
     # 18: the encoding of the public key
     good = PKA
-    noncanon = good[:-1] + next(c for c in "BCDEFGHIJKLMNOPQRSTUVWXYZ" if jwtkit.b64u(jwtkit.unb64u(good[:-1] + c)) != good[:-1] + c)
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    noncanon = good[:-1] + alphabet[alphabet.index(good[-1]) ^ 1]       # the same 32 bytes, spelt with a non-zero spare bit
+    assert jwtkit.unb64u(noncanon) == jwtkit.unb64u(good) and noncanon != good
     for bad in ('"%s"' % good[:-1], '"%s"' % (good + "A"), '"%s="' % good[:-1], '"%s+"' % good[:-1], '"%s/"' % good[:-1], '"%s"' % noncanon, "5", '""',
                 '"%s"' % ("A" * 43 + " "), '"%s"' % (good[:20] + " " + good[21:]), '"%s"' % jwtkit.b64u(bytes(range(31)))[:43]):
         out.append(jwt_refusal("config.auth", "public_key", base + jkey('"ka"', bad) + JR))
@@ -536,6 +538,16 @@ def mkjwt_checks(failures):
     other = re.search(r"([A-Za-z0-9_-]{43})\s*$", again.stderr)
     if not other or other.group(1) == seed_text:
         print("FAIL two seeds must differ")
+        failures += 1
+    if seed[8:] == bytes(24) or len(seed) != 32:
+        print("FAIL a seed must be 32 random bytes, not padded")
+        failures += 1
+    # The signer against the standard vectors: RFC 8032 section 7.1 test 1 (the empty message) and RFC 8037 appendix A.4 (the JWS of "Example of Ed25519 signing").
+    rfc_seed = bytes.fromhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+    rfc_jws = jwtkit.compact(None, None, rfc_seed, raw_header=b'{"alg":"EdDSA"}', raw_payload=b"Example of Ed25519 signing")
+    if jwtkit.sign(rfc_seed, b"").hex()[:32] != "e5564300c360ac729086e2cc806e828a" or rfc_jws != ("eyJhbGciOiJFZERTQSJ9.RXhhbXBsZSBvZiBFZDI1NTE5IHNpZ25pbmc."
+                                                                                                "hgyY0il_MGCjP0JzlnLWG1PPOt7-09PGcvMg3AIbQR6dWbhijcNR4ki4iylGjg5BhVsPt9g7sVvpAr_MuM0KAg"):
+        print("FAIL jwtkit must reproduce the RFC 8032 and RFC 8037 signatures")
         failures += 1
     signed = subprocess.run([sys.executable, script, "sign", "--kid", "issuer-a", "--aud", "api", "--iss", "https://i.example", "--ttl", "60"], input=seed_text + "\n", capture_output=True, text=True)
     token = signed.stdout.strip()
