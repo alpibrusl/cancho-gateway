@@ -120,7 +120,7 @@ The gateway ends a tunnel itself for a **cause**: `ws.idle-timeout`, `ws.lifetim
 
 1. **Decide the codes** (the table below). Each side gets at most one Close frame.
 2. **Stop forwarding in each direction at its next frame boundary**: the direction forwards the rest of the frame in flight (never splitting it) and then no more. Frames after the boundary are read, parsed for a Close and **discarded**.
-3. **Place the Close frame** at that boundary, in the write queue toward that side (a 4-byte frame without a reason; the code is 2 bytes). If the stream toward a side is inside a frame that can never be completed (a violation in the middle of a payload on the stream the gateway
+3. **Place the Close frame** at that boundary, in the write queue toward that side (a 4-byte frame without a reason toward the client; toward the upstream the same frame masked, 8 bytes: *(corrected: the design said 4 bytes for both)* a server must not send an unmasked frame to a server, and RFC 6455 5.1 makes every frame from the gateway's side of that hop a client frame; the code is 2 bytes). If the stream toward a side is inside a frame that can never be completed (a violation in the middle of a payload on the stream the gateway
    would have to close), that side gets no Close frame.
 4. **Wait for the echo, bounded**: until each side that was sent a Close has sent its own Close (or its stream ends), at most `ws_close_ms` after step 1, **which also bounds the wait for a frame boundary in step 2**. A side that caused the close (a violator) is not waited for.
 5. **Close both connections.** The outcome is `aborted`, the tag is the cause, `ws_close` is the code sent to the client (or, if none, to the upstream).
@@ -204,3 +204,74 @@ The parser touches **headers** and **text payload** byte by byte; every other pa
 | a reason string and code validation in Close | left to the endpoints (section 3) |
 | a gateway Close on a client's TCP end | would be a guess (section 7) |
 | thousands of tunnels | the slot table (slice 1 section 9); unchanged |
+
+## 15. As built
+
+Built 2026-10-12 on a branch of its own, against the pinned compiler (`2fcf4cd`). Everything below was run on the development machine (one core shared with the test processes; CI will differ in timing).
+
+**What exists.**
+
+- *`src/wsframe.cho`* (pure, no effect): the parser `scan`, the close plan `begin_close`, the keepalive clock (`ping_due`, `pong_expired`), the gateway's own frames (`put_close`, `put_close_masked`, `put_ping`), the rule tags. The state is 56 ints per client slot in a new slab, `Core.wsf`, of `256 x 56` ints (112 KiB).
+- *The tunnel* (`src/proxy.cho`, 1,925 lines; `scripts/lines.py` passes): `tunnel_pump` (one direction, written once for both), `tunnel_run`, `tunnel_mark`, `tunnel_close`; the old `tunnel_down` / `tunnel_up` are thin callers. The sweep closes with a Close frame instead of dropping, Pings a silent client and watches the pong deadline.
+- *Keys* (`scripts/generate.py`, tag `config.websocket`): per route `ws_max_message_bytes`; deployment-wide `ws_ping_ms`, `ws_pong_ms`, `ws_close_ms`. The route table has one more column (22); `generated/deploy.cho` has `ws_ping_ms`, `ws_pong_ms`, `ws_close_ms`.
+- *Log and metrics:* `line_full` (`ws_close` last), `metrics.ws_messages`, `ws_pinged`, `ws_pong_timeout`, `ws_closed` (twelve more ints after the TLS block). `accesslog.max_line` went from 768 to 784 (the worst line with an identity and a close code was 769).
+- *Tests:* `tests/wsframe_test.cho` (21 cancho tests), `tests/wsframes_test.py` (25 end-to-end tests), `tests/wsframes_mutants.py`, `tests/wsframes_bench.py`; 36 generator cases (refusals and acceptances) for the new keys; 1 metrics test, 1 log-line test. `tests/websocket_test.py` changed where slice 1's behaviour was a byte tunnel (below).
+
+**Where the build found the design wrong or incomplete** *(corrected in place above where it mattered)*:
+
+| design | built | why |
+|---|---|---|
+| section 7: the Close the gateway writes is "4 bytes" | 4 bytes toward the client, **8 toward the upstream** (a masked frame, key of four zero bytes) | a Close toward the upstream is a *client* frame and must be masked (RFC 6455 5.1); the first runs sent an unmasked one |
+| section 7: both sides get a Close | a direction that has already carried a Close frame (the peer's, passed through) gets **no second one** | two Close frames in one direction is itself a violation; found by the `frame after Close` case |
+| section 7, step 5: close both connections after the echo | after a violation **by the client**, the client **lingers** (input read and discarded, 0.5 s of silence, 3 s at most) before the connection is closed | closing a socket with unread input resets the connection, which can destroy the Close frame in flight to it; a client still sending a 6 MiB frame at the moment of the refusal lost its Close (test `a_client_that_is_still_sending...`; mutant c15) |
+| section 7: the end of a side while closing ends the tunnel | it marks that side finished and the other is still waited for; **bytes of a frame in flight are not discarded** | the first version dropped the 32 MiB frame the upstream had sent when the upstream then closed its end after echoing the Close; mutant c14 |
+| section 3, check 5 judged "when the header is whole" | judged as soon as the length bytes are there (before the mask key) | found by the case table: a non-minimal length is refused one read earlier |
+| section 13 gate 10: "tests that sent frames the new rules refuse are changed" | `bytes_that_are_not_frames_cross_a_tunnel_unchanged` became `..._do_not_cross_a_tunnel`; the tests that read an idle or lifetime close now read the Close frame (1001) | slice 1 delivered 3 MiB of junk exactly; slice 2 answers Close 1002 and the upstream sees only the gateway's 8-byte Close |
+| section 5: "the conservative position wins if cost is high" | UTF-8 **validated**; the cost measured below is about 3 ms a MiB of text | the micro-benchmark said 0.5 ms a MiB; the real loop is six times that, still small against OCPP messages of a few hundred bytes |
+| the metrics' rule table of 96 | **not enlarged**; the 14 new tags join it | the table already could not hold every TLS engine tag (43) beside the gateway's own (about 80): a hostile TLS client can fill it with engine tags and a later `ws.*` tag is then counted under `other` (the log line keeps the tag). A known limit, recorded here, not new |
+
+Violations seen in the middle of a payload: only UTF-8 (the size is judged at headers). For those the stream toward the other peer is inside a frame, no Close can follow it, and the connection is closed after the Close to the offender (`a_violation_inside_a_payload...`: the upstream receives the valid bytes and then the end of the stream).
+
+**Gates.**
+
+| gate | status | where |
+|---|---|---|
+| 1 state machine, every split, random streams | **met** | `wsframe_test.cho`: every valid corpus stream in every pair of cut points (the shortest) or every fifth/seventh (the longest) and byte by byte, the same final state; every refusal at every split with the same rule; 3,000 random byte and random-frame streams and 1,500 random valid streams (text cut inside characters, pings between fragments) in random pieces: none traps, none is answered more than given, an answer short of the data always has a reason (a held header) |
+| 2 every violation, right Close code on the right side, nothing garbage at the other side | **met** | `wsframes_test.py`: 40 client cases (reserved bits x3, reserved opcodes x4, control frames x5, a Close of one byte, an unmasked frame, lengths x6, continuation and sequence x5, size x4, UTF-8 x11) and 18 upstream cases; the upstream's received bytes are compared **for equality** with the valid frames plus the gateway's masked Close; the client's with the valid frames plus `88 02 03 f3`; truncated frames then end of stream (payload, header, key, half a length; both directions); a violation inside a payload |
+| valid traffic unchanged across deliveries | **met** | whole, one byte at a time and random pieces of 1 to 59 bytes, both directions, compared byte for byte (`valid_traffic_is_unchanged_in_any_delivery`) |
+| 3 sizes and back-pressure | **met** | 1, 8 and 32 MiB echoed with a reader a second late and a 64 KiB receive buffer; 8 MiB in 64 KiB fragments; exactly the limit passes, one byte more is 1009; fragments counted together |
+| 4 UTF-8 | **met** | invalid classes at three positions each (whole frame, first fragment, last fragment), a character split across reads and fragments with pings between at every byte |
+| 5 ping and pong | **met** | a dead client is closed at 2.1 s (ping at 1 s, 0.8 s to answer; asserted between 1.5 and 3.2); a live one answers its Pings for 6.5 s with an idle time of 2.5 s and stays; the upstream's frames are exactly its own (no Ping, no gateway Pong); user pings and pongs pass both ways; a Ping due while 8 MiB is in flight arrives after the frame; a chatty client is not Pinged, a silent one that ignores the Ping but then sends is not closed |
+| 6 close | **met** | the lifetime ends with 32 MiB in flight toward the client (read slowly: 4.3 s) and with 32 MiB in flight toward the upstream (drained at 1 MiB per 0.1 s): both frames arrive intact, then the Close; a peer's Close is passed through and its answer; a peer that never answers is closed at `ws_close_ms` (`ws.close-timeout`); the counters |
+| 7 third party | **met** | `websockets` 17.2 as a client (text, 300 kB binary, ping, close 1000, a 5,000-byte message over a 4,096 limit answered 1009), plain and over TLS. *As an upstream behind the gateway* it served every one of those tests (the route `lib*` points at it); a message it sends over the limit was not tested (it only echoes) |
+| 8 generator | **met** | 36 new cases |
+| 9 mutants | **66 new + 75 of slice 1: 138 killed, 3 argued** *(the 3 are slice 1's)* | below |
+| 10 authority and the suites | **met** | labels unchanged; `manifests/` re-recorded (function counts only); no file over 2,000 lines |
+
+**Measured** *(one machine, the gateway's CPU from `/proc`, 256 MiB each way, median of three, slice 1 and slice 2 built from the same deployment, `tests/wsframes_bench.py`)*:
+
+| traffic | slice 1 (bytes) | slice 2 (frames) | ratio |
+|---|---|---|---|
+| upstream to client, 8 MiB binary frames | 1.56 ms/MiB | 1.64 ms/MiB | 1.05 |
+| upstream to client, 64 KiB text frames | 1.72 | 4.53 | 2.64 |
+| upstream to client, 100-byte text frames | 1.48 | 5.04 | 3.39 |
+| client to upstream, 8 MiB binary frames (masked) | 1.84 | 1.84 | 1.00 |
+| client to upstream, 64 KiB text frames | 1.76 | 5.23 | 2.98 |
+| client to upstream, 100-byte text frames | 1.99 | 5.62 | 2.82 |
+
+*Binary payload costs nothing* (the parser skips it by arithmetic). *Text costs about 3 ms a MiB more*: six times the micro-benchmark of section 5 (0.5 ms), whose loop kept the automaton in locals; the real one keeps it in the state array and handles the unmasking, the Close code and the bounds per byte. An OCPP message of 300 bytes costs the gateway about a microsecond more. **One core**: a deployment moving 100 MiB/s of *text* would spend 0.3 of it on the parser; OCPP traffic is orders of magnitude below that. *Memory:* resident 1.94 MiB at start (slice 1) against 2.07 MiB (slice 2: the `wsf` slab, touched when a tunnel starts); 60 tunnels with traffic: 2.96 MiB in both; unchanged after they close. *Latency* was not re-measured.
+
+**Mutants** (`python3 tests/wsframes_mutants.py`: copy the tree, apply one edit, run the tests that should notice it, then the whole suite if they do not). **66 edits, 66 killed.** Two were first written wrongly (a27, c23: the old text had been reformatted, a killer test did not exist in this suite) and corrected; one (c15, no lingering) first **survived** because no test sent while being refused, and was killed after `a_client_that_is_still_sending...` was added. The classes: every row of section 3 removed (a01 to a13), the limit (a14 to a16), the UTF-8 automaton's every range (a17 to a24), the Close code, the Pong recognition and compare (a25 to a27), the stop at a boundary and the held header (a28, a29), the close plan's codes and the second-Close rule (a30 to a33), the keepalive clock (a34, a35), the parser's state after a refusal (a36), the tunnel (c01 to c27: unmasked Close, no boundary wait, Ping inside a frame, Pong forwarded or not resetting the idle timer, the client's clock, deadline and Ping removed, violation ignored, Close code and wait not kept, truncation untagged, in-flight bytes discarded, no lingering, counters, limit unread, column off by one, log field, outcome), the generator (g01 to g04). **Slice 1's 75 mutants were re-run** after the tunnel was rewritten: ten had to be rewritten to the new code (the tunnel is one function for both directions: p09 to p17, p22, p25), then **72 killed, 3 survive for the same reasons as before** (r08, p20, p29: section 13 of `docs/websocket.md`; p29 is now "read_client does not call tunnel_up", still equivalent).
+
+**Counts, verbatim from the last full run:**
+
+`wsframes_test.py`: `25 tests, 0 failures` (the two interop-library tests included; without `websockets`, 2 skipped). `websocket_test.py`: `55 tests, 0 failures`. `proxy_test.py`, three runs: `77 tests, 0 failures` each. `admin_test.py`: `16 tests, 0 failures`. `tls_test.py`: `22 tests, 0 failures`. `ratelimit_test.py`: `16 tests, 0 failures`. `auth_test.py`: `14 tests, 0 failures`. `generate_test.py`: `7 prefix cases, 259 refusal cases, 41 accepted, 0 failures`. `cancho test`: 13 suites, 163 tests, 0 failed (wsframe 21). `route_test.py 12 400`: `12 tables, 4800 requests (1356 routed, 3444 refused), 0 failures`; `--fixed`: `18 fixed cases, 0 failures`. `response/run.py`: `55 cases, 0 failures`. `smuggling/run.py --gateway`: `67 cases, 0 disagreements`; `--prefixes`: `2815 prefixes checked, 0 failures`; `--chunked`: `43 chunked cases x 6 deliveries = 258 runs, 0 failures`; `--fuzz 1500`: `1500 fuzzed heads, 31 accepted, 0 failures`. `check_site.py`, `figures.py --check`, `proof.py --check`, `authority.py --check`, `authority_test.py`, `lines.py`, `cancho fmt --check src tests generated` and both `generate.py --check`: pass. The `headers/differential.py` run (needs nginx) was not run here.
+
+**Not done, and not known.**
+
+- **The JWT work** (branch `ccr-9dcd2e99-lb9flr-jwt`) was not merged when this was finished. The merge touches the same route-table column list (this slice's column is 22; JWT's are 22 to 25: bump `route.ws_max_message` to 26 and the generator's blob), `src/metrics.cho` (`worst_case`, the route block), `generate.py`, the log (`identity` comes before `ws_close`) and the evidence pages.
+- **Not measured:** latency through the parser; hundreds of tunnels with this slice (60 with traffic here, 120 in slice 1); the benchmark harness; a browser.
+- **A Close frame's reason and code values** are not validated (section 3).
+- **Close 1008 (policy violation) is never sent** (the metrics label exists for a peer's); per-message rate limiting, a binary versus text policy and OCPP validation are section 14.
+- **A violation by a peer during a close** is only counted as the end of that side (no second tag).
+- **The gateway Ping's 8-byte payload is its clock reading**: a peer's own Pong with the same value would be swallowed (section 6).
