@@ -23,9 +23,9 @@ read WebSocket frames.
 
 | not done | why |
 |---|---|
-| interpreting frames: ping/pong policy, close handshake, message size limits, fragmentation limits, UTF-8 validation | a byte tunnel is the smallest thing that carries OCPP; each of these is a later decision with its own gate (section 10 says what its absence costs) |
+| interpreting frames: ping/pong policy, close handshake, message size limits, fragmentation limits, UTF-8 validation *(done in slice 2, 2026-10-12: `docs/websocket-frames.md`)* | a byte tunnel is the smallest thing that carries OCPP; each of these is a later decision with its own gate (section 10 says what its absence costs) |
 | `permessage-deflate` and every other extension | stripped from the request (section 5), so none is negotiated; an upstream that answers with one is refused (`ws.upstream-extensions`) |
-| a gateway-originated ping, or any idle keepalive | **none in slice 1** (section 8). The idle timeout is the only liveness rule |
+| a gateway-originated ping, or any idle keepalive | **none in slice 1** (section 8; *slice 2 adds an optional one*). The idle timeout is the only liveness rule |
 | TLS to the upstream (`wss` upstream) | the upstream side is plain, as everywhere else in the gateway (`docs/tls.md` section 2) |
 | routing a connection by its `Sec-WebSocket-Protocol` | the route is chosen by `Host`, path and method as for any request |
 | HTTP/2 WebSocket (RFC 8441), `CONNECT` | the gateway speaks HTTP/1.1 and refuses `CONNECT` (`framing.method-unsupported`) |
@@ -135,7 +135,7 @@ and a response body do today (`docs/proxy.md` section 2), so a client that stops
 - *idle*: `now + ws_idle_timeout_ms`, reset every time a byte moves in either direction. Expiry closes both connections; the log line says `rule: "ws.idle-timeout"`.
 - *lifetime*: `101 time + ws_max_lifetime_ms`, never reset. Expiry closes both; the log says `rule: "ws.lifetime"`.
 
-The gateway **does not send a WebSocket Close frame** when it closes on a timer. It cannot do so safely: it does not parse frames, so it cannot know whether the byte it would write lands in the middle of a frame the upstream is
+*(Superseded in slice 2: the gateway now parses frames and sends a Close frame, 1001, at a frame boundary, then waits `ws_close_ms` for the echo; `docs/websocket-frames.md` section 7.)* The gateway **does not send a WebSocket Close frame** when it closes on a timer. It cannot do so safely: it does not parse frames, so it cannot know whether the byte it would write lands in the middle of a frame the upstream is
 sending. The peer sees a TCP close without a close handshake (WebSocket close code 1006 on its side, "abnormal closure"). That is the price of a byte tunnel and it is stated here rather than discovered.
 
 **Ends.**
@@ -152,7 +152,7 @@ Whether a peer closed after a proper WebSocket close handshake is not known to t
 **Admission of bytes before the 101.** The client is not read between the end of its head and the 101 (row 6 refuses what came with the head). Bytes it sends in that window wait in the kernel and are forwarded after the 101;
 they cannot reach the upstream earlier.
 
-## 8. Idle ping policy: none in slice 1
+## 8. Idle ping policy: none in slice 1 *(slice 2: an optional keepalive Ping, `docs/websocket-frames.md` section 6)*
 
 The gateway sends nothing on its own. An idle tunnel is closed by `ws_idle_timeout_ms`. Charger-side liveness is the charger's: OCPP's `Heartbeat` (or any message) is traffic that resets the idle timer, and a
 WebSocket ping from either end is traffic too. What this means in practice: with the default 600 s, a charger that heartbeats every 300 s survives; a charger that is silent longer is closed, and reconnects. A gateway-originated ping
@@ -367,7 +367,7 @@ Two defects the first runs of the tests found **in the tests**, not in the gatew
 
 **Not done, and not known.**
 
-- **No frame is read**, so there is no ping or pong policy, no close handshake of the gateway's own, no message-size limit (a peer can send a 4 GiB frame and the tunnel carries it), no fragment limit, no UTF-8 check, no per-message anything. Each is a later slice with its own gate; section 8 and section 7 say what their absence costs.
+- *(Slice 2 reads frames: see `docs/websocket-frames.md`; this list is slice 1's.)* **No frame is read**, so there is no ping or pong policy, no close handshake of the gateway's own, no message-size limit (a peer can send a 4 GiB frame and the tunnel carries it), no fragment limit, no UTF-8 check, no per-message anything. Each is a later slice with its own gate; section 8 and section 7 say what their absence costs.
 - **No Close frame on a timer** (section 7), no gateway-originated keepalive, no `permessage-deflate` (stripped).
 - **More than 127 tunnels**: the slot table; a deployment of thousands of chargers needs the slot count as a deployment key and a new memory budget. Measured only at 120.
 - **The log line at open**: a tunnel that has not ended has no line; `ws_tunnels_active` is the only trace.
