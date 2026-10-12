@@ -341,6 +341,235 @@ REFUSALS += auth_cases()
 ACCEPTED += auth_accepted()
 
 
+# --- JWT (docs/jwt.md section 8): rules 17 to 30, one refusal per rule plus the variants of each
+import jwtkit  # noqa: E402
+
+PKA = jwtkit.b64u(jwtkit.public_key(bytes(range(32))))
+PKB = jwtkit.b64u(jwtkit.public_key(bytes(range(1, 33))))
+JK1 = '[[jwt_key]]\nname = "ka"\npublic_key = "%s"\n' % PKA
+JK2 = '[[jwt_key]]\nname = "kb"\npublic_key = "%s"\n' % PKB
+JR = '[[route]]\nupstream = "a"\npath_prefix = "/"\nauth = "jwt"\n'
+
+
+def curve_points():
+    """The torsion points of Ed25519 (the eight whose order divides 8), found by clearing the prime-order part of points taken from small y's, and a y with no point."""
+    torsion, off_curve = {}, None
+    for y in range(2, 80):
+        raw = y.to_bytes(32, "little")
+        point = jwtkit.decompress(raw)
+        if point is None:
+            off_curve = off_curve or raw
+            continue
+        t = jwtkit.mul(jwtkit.Q, point)
+        torsion[jwtkit.compress(t)] = True
+    identity = jwtkit.compress(jwtkit.IDENTITY)
+    torsion[identity] = True
+    torsion[((1 << 255) - 20).to_bytes(32, "little")] = True       # y = -1: order 2
+    torsion[bytes(32)] = True                                       # y = 0: order 4
+    torsion[bytes(31) + b"\x80"] = True
+    return sorted(torsion), off_curve
+
+
+TORSION, OFF_CURVE = curve_points()
+
+
+def jwt_refusal(rule, marker, text, last=False):
+    return (rule, at(text, marker, last), text)
+
+
+def jkey(name, key):
+    return '[[jwt_key]]\nname = %s\npublic_key = %s\n' % (name, key)
+
+
+def jwt_cases():
+    out = []
+    base = TOP + ONE
+    # 17: the name (also not another key's name)
+    for name in ('"Alice"', '"a b"', '""', '"-x"', "5", '"%s"' % ("x" * 33), '"k/1"'):
+        out.append(jwt_refusal("config.auth", "name = ", base + jkey(name, '"%s"' % PKA) + JR, last=True))
+    out.append(jwt_refusal("config.auth", "[[jwt_key]]", base + '[[jwt_key]]\npublic_key = "%s"\n' % PKA + JR))
+    out.append(jwt_refusal("config.auth", 'name = "ka"', base + JK1 + jkey('"ka"', '"%s"' % PKB) + JR, last=True))
+    out.append(jwt_refusal("config.auth", 'name = "alice"', base + K1 + jkey('"alice"', '"%s"' % PKA) + JR + AR, last=True))
+    # 18: the encoding of the public key
+    good = PKA
+    noncanon = good[:-1] + next(c for c in "BCDEFGHIJKLMNOPQRSTUVWXYZ" if jwtkit.b64u(jwtkit.unb64u(good[:-1] + c)) != good[:-1] + c)
+    for bad in ('"%s"' % good[:-1], '"%s"' % (good + "A"), '"%s="' % good[:-1], '"%s+"' % good[:-1], '"%s/"' % good[:-1], '"%s"' % noncanon, "5", '""',
+                '"%s"' % ("A" * 43 + " "), '"%s"' % (good[:20] + " " + good[21:]), '"%s"' % jwtkit.b64u(bytes(range(31)))[:43]):
+        out.append(jwt_refusal("config.auth", "public_key", base + jkey('"ka"', bad) + JR))
+    out.append(jwt_refusal("config.auth", "[[jwt_key]]", base + '[[jwt_key]]\nname = "ka"\n' + JR))
+    # 19: not a point, and the points of small order (a signature by them verifies for every message)
+    out.append(jwt_refusal("config.auth", "public_key", base + jkey('"ka"', '"%s"' % jwtkit.b64u(OFF_CURVE)) + JR))
+    for t in TORSION:
+        assert jwtkit.decompress(t) is None or jwtkit.small_order(jwtkit.decompress(t)), t.hex()
+        if jwtkit.decompress(t) is not None:
+            out.append(jwt_refusal("config.auth", "public_key", base + jkey('"ka"', '"%s"' % jwtkit.b64u(t)) + JR))
+    # 20: one verifier, two names
+    out.append(jwt_refusal("config.auth", "public_key", base + JK1 + jkey('"kb"', '"%s"' % PKA) + JR, last=True))
+    # 21: more than 8 keys
+    many = "".join(jkey('"k%d"' % i, '"%s"' % jwtkit.b64u(jwtkit.public_key(bytes([i + 1]) * 32))) for i in range(9))
+    out.append(("config.auth", None, base + many + JR))
+    # 22: the kind
+    for kind in ('"oauth"', '"JWT"', '"api_key"', "[]", '["jwt", "jwt"]', '["jwt", "x"]', "5", "true", '["api-key", "api-key"]'):
+        out.append(jwt_refusal("config.auth", "auth = ", base + K1 + JK1 + '[[route]]\nupstream = "a"\npath_prefix = "/"\nauth = %s\n' % kind))
+    # 23: jwt_* without jwt, auth_keys without api-key
+    for extra in ('jwt_alg = "EdDSA"\n', 'jwt_keys = ["ka"]\n', 'jwt_aud = "api"\n', 'jwt_iss = "https://i.example"\n', "jwt_leeway = 5\n"):
+        out.append(jwt_refusal("config.auth", extra.split(" =")[0], base + K1 + JK1 + AR + extra + JR.replace('path_prefix = "/"', 'path_prefix = "/j"')))
+        out.append(jwt_refusal("config.auth", extra.split(" =")[0], base + K1 + JK1 + '[[route]]\nupstream = "a"\npath_prefix = "/"\n' + extra + JR.replace('path_prefix = "/"', 'path_prefix = "/j"')))
+    out.append(jwt_refusal("config.auth", "auth_keys", base + K1 + JK1 + JR + 'auth_keys = ["alice"]\n' + AR.replace('path_prefix = "/"', 'path_prefix = "/a"')))
+    # 24: the algorithm: one, EdDSA, never from the token
+    for alg in ('"none"', '"None"', '"HS256"', '"hs256"', '"HS512"', '"RS256"', '"ES256"', '"eddsa"', '"EdDSA "', '"Ed25519"', "5", "true", '["EdDSA"]', '""'):
+        out.append(jwt_refusal("config.auth", "jwt_alg", base + JK1 + JR + "jwt_alg = %s\n" % alg))
+    # 25: the key list
+    for keys in ("[]", '["nokey"]', '["ka", "ka"]', '"ka"', "[5]", '["KA"]'):
+        out.append(jwt_refusal("config.auth", "jwt_keys", base + JK1 + JR + "jwt_keys = %s\n" % keys))
+    # 26: the audience and the issuer
+    for key in ("jwt_aud", "jwt_iss"):
+        for value in ('""', "5", "true", '["a"]', "'a\"b'", "'a\\\\b'", '"%s"' % ("x" * 97), '"a\\tb"', '"café"', '"a\\nb"', '"\\u007f"'):
+            out.append(jwt_refusal("config.auth", key, base + JK1 + JR + "%s = %s\n" % (key, value)))
+    # 27: the leeway
+    for value in ("61", "-1", "1.5", '"5"', "true", "1000000", "[5]"):
+        out.append(jwt_refusal("config.auth", "jwt_leeway", base + JK1 + JR + "jwt_leeway = %s\n" % value))
+    # 28: keys that protect nothing, and a route nobody can enter
+    out.append(jwt_refusal("config.auth", "[[jwt_key]]", base + JK1 + '[[route]]\nupstream = "a"\npath_prefix = "/"\n'))
+    out.append(jwt_refusal("config.auth", "[[jwt_key]]", base + K1 + JK1 + AR))
+    out.append(jwt_refusal("config.auth", "auth = ", base + JR))
+    out.append(jwt_refusal("config.auth", "auth = ", base + K1 + '[[route]]\nupstream = "a"\npath_prefix = "/"\nauth = ["api-key", "jwt"]\n'))
+    out.append(jwt_refusal("config.auth", "auth = ", base + JK1 + '[[route]]\nupstream = "a"\npath_prefix = "/"\nauth = ["api-key", "jwt"]\n'))
+    # 29: a token is a Bearer token
+    for header in ("X-Token", "x-api-key", "Proxy-Authorization"):
+        out.append(jwt_refusal("config.auth", "auth_header", base + JK1 + JR + 'auth_header = "%s"\n' % header))
+    out.append(jwt_refusal("config.auth", "auth_header", base + K1 + JK1 + '[[route]]\nupstream = "a"\npath_prefix = "/"\nauth = ["api-key", "jwt"]\nauth_header = "X-Api-Key"\n'))
+    # 30: no identity to key a rate limit on
+    out.append(jwt_refusal("config.ratelimit", "rate_key", base + JK1 + JR + 'rate_limit = "5/s"\nrate_key = "auth"\n'))
+    out.append(jwt_refusal("config.ratelimit", "rate_key", base + K1 + JK1 + '[[route]]\nupstream = "a"\npath_prefix = "/"\nauth = ["api-key", "jwt"]\nrate_limit = "5/s"\nrate_key = "auth"\n'))
+    # the plain listener: a token crosses it as a key does (rule 13)
+    out.append(jwt_refusal("config.auth", "auth = ", 'listen = 80\n' + ONE + JK1 + JR))
+    out.append(jwt_refusal("config.auth", "auth = ", 'listen = 80\nauth_allow_plain = false\n' + ONE + JK1 + JR))
+    # an unknown key of [[jwt_key]] is named like any other, and a misspelt table name too
+    out.append(jwt_refusal("config.unknown-key", "colour", base + JK1 + 'colour = "red"\n' + JR))
+    out.append(jwt_refusal("config.unknown-key", "jwt_alg_x", base + JK1 + JR + 'jwt_alg_x = "EdDSA"\n'))
+    return out
+
+
+def jwt_accepted():
+    tls = 'tls_listen = 443\ntls_dir = "/etc/cancho/tls"\n'
+    eight = "".join(jkey('"k%d"' % i, '"%s"' % jwtkit.b64u(jwtkit.public_key(bytes([i + 1]) * 32))) for i in range(8))
+    return [
+        TOP + ONE + JK1 + JR,
+        TOP + ONE + JK1 + JK2 + JR + 'jwt_alg = "EdDSA"\njwt_keys = ["kb"]\njwt_aud = "https://api.example.com"\njwt_iss = "https://issuer.example.com"\njwt_leeway = 5\nauth_forward = true\n',
+        TOP + ONE + JK1 + JR + 'jwt_leeway = 0\n',
+        TOP + ONE + JK1 + JR + 'jwt_leeway = 60\n',
+        TOP + ONE + JK1 + JR + 'auth_header = "authorization"\n',
+        TOP + ONE + JK1 + JR + 'jwt_aud = "%s"\njwt_iss = " !#[]~"\n' % ("x" * 96),
+        TOP + ONE + eight + JR,
+        TOP + ONE + K1 + JK1 + '[[route]]\nupstream = "a"\npath_prefix = "/"\nauth = ["api-key", "jwt"]\njwt_aud = "api"\nauth_keys = ["alice"]\n',
+        TOP + ONE + K1 + JK1 + '[[route]]\nupstream = "a"\npath_prefix = "/"\nauth = ["jwt", "api-key"]\n',
+        TOP + ONE + K1 + JK1 + AR + JR.replace('path_prefix = "/"', 'path_prefix = "/j"'),
+        TOP + ONE + JK1 + JR + 'rate_limit = "5/s"\nrate_key = "route"\n',
+        TOP + ONE + JK1 + JR + 'trust_forwarded = true\nrate_limit = "5/s"\nrate_key = "xff:last"\n',
+        TOP + ONE + JK1 + JR + 'websocket = true\n',
+        tls + ONE + JK1 + JR,
+        'listen = 80\nauth_allow_plain = true\n' + tls + ONE + JK1 + JR,
+        TOP + ONE + JK1 + JR + '[[route]]\nupstream = "a"\npath_prefix = "/open"\n',
+    ]
+
+
+REFUSALS += jwt_cases()
+ACCEPTED += jwt_accepted()
+
+
+def jwt_compiled(run, failures):
+    """What JWT acceptance compiles (docs/jwt.md section 8): the key table, the route's record, and what --explain says."""
+    text = (TOP + ONE + K1 + JK1 + JK2 + JR + 'jwt_keys = ["kb"]\njwt_aud = "api"\njwt_iss = "https://i.example"\njwt_leeway = 7\n' +
+            '[[route]]\nupstream = "a"\npath_prefix = "/both"\nauth = ["api-key", "jwt"]\n' + '[[route]]\nupstream = "a"\npath_prefix = "/key"\nauth = "api-key"\n' +
+            '[[route]]\nupstream = "a"\npath_prefix = "/c"\n')
+    with tempfile.TemporaryDirectory() as tmp:
+        f = pathlib.Path(tmp) / "d.toml"
+        f.write_text(text)
+        subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(f), "--out", tmp], check=True)
+        table = (pathlib.Path(tmp) / "routes.cho").read_text()
+        explained = run(text).stdout
+    wants = ["pub fn jwt_key_count() -> [] int {\n    return 2;", 'return "ka\\t%s\\nkb\\t%s\\n";' % (PKA, PKB),
+             '\\t2\\tauthorization\\t0\\t\\tBearer realm=\\"cancho-gateway\\"\\t1\\tapi\\thttps://i.example\\t7\\n',
+             '\\t3\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t*\\t\\t\\t0\\n',
+             '\\t1\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t\\t\\t\\t0\\n',
+             '\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\n']
+    for want in wants:
+        if want not in table:
+            print("FAIL the routes table must contain %r" % want)
+            failures += 1
+    for want in ("accepts jwt (EdDSA): keys kb, audience 'api', issuer 'https://i.example', leeway 7 s", "accepts jwt (EdDSA): keys all, audience not checked, issuer not checked, leeway 0 s; an API key too",
+                 "jwt keys: ka, kb (public keys compiled in)", "jwt only"):
+        if want not in explained:
+            print("FAIL --explain must say %r: %r" % (want, explained[-500:]))
+            failures += 1
+    # The public keys are compiled in, and nothing else of a key is: there is no private half in the file to compile.
+    seed = bytes(range(32))
+    if jwtkit.b64u(seed) in table or seed.hex() in table:
+        print("FAIL a seed must not be written")
+        failures += 1
+    return failures
+
+
+def mkjwt_checks(failures):
+    """scripts/mkjwt.py (docs/jwt.md section 8): the seed is on standard error only, the public key is the seed's, nothing is written, a token it signs verifies under jwtkit and
+    under OpenSSL where `cryptography` is installed, and the output is a deployment the generator accepts."""
+    script = str(ROOT / "scripts" / "mkjwt.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        before = sorted(p.name for p in pathlib.Path(tmp).iterdir())
+        made = subprocess.run([sys.executable, script, "keygen", "issuer-a"], capture_output=True, text=True, cwd=tmp)
+        again = subprocess.run([sys.executable, script, "keygen", "issuer-a"], capture_output=True, text=True, cwd=tmp)
+        after = sorted(p.name for p in pathlib.Path(tmp).iterdir())
+    m = re.search(r"([A-Za-z0-9_-]{43})\s*$", made.stderr)
+    if made.returncode != 0 or not m:
+        print("FAIL mkjwt keygen must print the seed (43 characters of base64url) on standard error: %r" % made.stderr)
+        return failures + 1
+    seed_text = m.group(1)
+    seed = jwtkit.unb64u(seed_text)
+    want = '[[jwt_key]]\nname = "issuer-a"\npublic_key = "%s"\n' % jwtkit.b64u(jwtkit.public_key(seed))
+    if made.stdout != want:
+        print("FAIL mkjwt keygen must print the table with the public key on standard output: %r" % made.stdout)
+        failures += 1
+    if seed_text in made.stdout or before != after:
+        print("FAIL mkjwt keygen must not put the seed on standard output nor write a file")
+        failures += 1
+    other = re.search(r"([A-Za-z0-9_-]{43})\s*$", again.stderr)
+    if not other or other.group(1) == seed_text:
+        print("FAIL two seeds must differ")
+        failures += 1
+    signed = subprocess.run([sys.executable, script, "sign", "--kid", "issuer-a", "--aud", "api", "--iss", "https://i.example", "--ttl", "60"], input=seed_text + "\n", capture_output=True, text=True)
+    token = signed.stdout.strip()
+    if signed.returncode != 0 or signed.stderr or token.count(".") != 2:
+        print("FAIL mkjwt sign must print a token and nothing on standard error: %r %r" % (signed.stdout, signed.stderr))
+        return failures + 1
+    h, p, s = token.split(".")
+    header, payload = json.loads(jwtkit.unb64u(h)), json.loads(jwtkit.unb64u(p))
+    if header != {"alg": "EdDSA", "typ": "JWT", "kid": "issuer-a"} or payload["aud"] != "api" or payload["iss"] != "https://i.example" or not 0 < payload["exp"] - __import__("time").time() <= 60:
+        print("FAIL mkjwt sign made the wrong token: %r %r" % (header, payload))
+        failures += 1
+    if not jwtkit.verify(jwtkit.public_key(seed), (h + "." + p).encode(), jwtkit.unb64u(s)):
+        print("FAIL a token mkjwt signs must verify")
+        failures += 1
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        Ed25519PublicKey.from_public_bytes(jwtkit.public_key(seed)).verify(jwtkit.unb64u(s), (h + "." + p).encode())
+    except ImportError:
+        pass
+    except Exception as e:   # noqa: BLE001
+        print("FAIL OpenSSL must verify a token mkjwt signs: %r" % e)
+        failures += 1
+    for args, text in ((["keygen", "Issuer"], ""), (["keygen"], ""), (["sign"], "has space"), (["sign"], ""), (["sign", "--bogus"], seed_text), (["sign"], seed_text[:-1]), ([], ""), (["nope"], "")):
+        bad = subprocess.run([sys.executable, script, *args], input=text, capture_output=True, text=True)
+        if bad.returncode != 2 or bad.stdout:
+            print("FAIL mkjwt %r must be refused with exit 2 and print nothing on standard output: %r" % (args, bad.stdout))
+            failures += 1
+    out = run(TOP + ONE + made.stdout + JR)
+    if out.returncode != 0:
+        print("FAIL a deployment with mkjwt's table must be accepted: %r" % out.stderr)
+        failures += 1
+    return failures
+
+
 def auth_compiled(run, failures):
     """What authentication compiles (docs/auth.md sections 4.1 and 6): the key table, the route's record, and what --explain says."""
     text = (TOP + ONE + K1 + K2 + AR + 'auth_header = "X-Api-Key"\nauth_keys = ["bob"]\n' + '[[route]]\nupstream = "a"\npath_prefix = "/b"\nauth = "api-key"\nrate_limit = "5/s"\nrate_key = "auth"\nrate_buckets = 8\n' +
@@ -353,9 +582,9 @@ def auth_compiled(run, failures):
         explained = run(text).stdout
     keys = '"alice\\t%s\\nbob\\t%s\\n"' % (D1, D2)
     wants = ["pub fn key_count() -> [] int {\n    return 2;", "return " + keys + ";",
-             '\\t1\\tx-api-key\\t0\\t1\\tApiKey realm=\\"cancho-gateway\\", header=\\"x-api-key\\"\\n',
-             '\\ta\\t8\\t0\\t1\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\n',
-             '\\t0\\t\\t0\\t\\t\\n']
+             '\\t1\\tx-api-key\\t0\\t1\\tApiKey realm=\\"cancho-gateway\\", header=\\"x-api-key\\"\\t\\t\\t\\t0\\n',
+             '\\ta\\t8\\t0\\t1\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t\\t\\t\\t0\\n',
+             '\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\n']
     for want in wants:
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
@@ -475,7 +704,7 @@ def main():
         subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(f), "--out", tmp], check=True)
         table = (pathlib.Path(tmp) / "routes.cho").read_text()
         explained = run(limited).stdout
-    for want in ("\\t10\\t60000\\t3\\th:x-api-key\\t64\\t0\\t0\\t\\t0\\t\\t\\n", "\\t0\\t0\\t0\\t\\t0\\t64\\t0\\t\\t0\\t\\t\\n", "\\t7\\t1000\\t7\\tx:l\\t1024\\t64\\t0\\t\\t0\\t\\t\\n", "\\t2\\t3600000\\t2\\tr\\t1\\t1088\\t0\\t\\t0\\t\\t\\n",
+    for want in ("\\t10\\t60000\\t3\\th:x-api-key\\t64\\t0\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\n", "\\t0\\t0\\t0\\t\\t0\\t64\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\n", "\\t7\\t1000\\t7\\tx:l\\t1024\\t64\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\n", "\\t2\\t3600000\\t2\\tr\\t1\\t1088\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\n",
                  "pub fn rate_buckets_total() -> [] int {\n    return 1089;"):
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
@@ -485,6 +714,8 @@ def main():
         failures += 1
     failures = auth_compiled(run, failures)
     failures = mkkey_checks(failures)
+    failures = jwt_compiled(run, failures)
+    failures = mkjwt_checks(failures)
     print("%d prefix cases, %d refusal cases, %d accepted, %d failures" % (len(PREFIX), len(REFUSALS), len(ACCEPTED), failures))
     return 1 if failures else 0
 
