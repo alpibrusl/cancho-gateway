@@ -1,6 +1,6 @@
 # JWT bearer tokens (task #8, slice 2)
 
-Status: **design, written before the code (2026-10-12).** Section 13 (as built) is added when the code is done. The gates in section 11 are fixed here and must be able to fail. A claim found false later is
+Status: **built (2026-10-12).** Sections 1 to 12 are the design, written before the code and corrected in place where the build or a test found it wrong (marked *(corrected)*); section 13 is what was built and measured. The gates in section 11 are fixed here and must be able to fail. A claim found false later is
 corrected in place and marked *(corrected)*. Claims about cancho are about the pinned compiler (`cancho.toml`, `2fcf4cd`). This is the "next slice" that `docs/auth.md` section 11.2 sketched; where this document
 differs from that sketch it says so in section 12, and `docs/auth.md` points here.
 
@@ -50,7 +50,7 @@ its own message; the rule is `config.auth`). **The verifier is never chosen from
 - *the classic attack*, an HS256 token signed with the RSA/EC/Ed25519 **public key as the HMAC secret**, is refused at the header: there is no HMAC code to run, so there is nothing to confuse. The test makes exactly that
   token with the deployment's public key as the secret (`tests/jwt_test.py`) and expects `jwt.alg`;
 - *`alg: none`* is refused in every spelling (`none`, `None`, `NONE`) by the same comparison, which is exact and case-sensitive: `"EdDSA"` and nothing else. `"eddsa"` is refused as well. RFC 7518 3.1 and RFC 8037 3.1 both spell it `EdDSA`;
-- *a key that is not an Ed25519 key* cannot be configured: the deployment's key is 32 bytes decoded from base64url, validated as a curve point of the prime-order subgroup's coset family and **not of small order**
+- *a key that is not an Ed25519 key* cannot be configured: the deployment's key is 32 bytes decoded from base64url, validated as a point of the curve and **not of small order**
   (the generator multiplies by 8; section 8). A small-order public key is the one way a signature verifies for every message, and the gateway never holds one.
 
 **Why not HS256.** It was the second algorithm of the `docs/auth.md` sketch, with a stated price: the secret read at start through the certificate directory handle, a second narrowed path, **one more `fs_read` label in
@@ -214,7 +214,7 @@ A token's content failing is always:
 
 the **same bytes** (but for the request id) whichever check failed: shape, `alg`, `kid`, claims, audience, issuer, expiry, clock or signature. RFC 6750 3.1 gives `invalid_token` for "expired, revoked, malformed, or invalid"; nothing
 finer is said to the client, so the response is not an oracle for which `kid`s exist or which audience is configured. Absent and badly-framed *headers* keep their slice-1 answers (`auth.missing`; `auth.malformed` with
-`invalid_request`): they describe the HTTP request, not the token. The same answer for every token failure is a gate (an end-to-end test compares the bytes of fourteen causes).
+`invalid_request`): they describe the HTTP request, not the token. The same answer for every token failure is a gate (an end-to-end test compares the bytes of thirty-four causes).
 
 The **log** and the **counters** are where the cause lives (the log is the operator's, the response is the attacker's). The access log's `rule` of a refused token is one of:
 
@@ -277,7 +277,7 @@ Each must be able to fail, with a mutant shown failing it (section 13 records th
    the extremes: a credential of 0, 1, 2,047, 2,048 and 2,049 bytes, 10,000 bytes, every byte value, never a panic.
 2. **The generator** (`tests/generate_test.py`): each of rules 17 to 30 one refusal test with the key and a line; the accepted forms; the generated tables; the counts of that file updated.
 3. **End to end** (`tests/jwt_test.py`: the built gateway, a recording upstream, tokens made in memory): a valid token passes **and the credential is not in what the upstream recorded**; `auth_forward = true` keeps it;
-   fourteen causes (expired, not yet valid, wrong audience, wrong issuer, wrong signature, `alg: none`, `alg` mismatch with the HS256-signed-with-the-public-key token, tampered payload, duplicate claims,
+   thirty-four causes (expired, not yet valid, wrong audience, wrong issuer, wrong signature, `alg: none`, `alg` mismatch with the HS256-signed-with-the-public-key token, tampered payload, duplicate claims,
    oversize, malformed base64url, wrong segment count, missing `exp`, unknown `kid`) each refused with **401 and a byte-identical external response but for the request id**, the right tag in the log and the right counter;
    a token valid on one route refused on another route that has a different `aud`; leeway margins; unauthenticated routes unaffected; **authentication before the rate limiter**; WebSocket upgrades; TLS; a route
    that accepts both kinds, with the shape rule of section 12.1 tested in both directions; the access log's `identity`; counters agree with what clients were told.
@@ -326,4 +326,204 @@ Order of errors for the header: absent (`auth.missing`), twice or another scheme
 
 ## 13. As built
 
-*(written after the code)*
+Built 2026-10-12 on the pinned compiler. Files: `src/jwt.cho` (the verifier, pure, 393 lines), `src/json_claims.cho` (the bounded reader around `std.json`, pure, 172 lines), `src/auth.cho` (`credential_ok_cap`, `parse_cap`, `line_in`,
+`identity`), `src/route.cho` (four accessors: fields 22 to 25 of the route record), `src/metrics.cho` (eleven counters per route; the route's block grew from 32 to 48 ints), `src/proxy.cho` (`unauthenticated` branches on the credential's shape,
+about 35 lines; `refuse_as`, which says one thing to the client and another to the log), `src/shared.cho` (the log's identity), `scripts/generate.py` (rules 17 to 30 and the tables), `scripts/jwtkit.py` (Ed25519 and JWS in pure Python, for the generator's
+point check, `mkjwt.py` and the tests), `scripts/mkjwt.py`. `proxy.cho` is 1,712 lines and `shared.cho` 443: the ceiling is not near. **The authority report does not change**: no label moves. `manifests/` differ by the names of the pure functions that
+`std.ed25519`, `std.json` and the new modules add, and `docs/proof.html` by their count (989 to 1,078); `std.ed25519.verify` and `std.json` are pure and need no capability.
+
+### 13.1 What the build and the tests found false or missing in the design
+
+- *(corrected)* **Nested repeated names were not refused.** The first `json_claims` looked at the root object only. `tests/jwt_differential.py` found it on its first run (2 of 1,498 tokens: its reference refused `{"a":{"x":1,"x":2}}`, the gateway accepted it). Every object of the document is now checked; section 5 says so.
+- *(corrected)* **A token of 2,049 bytes got a different answer from one of 2,048.** The first design read at most 2,048 bytes off the header on a token route, so a longer credential was `auth.malformed` with `error="invalid_request"` and a shorter bad one `invalid_token`. The route now reads up to the connection buffer and `verify` refuses what is over 2,048 as `jwt.malformed` (section 4, rule 1).
+- *(corrected)* **`alg: none` and an HS256 token were first going to be `jwt.malformed`.** Their signatures (empty, 43 characters) fail the signature's length test, which ran before the header. The signature's text is now checked after the header, so both are `jwt.alg` in the log (section 6, step 4).
+- **`std.ed25519.verify` accepts a signature by a key of small order** (the point of order 4, all zero bytes, verifies "R the identity, S zero" for one message in four; `test_a_small_order_key_would_verify_a_forgery...` makes one and the verifier accepts it). Nothing in `verify` can stop that: the protection is that **the generator refuses such a key** (rule 19, the eight torsion points are generated and tried in `tests/generate_test.py`). Recorded here because the std module does not say it.
+- Three guards of the first code were redundant and were removed rather than excused (their mutants survived): the `string_plain` test on `typ` (the raw text of an escaped string never equals `jwt`), the `nbf >= 0` test (an absent `nbf` is `-1` and `t + l` is at least the floor), and the clamp of the clock at both ends (a clock past `exp + l` is expired before `t + l` is computed, and a negative one is below the floor). Ten mutants survive on purpose: they are second lines (a cap behind a buffer, a length test behind a decoder) whose removal changes no answer; each is argued in the table.
+- The mutants of the earlier slices (`tests/auth_mutants.py`) had ten edits whose text this work changed; they were updated (81 mutants, all valid again). **Two edits of `tests/ratelimit_mutants.py` (`p10`) and `tests/websocket_mutants.py` (`p22`, `p25`) had already stopped matching after slice 1** (found while checking this work's; not touched).
+
+### 13.2 Tests
+
+| suite | result |
+|---|---|
+| `cancho test` | 13 suites, **181 tests, 0 failures**: `jwt` 40 (new: base64url, the JSON reader, every claim at its boundary, the RFC 8037 vector, the small-order forgery, hostile input of every size and byte), `metrics` 14 (1 new; offsets moved with the 48-int block), `auth` 19, the rest unchanged |
+| `python3 tests/jwt_test.py` | **16 tests, 0 failures** (run twice in the gate; thirty-four causes of refusal, one answer, the tag of each in the log and counter) |
+| `python3 tests/jwt_differential.py 1500` | **1,498 tokens, 0 disagreements** with the reference (363 accepted; refused: 511 malformed, 168 signature, 129 alg, 92 claims, 77 kid, 64 aud, 43 header, 30 iss, 14 expired, 7 nbf); 3,000 tokens with seeds 8037 and 1 also 0 after the fix |
+| `python3 tests/generate_test.py` | 7 prefix cases, **352 refusal cases** (117 new: rules 17 to 30 and the checks of `mkjwt.py`), **51 accepted** (16 new), 0 failures |
+| `python3 tests/proxy_test.py` | 77 tests, 0 failures, three runs |
+| `python3 tests/admin_test.py`, `tls_test.py`, `websocket_test.py`, `ratelimit_test.py`, `auth_test.py` | 16, 22, 55 (2 skipped: the `websockets` library is not installed), 16, 14; 0 failures |
+| smuggling (`--gateway`, `--prefixes`, `--chunked`, `--fuzz 1500`), `tests/response/run.py`, `route_test.py 12 400` and `--fixed` | 0 failures |
+| `tests/headers/differential.py` (nginx) | 114 comparisons, 36 differences, all listed, 0 failures: unchanged |
+
+Two existing tests changed because of this work: the offsets of `tests/metrics_test.cho` (a route's block is 48 ints) and the member lists of a route's metrics object in `tests/admin_test.py`, `tests/auth_test.py` and `tests/ratelimit_test.py`, which now end with `jwt_refused`. The generator's expected route lines gained four fields.
+
+### 13.3 What a token costs, measured (`python3 tests/jwt_timing.py 300`)
+
+300 interleaved requests per case through the built gateway over loopback; microseconds for connect, request and the whole answer. Not a gate.
+
+| case | median | p25 | p75 | vs expired |
+|---|---|---|---|---|
+| expired (refused before the signature) | 277 | 241 | 333 | |
+| wrong audience (refused before the signature) | 200 | 168 | 229 | -77 |
+| wrong signature (reaches the signature) | 4,774 | 4,578 | 5,388 | +4,497 |
+| valid token (verified, then forwarded) | 5,408 | 5,189 | 6,129 | +5,131 |
+
+A client sending wrong signatures one after another made the gateway answer **194 a second (5.2 ms each)**: that is the ceiling of section 9, taken from every other connection. An expired token is 17 times cheaper than one that reaches the signature, which is the point of the order of section 6. (The same machine measured 4.6 ms for a bare `std.ed25519.verify` in `cancho test`.)
+
+### 13.4 Mutants (`python3 tests/jwt_mutants.py`)
+
+148 single edits of the new code, each in a copy of the tree; a mutant is killed by `cancho test --test` of its suite, by the generator's tests (which run `mkjwt.py` and `jwtkit.py` too), by the end-to-end test or by the differential. **138 killed, 10 survive and are argued, 0 invalid.** The first run was 149 mutants: 134 killed and 15 surviving; of those, `c06` (the clock clamp) was removed with the redundant guard, `p03` (one dot makes a token) got a test, `g04` (a non-canonical public key) found that its own test case was not non-canonical at all (it changed the key rather than its spelling, and was refused for being off the curve by luck) and was fixed, `g30` (a seed of 64 bits) got a check that the seed is not padded, and `g31` (the signer's nonce) got the RFC 8032 and RFC 8037 signatures as vectors; those four were run again and killed.
+
+| id | edit | verdict | killed first by |
+|---|---|---|---|
+| b01 | 'Z' is not in the alphabet | killed | cancho test --test jwt: test_base64url_decodes_every_length_and_refuses_every_other_spelling, test_a_valid_token_is_accepted_and_names_its_key, test_the_variants_that_are |
+| b02 | lower case letters are one too high | killed | cancho test --test jwt: test_base64url_decodes_every_length_and_refuses_every_other_spelling, test_the_rfc_8037_signature_verifies_and_one_changed_bit_does_not, test_a_va |
+| b03 | digits are one too high | killed | cancho test --test jwt: test_base64url_decodes_every_length_and_refuses_every_other_spelling, test_the_rfc_8037_signature_verifies_and_one_changed_bit_does_not, test_a_va |
+| b04 | '-' is 63 | killed | cancho test --test jwt: test_base64url_decodes_every_length_and_refuses_every_other_spelling, test_the_rfc_8037_signature_verifies_and_one_changed_bit_does_not, test_a_va |
+| b05 | '+' is accepted | killed | cancho test --test jwt: test_base64url_decodes_every_length_and_refuses_every_other_spelling |
+| b06 | '/' is accepted | killed | cancho test --test jwt: test_base64url_decodes_every_length_and_refuses_every_other_spelling |
+| b07 | a length of 1 modulo 4 is accepted | killed | cancho test --test jwt: test_base64url_decodes_every_length_and_refuses_every_other_spelling, test_base64url_that_is_not_canonical_or_not_url_safe_is_malformed |
+| b08 | two characters may carry non-zero spare bits | killed | cancho test --test jwt: test_base64url_decodes_every_length_and_refuses_every_other_spelling, test_a_valid_token_is_accepted_and_names_its_key, test_the_variants_that_are |
+| b09 | three characters may carry non-zero spare bits | killed | cancho test --test jwt: test_base64url_decodes_every_length_and_refuses_every_other_spelling, test_a_valid_token_is_accepted_and_names_its_key, test_the_variants_that_are |
+| b10 | a tail of three characters is one byte | killed | cancho test --test jwt: test_base64url_decodes_every_length_and_refuses_every_other_spelling, test_base64url_does_not_write_past_a_short_buffer_and_the_empty_text_is_noth |
+| b11 | the first character of a group is mis-weighted | killed | cancho test --test jwt: test_base64url_decodes_every_length_and_refuses_every_other_spelling, test_the_rfc_8037_signature_verifies_and_one_changed_bit_does_not, test_a_va |
+| b12 | the middle byte of a group is shifted | killed | cancho test --test jwt: test_base64url_decodes_every_length_and_refuses_every_other_spelling, test_the_rfc_8037_signature_verifies_and_one_changed_bit_does_not, test_a_va |
+| b13 | the second byte of a three-character tail is shifted | killed | cancho test --test jwt: test_base64url_decodes_every_length_and_refuses_every_other_spelling, test_the_rfc_8037_signature_verifies_and_one_changed_bit_does_not, test_a_va |
+| b14 | dots are commas | killed | cancho test --test jwt: test_a_valid_token_is_accepted_and_names_its_key, test_the_variants_that_are_valid_are_accepted, test_a_token_without_a_kid_is_accepted_only_when_ |
+| b15 | a short buffer is written past | killed | cancho test --test jwt: test_base64url_does_not_write_past_a_short_buffer_and_the_empty_text_is_nothing |
+| h01 | typ is case-sensitive | killed | cancho test --test jwt: test_a_valid_token_is_accepted_and_names_its_key, test_the_variants_that_are_valid_are_accepted, test_a_token_without_a_kid_is_accepted_only_when_ |
+| h02 | a route's key list is ignored | killed | cancho test --test jwt: test_a_token_without_a_kid_is_accepted_only_when_the_route_has_exactly_one_key, test_a_route_only_accepts_the_keys_it_allows |
+| h03 | a token with no kid picks the last of several keys | killed | cancho test --test jwt: test_a_token_without_a_kid_is_accepted_only_when_the_route_has_exactly_one_key |
+| h04 | a token with no kid always picks the first key | killed | cancho test --test jwt: test_a_token_without_a_kid_is_accepted_only_when_the_route_has_exactly_one_key |
+| h05 | any algorithm is accepted | killed | cancho test --test jwt: test_the_algorithm_is_never_chosen_from_the_token, test_an_hs256_token_signed_with_the_public_key_as_the_secret_is_an_alg_refusal |
+| h06 | crit is ignored | killed | cancho test --test jwt: test_crit_and_a_wrong_typ_are_header_refusals |
+| h07 | typ is ignored | killed | cancho test --test jwt: test_crit_and_a_wrong_typ_are_header_refusals |
+| h08 | a wrong algorithm is malformed | killed | cancho test --test jwt: test_the_algorithm_is_never_chosen_from_the_token, test_an_hs256_token_signed_with_the_public_key_as_the_secret_is_an_alg_refusal |
+| h09 | an unknown kid is malformed | killed | cancho test --test jwt: test_a_token_without_a_kid_is_accepted_only_when_the_route_has_exactly_one_key, test_a_route_only_accepts_the_keys_it_allows, test_a_kid_names_one |
+| h10 | a header of 192 bytes does not fit | killed | cancho test --test jwt: test_the_largest_header_and_payload_are_accepted_and_one_byte_more_is_not |
+| h11 | the last key of that name wins | survives | argued: two keys cannot share a name (rule 17), so there is never a second match for `found == 0` to ignore |
+| c01 | iat that is not an integer is accepted | killed | cancho test --test jwt: test_exp_is_required_and_every_time_claim_is_a_bounded_integer |
+| c02 | nbf that is not an integer is accepted | killed | cancho test --test jwt: test_exp_is_required_and_every_time_claim_is_a_bounded_integer |
+| c03 | a missing exp is accepted as expired, not as malformed claims | killed | cancho test --test jwt: test_a_payload_that_is_not_one_bounded_json_object_is_malformed, test_exp_is_required_and_every_time_claim_is_a_bounded_integer |
+| c04 | the leeway is unbounded | killed | cancho test --test jwt: test_leeway_is_bounded_whatever_it_is_called_with |
+| c05 | a negative leeway shortens a token's life | killed | cancho test --test jwt: test_leeway_is_bounded_whatever_it_is_called_with |
+| c07 | a clock before the floor is believed | killed | cancho test --test jwt: test_the_clock_before_its_floor_refuses_every_token_and_a_wild_clock_overflows_nothing |
+| c08 | a token is valid in the second of its exp | killed | cancho test --test jwt: test_exp_is_valid_up_to_the_second_before_it_and_leeway_only_extends_it, test_leeway_is_bounded_whatever_it_is_called_with, test_every_check_but_t |
+| c09 | a token is not valid in the second of its nbf | killed | cancho test --test jwt: test_nbf_is_valid_from_that_second_and_leeway_brings_it_forward |
+| c10 | the leeway does not extend exp | killed | cancho test --test jwt: test_exp_is_valid_up_to_the_second_before_it_and_leeway_only_extends_it, test_leeway_is_bounded_whatever_it_is_called_with, test_the_clock_before_ |
+| c11 | the leeway does not bring nbf forward | killed | cancho test --test jwt: test_nbf_is_valid_from_that_second_and_leeway_brings_it_forward |
+| c12 | an unconfigured issuer is required to be empty | killed | cancho test --test jwt: test_no_configured_audience_or_issuer_checks_neither, test_the_clock_before_its_floor_refuses_every_token_and_a_wild_clock_overflows_nothing |
+| c13 | the issuer is not checked | killed | cancho test --test jwt: test_no_configured_audience_or_issuer_checks_neither, test_audience_and_issuer_are_exact, test_every_check_but_the_signature_is_made_before_the_si |
+| c14 | the audience is not checked | killed | cancho test --test jwt: test_no_configured_audience_or_issuer_checks_neither, test_audience_and_issuer_are_exact, test_every_check_but_the_signature_is_made_before_the_si |
+| c15 | an unconfigured audience is required to be empty | killed | cancho test --test jwt: test_no_configured_audience_or_issuer_checks_neither, test_the_clock_before_its_floor_refuses_every_token_and_a_wild_clock_overflows_nothing |
+| c16 | a wrong issuer is called a wrong audience | killed | cancho test --test jwt: test_no_configured_audience_or_issuer_checks_neither, test_audience_and_issuer_are_exact, test_every_check_but_the_signature_is_made_before_the_si |
+| c17 | a payload of 1,024 bytes does not fit | killed | cancho test --test jwt: test_the_largest_header_and_payload_are_accepted_and_one_byte_more_is_not |
+| c18 | the floor is in the future | killed | cancho test --test jwt: test_a_valid_token_is_accepted_and_names_its_key, test_the_variants_that_are_valid_are_accepted, test_a_token_without_a_kid_is_accepted_only_when_ |
+| c19 | the leeway may be 61 | killed | cancho test --test jwt: test_leeway_is_bounded_whatever_it_is_called_with |
+| s01 | every signature verifies | killed | cancho test --test jwt: test_a_token_without_a_kid_is_accepted_only_when_the_route_has_exactly_one_key, test_a_small_order_key_would_verify_a_forgery_so_the_generator_ref |
+| s02 | the dot before the signature is signed too | killed | cancho test --test jwt: test_a_valid_token_is_accepted_and_names_its_key, test_the_variants_that_are_valid_are_accepted, test_a_token_without_a_kid_is_accepted_only_when_ |
+| s03 | the next key verifies | killed | cancho test --test jwt: test_a_valid_token_is_accepted_and_names_its_key, test_the_variants_that_are_valid_are_accepted, test_a_token_without_a_kid_is_accepted_only_when_ |
+| s04 | every token is key 1 | killed | cancho test --test jwt: test_a_valid_token_is_accepted_and_names_its_key, test_a_route_only_accepts_the_keys_it_allows |
+| s05 | a key that is not 32 bytes verifies as if it were | killed | cancho test --test jwt: test_a_small_order_key_would_verify_a_forgery_so_the_generator_refuses_one_and_a_damaged_key_verifies_nothing |
+| s06 | the signature is checked before the claims | killed | cancho test --test jwt: test_base64url_that_is_not_canonical_or_not_url_safe_is_malformed, test_every_check_but_the_signature_is_made_before_the_signature |
+| s07 | a signature of the wrong length is a signature failure | killed | cancho test --test jwt: test_base64url_that_is_not_canonical_or_not_url_safe_is_malformed |
+| s08 | a non-canonical signature is a signature failure | killed | cancho test --test jwt: test_base64url_that_is_not_canonical_or_not_url_safe_is_malformed |
+| s09 | every header refusal is malformed | killed | cancho test --test jwt: test_a_token_without_a_kid_is_accepted_only_when_the_route_has_exactly_one_key, test_a_route_only_accepts_the_keys_it_allows, test_the_algorithm_i |
+| s10 | every claim refusal is malformed | killed | cancho test --test jwt: test_the_variants_that_are_valid_are_accepted, test_no_configured_audience_or_issuer_checks_neither, test_a_payload_that_is_not_one_bounded_json_o |
+| s11 | expired is called nbf | killed | cancho test --test jwt: test_every_rule_has_a_tag_and_a_kind |
+| s12 | not_yet_valid is called nbf | killed | cancho test --test jwt: test_every_rule_has_a_tag_and_a_kind |
+| r01 | the whole-token cap is gone (the segment caps imply 1,710 bytes) | survives | argued: the segment caps already bound a token at 1,710 bytes; the whole-token cap of 2,048 is a second line that also stops the scan of a 16 KiB credential at its first byte |
+| r02 | an empty segment reaches the decoder | survives | argued: an empty header or payload decodes to nothing and `n > 0` refuses it as malformed, the tag the guard gives |
+| r03 | the segment caps are loose (the buffers cut them) | survives | argued: a longer segment decodes past the 192- and 1,024-byte buffers, which `b64url_decode` refuses as malformed, the tag the cap gives |
+| r04 | three dots are read as two | survives | argued: a token with three dots has a fourth segment that the signature's own length and alphabet tests refuse, with the same tag |
+| r05 | a signature that is not 64 bytes is read | survives | argued: the signature segment is exactly 86 canonical characters by then: it always decodes to 64 bytes |
+| j01 | nesting may be 5 deep | killed | cancho test --test jwt: test_nesting_members_and_names_are_bounded, test_nesting_counts_brackets_outside_strings_only |
+| j02 | an escaped quote ends a string for the depth count | killed | cancho test --test jwt: test_nesting_counts_brackets_outside_strings_only |
+| j03 | closing a bracket does not lower the depth | killed | cancho test --test jwt: test_names_are_compared_decoded |
+| j04 | 65 members are accepted | killed | cancho test --test jwt: test_a_repeated_claim_name_is_refused_whichever_copy_is_good_and_however_it_is_spelled, test_nesting_members_and_names_are_bounded |
+| j05 | a repeated name is not found | killed | cancho test --test jwt: test_a_header_that_is_not_one_bounded_json_object_is_malformed, test_a_repeated_claim_name_is_refused_whichever_copy_is_good_and_however_it_is_spe |
+| j06 | neighbouring names are not compared | killed | cancho test --test jwt: test_a_header_that_is_not_one_bounded_json_object_is_malformed, test_a_repeated_claim_name_is_refused_whichever_copy_is_good_and_however_it_is_spe |
+| j07 | a root that is not an object is accepted | killed | cancho test --test jwt: test_a_header_that_is_not_one_bounded_json_object_is_malformed, test_a_payload_that_is_not_one_bounded_json_object_is_malformed, test_the_json_rea |
+| j08 | only the root object is checked for repeated names | killed | cancho test --test jwt: test_a_repeated_claim_name_is_refused_whichever_copy_is_good_and_however_it_is_spelled, test_names_are_compared_decoded |
+| j09 | a float is an integer | killed | cancho test --test jwt: test_exp_is_required_and_every_time_claim_is_a_bounded_integer, test_integer_claims_are_integers_in_range_and_nothing_else |
+| j10 | a negative time is a time | killed | cancho test --test jwt: test_exp_is_required_and_every_time_claim_is_a_bounded_integer, test_integer_claims_are_integers_in_range_and_nothing_else |
+| j11 | the year 10000 is a time | killed | cancho test --test jwt: test_exp_is_required_and_every_time_claim_is_a_bounded_integer, test_integer_claims_are_integers_in_range_and_nothing_else |
+| j12 | an audience array may have 17 elements | killed | cancho test --test jwt: test_audience_and_issuer_are_exact |
+| j13 | a non-string in an audience array is skipped | killed | cancho test --test jwt: test_audience_and_issuer_are_exact |
+| j14 | a string audience is no audience | killed | cancho test --test jwt: test_a_valid_token_is_accepted_and_names_its_key, test_the_variants_that_are_valid_are_accepted, test_a_token_without_a_kid_is_accepted_only_when_ |
+| j15 | a string audience matches when it differs | killed | cancho test --test jwt: test_a_valid_token_is_accepted_and_names_its_key, test_the_variants_that_are_valid_are_accepted, test_a_token_without_a_kid_is_accepted_only_when_ |
+| j16 | nesting is not bounded | killed | cancho test --test jwt: test_nesting_members_and_names_are_bounded, test_nesting_counts_brackets_outside_strings_only |
+| j17 | a tape that is too small is not checked first | survives | argued: the tape's length is checked twice: `json.parse` answers a negative code when the tape is too small and `nodes < 1` refuses it with the same answer |
+| j18 | the name length is not tested before decoding | survives | argued: a name longer than the slab's 64 bytes is also refused by `string_into`, which answers -1 when its output is too short |
+| n01 | the JWT counters are one slot too far | killed | cancho test --test metrics: test_jwt_refusals_are_counted_per_route_and_kind_in_slots_29_to_39_and_shown_in_both_formats |
+| n02 | a twelfth kind is written past the counters | killed | cancho test --test metrics: test_jwt_refusals_are_counted_per_route_and_kind_in_slots_29_to_39_and_shown_in_both_formats |
+| n03 | the JSON shows each counter under its neighbour's name | killed | cancho test --test metrics: test_jwt_refusals_are_counted_per_route_and_kind_in_slots_29_to_39_and_shown_in_both_formats |
+| n04 | the Prometheus text shows each counter under its neighbour's name | killed | cancho test --test metrics: test_jwt_refusals_are_counted_per_route_and_kind_in_slots_29_to_39_and_shown_in_both_formats |
+| n05 | a kind has another name | killed | cancho test --test metrics: test_jwt_refusals_are_counted_per_route_and_kind_in_slots_29_to_39_and_shown_in_both_formats |
+| n06 | the route block is too small for the counters | killed | cancho test --test metrics: test_a_request_is_counted_by_route_class_and_bucket, test_the_rule_table_fills_and_then_counts_other, test_a_long_tag_is_other_not_a_trap |
+| p01 | a route that takes both kinds never reads a token | killed | e2e: a_route_that_takes_both_kinds_decides_by_the_shape_and_never_falls_back |
+| p02 | a route that takes both kinds never reads an API key | killed | e2e: a_route_that_takes_both_kinds_decides_by_the_shape_and_never_falls_back |
+| p03 | one dot makes a token | killed | e2e: a_route_that_takes_both_kinds_decides_by_the_shape_and_never_falls_back |
+| p04 | the clock is the gateway's uptime | killed | e2e: a_valid_token_passes_and_the_credential_is_not_forwarded |
+| p05 | a second is 1,024 ms | killed | e2e: a_valid_token_passes_and_the_credential_is_not_forwarded, the_leeway_is_a_margin_on_exp_and_nbf_and_nothing_else |
+| p06 | the client is told the cause | killed | e2e: every_invalid_token_is_refused_with_the_same_response_and_its_own_tag_in_the_log |
+| p07 | the log does not say the cause | killed | e2e: every_invalid_token_is_refused_with_the_same_response_and_its_own_tag_in_the_log |
+| p08 | a refused token is not counted | killed | e2e: the_counters_agree_with_what_the_clients_were_told |
+| p09 | every refused token is counted as malformed | killed | e2e: the_counters_agree_with_what_the_clients_were_told |
+| p10 | the identity of a token is an API key's | killed | e2e: a_valid_token_passes_and_the_credential_is_not_forwarded |
+| p11 | an oversize token is a malformed header | killed | e2e: every_invalid_token_is_refused_with_the_same_response_and_its_own_tag_in_the_log |
+| p12 | no route requires an audience | killed | e2e: a_token_valid_for_one_route_is_refused_on_a_route_with_another_audience |
+| p13 | no route requires an issuer | killed | e2e: a_token_valid_for_one_route_is_refused_on_a_route_with_another_audience |
+| p14 | no route has leeway | killed | e2e: the_leeway_is_a_margin_on_exp_and_nbf_and_nothing_else |
+| p15 | every route has 60 seconds of leeway | killed | e2e: the_leeway_is_a_margin_on_exp_and_nbf_and_nothing_else |
+| p16 | every route accepts every key | killed | e2e: a_route_only_accepts_the_keys_it_allows |
+| p17 | a refused token goes on to the upstream | killed | e2e: authentication_comes_before_the_rate_limiter, a_websocket_upgrade_is_authenticated_and_a_refused_one_takes_no_tunnel_place |
+| p18 | an oversize key is looked up | killed | e2e: a_route_that_takes_both_kinds_decides_by_the_shape_and_never_falls_back |
+| p19 | a token is forwarded | killed | e2e: a_valid_token_passes_and_the_credential_is_not_forwarded |
+| p20 | authentication comes after the rate limiter | killed | e2e: authentication_comes_before_the_rate_limiter |
+| p21 | a refused upgrade keeps its place among the tunnels | killed | e2e: a_websocket_upgrade_is_authenticated_and_a_refused_one_takes_no_tunnel_place |
+| p22 | the log says what the client is told | killed | e2e: every_invalid_token_is_refused_with_the_same_response_and_its_own_tag_in_the_log |
+| a01 | a key is read from its neighbour's line | killed | cancho test --test jwt: test_a_valid_token_is_accepted_and_names_its_key, test_the_variants_that_are_valid_are_accepted, test_a_token_without_a_kid_is_accepted_only_when_ |
+| a02 | the first JWT key is named as an API key | killed | e2e: a_valid_token_passes_and_the_credential_is_not_forwarded |
+| a03 | a JWT key is named by its neighbour | killed | e2e: a_valid_token_passes_and_the_credential_is_not_forwarded |
+| a04 | an API key of 257 bytes is read | killed | cancho test --test auth: test_a_credential_of_256_bytes_is_accepted_and_of_257_is_not |
+| a05 | the audience is the issuer's field | killed | e2e: a_token_valid_for_one_route_is_refused_on_a_route_with_another_audience |
+| a06 | the leeway is the issuer's field | killed | e2e: the_leeway_is_a_margin_on_exp_and_nbf_and_nothing_else |
+| a07 | the log names the next key | killed | e2e: a_valid_token_passes_and_the_credential_is_not_forwarded |
+| g01 | a JWT key may have an API key's name | killed | generate_test: FAIL refusal config.auth at line 10: exit 2, '{"file": "/tmp/tmpxvxda41o.toml", "hint": "g |
+| g02 | two JWT keys may share a name | killed | generate_test: FAIL refusal config.auth at line 10: exit 0, '' |
+| g03 | a public key may be 42 or 44 characters | survives | argued: a text of 42 or 44 characters decodes to 31 or 33 bytes, which the test `len(raw) != 32` refuses with the same rule: the pattern is a second line |
+| g04 | a public key may be non-canonical base64url | killed | generate_test: the refusal case of a non-canonical public key (accepted, exit 0) |
+| g05 | a public key of small order is accepted | killed | generate_test: FAIL refusal config.auth at line 8: exit 0, ''; FAIL refusal config.auth at line 8: exit 0, ''; FAIL refusal config.auth at line 8: exit 0, ''; FAIL refusa |
+| g06 | a public key that is not a point is accepted | killed | generate_test: FAIL refusal config.auth at line 8: exit 1, 'Traceback (most recent call last):\n  File "/ |
+| g07 | two names may share a public key | killed | generate_test: FAIL refusal config.auth at line 11: exit 0, '' |
+| g08 | nine public keys are accepted | killed | generate_test: FAIL refusal config.auth at line None: exit 0, '' |
+| g09 | auth may name a kind twice | killed | generate_test: FAIL refusal config.auth at line 15: exit 2, '{"file": "/tmp/tmpt2aaum7v.toml", "hint": nu; FAIL refusal config.auth at line 15: exit 2, '{"file": "/tmp/tm |
+| g10 | auth_keys on a route without API keys is accepted | killed | generate_test: FAIL refusal config.auth at line 16: exit 0, '' |
+| g11 | jwt_* on a route that does not accept tokens is accepted | killed | generate_test: FAIL refusal config.auth at line 16: exit 0, ''; FAIL refusal config.auth at line 16: exit 0, ''; FAIL refusal config.auth at line 16: exit 0, ''; FAIL ref |
+| g12 | jwt_alg may be none | killed | generate_test: FAIL refusal config.auth at line 13: exit 0, '' |
+| g13 | jwt_keys may name a key twice | killed | generate_test: FAIL refusal config.auth at line 13: exit 0, '' |
+| g14 | an audience may be 97 bytes | killed | generate_test: FAIL refusal config.auth at line 13: exit 0, ''; FAIL refusal config.auth at line 13: exit 0, '' |
+| g15 | the leeway may be 61 seconds | killed | generate_test: FAIL refusal config.auth at line 13: exit 0, '' |
+| g16 | a route that accepts tokens may have no key | killed | generate_test: FAIL refusal config.auth at line 12: exit 2, '{"file": "/tmp/tmpdxh0tcqa.toml", "hint": nu; FAIL refusal config.auth at line 9: exit 0, ''; FAIL refusal co |
+| g17 | public keys that protect nothing are compiled in | killed | generate_test: FAIL refusal config.auth at line 6: exit 2, '{"file": "/tmp/tmp23f5rl1k.toml", "hint": nul; FAIL refusal config.auth at line 9: exit 0, '' |
+| g18 | a token may be read from another header | killed | generate_test: FAIL refusal config.auth at line 13: exit 0, ''; FAIL refusal config.auth at line 13: exit 0, ''; FAIL refusal config.auth at line 16: exit 0, '' |
+| g19 | an identity may be the rate key on a route that takes tokens | killed | generate_test: FAIL refusal config.ratelimit at line 14: exit 0, ''; FAIL refusal config.ratelimit at line 17: exit 0, '' |
+| g20 | a route that takes both kinds may rate-limit by identity | killed | generate_test: FAIL refusal config.ratelimit at line 17: exit 0, '' |
+| g21 | a route's JWT key list is shifted by one | killed | generate_test: FAIL accepted deployment refused: 'Traceback (most recent call last):\n  File "/tmp/jwtmut; FAIL the routes table must contain '\\t2\\tauthorization\\t0\\t |
+| g22 | the audience and the issuer are swapped in the table | killed | generate_test: FAIL the routes table must contain '\\t2\\tauthorization\\t0\\t\\tBearer realm=\\"cancho-g |
+| g23 | the public keys are compiled in uppercase | killed | generate_test: FAIL the routes table must contain 'return "ka\\tA6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVM |
+| g24 | a token may cross a plain listener without the flag | killed | generate_test: FAIL refusal config.auth at line 11: exit 0, ''; FAIL refusal config.auth at line 12: exit 2, '{"file": "/tmp/tmp0yalhocz.toml", "hint": nu; FAIL accepted  |
+| g25 | the kinds a route takes are mis-encoded | killed | generate_test: FAIL refusal config.auth at line 12: exit 1, 'Traceback (most recent call last):\n  File "; FAIL refusal config.auth at line 12: exit 0, ''; FAIL refusal c |
+| g26 | jwt_alg may be eddsa | killed | generate_test: FAIL refusal config.auth at line 13: exit 0, '' |
+| g27 | the leeway may be true | killed | generate_test: FAIL refusal config.auth at line 13: exit 0, '' |
+| g28 | a point of order 8 is not small | killed | generate_test: |
+| g29 | the seed goes to standard output, where a redirect would put it in the file | killed | generate_test: FAIL mkjwt keygen must print the seed (43 characters of base64url) on standard error: '' |
+| g30 | a seed of 64 bits | killed | generate_test: the check of scripts/mkjwt.py (a seed padded with zeros) |
+| g31 | the signer is wrong | killed | generate_test: the check of scripts/jwtkit.py against the RFC 8032 and RFC 8037 signatures |
+| g32 | a public key may have text after its 43 characters | survives | argued: `re.match` ignores text after the 43 characters, but the canonical re-encoding test (`b64u(raw) != text`) refuses it with the same rule |
+| d01 | only the root object is checked (the first version) | killed | differential: a nested repeated name (2 disagreements in 1,500 tokens) |
+| d02 | a crit that is not an array is ignored | killed | cancho test: test_crit_and_a_wrong_typ_are_header_refusals |
+
+### 13.5 Not done
+
+HS256 and every other algorithm; JWKS and key discovery; a key change without a restart; revocation; JWE; claims-based authorisation beyond `aud` and `iss`; the subject in the log or as a rate key (and so `rate_key = "auth"` on a route that takes tokens); a verification budget against the flood of section 9; a clock that follows steps after start; an independent review of `std.ed25519` (it is not constant time and says so; it handles only public data here). The mutants of `tests/ratelimit_mutants.py` and `tests/websocket_mutants.py` that stopped matching after slice 1 are not repaired (13.1).

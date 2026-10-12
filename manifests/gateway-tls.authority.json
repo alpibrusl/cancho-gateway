@@ -1030,7 +1030,6 @@
     "string_claim_is",
     "string_equals",
     "string_length",
-    "string_plain",
     "string_view",
     "sub_word",
     "subject_end",
@@ -1190,5 +1189,5 @@
   ],
   "folded_operators": 218,
   "folded_calls": 338,
-  "functions": 1571
+  "functions": 1570
 }
