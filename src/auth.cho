@@ -134,7 +134,8 @@ pub fn credential[&s, &t, &n](src: &s [byte], table: &t [int], name: &n [byte]) 
     if at < 0 {
         return src[0..0];
     }
-    return credential_of(bytes.trim(http.header_value(src, table, at)), is_lower(name, "authorization"));
+    // The parser has taken the blanks off both ends of the value (`tests/auth_test.cho` pins it), so the value is the field.
+    return credential_of(http.header_value(src, table, at), is_lower(name, "authorization"));
 }
 
 // 0 if the request carries exactly one header `name` holding a credential that is well formed, else the rule that refuses it: 1 `auth.missing` (no such header),

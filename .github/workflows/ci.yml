@@ -96,6 +96,10 @@ jobs:
         working-directory: gateway
         run: python3 tests/ratelimit_test.py
 
+      - name: Authentication (docs/auth.md) against a recording upstream, plain, over TLS and with WebSocket upgrades; the mutants are run by hand (tests/auth_mutants.py)
+        working-directory: gateway
+        run: python3 tests/auth_test.py
+
       - name: The header policy against nginx (the table in the test says where they differ on purpose, and why)
         working-directory: gateway
         run: |

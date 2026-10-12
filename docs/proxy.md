@@ -3,14 +3,14 @@
 Status: **a working reverse proxy, with deliberate gaps.** (Upstream keep-alive and the pool arrived in `docs/pool.md`; the first slice below opened one connection per request.) One thread, one poller, memory sized at start. Built: accept, head
 framing and routing (tasks #3, #4), a fresh upstream connection per request, request body forwarding (Content-Length and
 chunked), response relay, backpressure both ways, deadlines, refusals as `application/problem+json`. **Not built:** keep-alive
-on either side and the upstream pool (#6), (the header policy of #7 is built: `docs/headers.md`), authentication (#8), (rate limits per route, #9, are built: `docs/ratelimit.md`), the metrics endpoint (#10; the access log is built), WebSockets (#15; built as a byte tunnel: `docs/websocket.md`). Section 6 lists what is untested.
+on either side and the upstream pool (#6), (the header policy of #7 is built: `docs/headers.md`), (authentication per route, #8, is built: `docs/auth.md`), (rate limits per route, #9, are built: `docs/ratelimit.md`), the metrics endpoint (#10; the access log is built), WebSockets (#15; built as a byte tunnel: `docs/websocket.md`). Section 6 lists what is untested.
 
 ## 1. The flow of one request
 
 1. **accept** (non-blocking) into a slot; a header deadline starts.
 2. **read the head** into the slot's buffer; `framing.judge` (more, a refusal, or accepted).
-3. **route** (`route.select`), refuse if the declared `Content-Length` exceeds the route's `max_body`, and note the upstream
-   the route chose.
+3. **route** (`route.select`), then **authenticate** if the route asks for it (`docs/auth.md`: 401 or 403, before anything else is decided about the request), refuse if the declared `Content-Length` exceeds the route's `max_body`, take a rate-limit token
+   (`docs/ratelimit.md`), and note the upstream the route chose.
 4. **dial** (`tcp_connect_start`) the upstream, after `egress.allowed` re-checks the address against the compiled-in set (which
    is also what keeps the compiler's bound trap unreachable, design section 2.1).
 5. **forward**: `forward.rewrite` writes the head into the upstream's queue (hop-by-hop headers and any header named by
@@ -50,6 +50,7 @@ the response**: a download longer than it is cut, not refused.
 | `proxy.head` | 502 | the head could not be rebuilt for the upstream |
 | `limit.connections` | 503 | no slot for the upstream half |
 | `forward.*`, `framing.*`, `route.*`, `limit.body` | per `docs/framing.md`, `docs/routes.md` | |
+| `auth.missing`, `auth.malformed`, `auth.invalid`, `auth.forbidden` | 401, 401, 401, 403 | `docs/auth.md` section 7.2: the route's credential is absent, ill-formed, matches no key, or is a key the route does not allow |
 
 **Where this differs from design section 4:** a client that arrives when the table is full is **closed without a response**
 (there is no slot to answer in); `limit.connections` 503 is only sent when the upstream half cannot be opened.

@@ -306,6 +306,11 @@ def auth_cases():
     out.append(auth_refusal("config.auth", "auth_allow_plain", TOP + ONE + '[[route]]\nupstream = "a"\npath_prefix = "/"\n'))
     # 15: the identity as a rate-limit key needs an identity
     out.append(auth_refusal("config.ratelimit", "rate_key", TOP + ONE + K1 + '[[route]]\nupstream = "a"\npath_prefix = "/"\nrate_limit = "5/s"\nrate_key = "auth"\n'))
+    # 16: the identities must fit the table: five keys cannot all have a bucket in a table of four, so one could be refused limit.rate-table
+    five = "".join('[[api_key]]\nname = "k%d"\nsha256 = "%s"\n' % (i, hashlib.sha256(b"ck_%d" % i).hexdigest()) for i in range(5))
+    out.append(auth_refusal("config.ratelimit", "rate_buckets", TOP + ONE + five + AR + 'rate_limit = "5/s"\nrate_key = "auth"\nrate_buckets = 4\n'))
+    # (the same with the names that the gateway's hash puts together: five names in two sets of four, all in one; this pins the generator's copy of the hash)
+    out.append(auth_refusal("config.ratelimit", "rate_buckets", TOP + ONE + five + AR + 'rate_limit = "5/s"\nrate_key = "auth"\nrate_buckets = 8\n'))
     # an unknown key of [[api_key]] is named like any other
     out.append(auth_refusal("config.unknown-key", "colour", TOP + ONE + K1 + 'colour = "red"\n' + AR))
     return out
@@ -321,6 +326,10 @@ def auth_accepted():
         TOP + ONE + K1 + K2 + AR + 'auth_header = "X-Custom_Key.1"\n',
         TOP + ONE + sixty_four + AR,
         TOP + ONE + K1 + AR + '[[route]]\nupstream = "a"\npath_prefix = "/open"\n',
+        # an identity as the rate key: four keys fit a table of four, a route that admits four of five fits one too, and 64 keys fit a table of 4,096
+        TOP + ONE + "".join('[[api_key]]\nname = "k%d"\nsha256 = "%s"\n' % (i, hashlib.sha256(b"ck_%d" % i).hexdigest()) for i in range(4)) + AR + 'rate_limit = "5/s"\nrate_key = "auth"\nrate_buckets = 4\n',
+        TOP + ONE + "".join('[[api_key]]\nname = "k%d"\nsha256 = "%s"\n' % (i, hashlib.sha256(b"ck_%d" % i).hexdigest()) for i in range(5)) + AR + 'auth_keys = ["k0", "k1", "k2", "k3"]\nrate_limit = "5/s"\nrate_key = "auth"\nrate_buckets = 4\n',
+        TOP + ONE + sixty_four + AR + 'rate_limit = "5/s"\nrate_key = "auth"\nrate_buckets = 4096\n',
         # TLS only: a key never crosses a plain listener, and no flag is needed (or allowed)
         tls + ONE + K1 + AR,
         'listen = 80\nauth_allow_plain = true\n' + tls + ONE + K1 + AR,
@@ -351,7 +360,7 @@ def auth_compiled(run, failures):
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
             failures += 1
-    for want in ("authenticates with the x-api-key header, keys 1", "authenticates with the authorization header, keys all", "api keys: alice, bob (digests only compiled in)",
+    for want in ("authenticates with the x-api-key header, keys bob", "authenticates with the authorization header, keys all", "api keys: alice, bob (digests only compiled in)",
                  "auth_allow_plain"):
         if want not in explained:
             print("FAIL --explain must say %r: %r" % (want, explained[-400:]))

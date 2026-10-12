@@ -81,6 +81,7 @@ file (task #11) and if `fs`/`ffi` ever appear.
 - **Secrets without files:** keys arrive in `argv`/environment at start. `args` is the effect; the open question is whether
   the environment is reachable without a new effect. **To settle in #8's first commit** by probe; if not, keys come in
   `argv` only (visible in `ps`, a documented limitation) or on a stdin read at start (`io_read`, a new row to ceiling).
+  *(Settled in #8, `docs/auth.md` section 1: no key is read at start at all. The deployment file carries the SHA-256 digest of each API key and the generator compiles the digests in, so the binary holds nothing usable as a credential, and neither `argv`, the environment nor stdin is needed.)*
 - **Randomness for request ids:** settled by probe in #7 (`docs/headers.md` section 1): the pinned compiler has no random-bytes
   facility (entropy is read from `/dev/urandom` through a file capability, which the gateway deliberately lacks), so ids are a start
   stamp, the listen port and a counter: unique, **predictable**, correlation ids and not secrets. The same probe found no peer

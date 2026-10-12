@@ -138,9 +138,18 @@ def valid_prefix(p):
     return not any(seg in (".", "..") for seg in p.split("/"))
 
 
-def rate_options(r, trust, has_auth, refuse, i):
-    """The rate-limit keys of one route (docs/ratelimit.md section 4), checked; answers the fields of its record. `refuse(rule, message, section,
-    index, key)` raises."""
+def rate_hashes(key):
+    """The two hashes of `src/ratelimit.cho` (`hash1`, `hash2`) of a key given as text; the set of buckets is chosen by them (docs/ratelimit.md section 6.2)."""
+    h1 = h2 = 0
+    for b in key.encode():
+        h1 = (h1 * 48271 + b + 1) % 2147483647
+        h2 = (h2 * 16807 + b + 1) % 2147483629
+    return h1, h2
+
+
+def rate_options(r, trust, identities, refuse, i):
+    """The rate-limit keys of one route (docs/ratelimit.md section 4), checked; answers the fields of its record. `identities` is the names of the keys the route
+    admits, or None if it has no auth (docs/auth.md). `refuse(rule, message, section, index, key)` raises."""
     none = {"rate": 0, "per_ms": 0, "burst": 0, "rate_key": "", "buckets": 0}
     if "rate_limit" not in r:
         for key in ("rate_burst", "rate_key", "rate_buckets"):
@@ -172,7 +181,7 @@ def rate_options(r, trust, has_auth, refuse, i):
             key = "h:" + spec[7:].lower()
     if key is None:
         bad('rate_key must be "route", "auth", "xff:last", "xff:first" or "header:<Name>" with a header name of 1 to 64 token bytes', "rate_key")
-    if key == "a" and not has_auth:
+    if key == "a" and identities is None:
         bad('rate_key = "auth" keys on the authenticated identity: the route needs auth (docs/auth.md section 9)', "rate_key")
     if key.startswith("h:") and key[2:] in RATE_REFUSED_HEADERS:
         bad("rate_key names %s, which the gateway removes or owns: a limit keyed on it is no limit" % spec[7:], "rate_key")
@@ -186,6 +195,19 @@ def rate_options(r, trust, has_auth, refuse, i):
         buckets = r.get("rate_buckets", BUCKETS)
         if not isinstance(buckets, int) or isinstance(buckets, bool) or not BUCKETS_RANGE[0] <= buckets <= BUCKETS_RANGE[1] or buckets % 4:
             bad("rate_buckets must be an integer, a multiple of 4, in %d..%d" % BUCKETS_RANGE, "rate_buckets")
+    if key == "a":
+        # The identities are known now, so whether the table can ever refuse one is decided now (docs/auth.md section 9): no more than four to a set of four buckets,
+        # (a 62-bit fingerprint of two names being equal is not looked for: it is 2^-62 by chance and cannot be built from names a person chose). Then no authenticated caller is ever answered `limit.rate-table`.
+        sets = buckets // 4
+        placed = {}
+        for name in identities:
+            h1, h2 = rate_hashes(name)
+            slot = 0 if sets < 2 else (h1 + h2) % 2147483647 % sets
+            placed.setdefault(slot, []).append(name)
+        crowded = next((v for v in placed.values() if len(v) > 4), None)
+        if crowded:
+            bad("rate_buckets %d puts %d of the route's keys (%s) in one set of four buckets, so one of them could be answered limit.rate-table: raise rate_buckets (the sets are fixed by the names)" %
+                (buckets, len(crowded), ", ".join(crowded)), "rate_buckets" if "rate_buckets" in r else "rate_key")
     return {"rate": rate, "per_ms": per_ms, "burst": burst, "rate_key": key, "buckets": buckets}
 
 
@@ -412,7 +434,10 @@ def load(path):
         auth = auth_options(r, key_names, refuse, i)
         if auth["auth"] and not api_keys:
             refuse("config.auth", "auth needs at least one [[api_key]]: a route nobody can enter (docs/auth.md section 6)", "route", i, "auth")
-        rate = rate_options(r, trust, bool(auth["auth"]), refuse, i)
+        who = None
+        if auth["auth"]:
+            who = key_names if auth["auth_keys"] == "*" else [key_names[int(x)] for x in auth["auth_keys"].split(",")]
+        rate = rate_options(r, trust, who, refuse, i)
         routes.append({"host": host, "prefix": prefix, "mask": mask, "upstream": names[up], "max_body": body,
                        "trust": 1 if trust else 0, "name": label, "ws": 1 if ws else 0, "protocols": protocols, "origins": origins, **rate, **auth})
     base = 0
@@ -640,7 +665,8 @@ def main():
             print("route %d: %s %s -> %s (max body %d%s)" % (n, r["host"] or "*", r["prefix"], ups[r["upstream"]][0], r["max_body"], ", trusts forwarding headers" if r["trust"] else "") +
                   ("; websocket, subprotocols %s, origins %s" % (r["protocols"] or "none", r["origins"] or "none") if r["ws"] else "") +
                   ("; limit %d per %d ms, burst %d, key %s, %d bucket(s)" % (r["rate"], r["per_ms"], r["burst"], r["rate_key"], r["buckets"]) if r["rate"] else "") +
-                  ("; authenticates with the %s header, keys %s%s" % (r["auth_header"], r["auth_keys"] if r["auth_keys"] != "*" else "all", ", forwards the credential" if r["auth_forward"] else "") if r["auth"] else ""))
+                  ("; authenticates with the %s header, keys %s%s" % (r["auth_header"], "all" if r["auth_keys"] == "*" else ", ".join(timeouts["api_keys"][int(x)][0] for x in r["auth_keys"].split(",")),
+                                                                ", forwards the credential" if r["auth_forward"] else "") if r["auth"] else ""))
         if timeouts["api_keys"]:
             print("api keys: %s (digests only compiled in)%s" % (", ".join(n for n, _ in timeouts["api_keys"]), "; the plain listener is allowed (auth_allow_plain): keys are protected by a front" if timeouts["auth_plain"] else ""))
         return 0

@@ -51,9 +51,9 @@ believes about forwarding: that is the property the gates test.
 - **The request id in the response and in `problem+json`: built with the access log (`docs/observability.md` section 4).** It was deferred here because the head the id came
   from is gone when the response is rewritten; the per-session id area the log needs solves both, so the two were done together in #10's first slice. A response now carries
   `X-Request-Id` (an upstream's own is removed first), and a refusal carries it in the header and as `"request_id"` in the body.
-- **No credentials of its own to leak.** In v1 the gateway holds none: it takes no keys and presents none upstream. The rule
-  that stays true when #8 adds some: **a credential the gateway itself checks is removed before the request is forwarded**
-  (the header #8's policy consumes is dropped in `forward.rewrite`, with a test that the upstream never sees it). `Proxy-Authorization` is
+- **No credentials of its own to leak.** The gateway holds no key and presents none upstream (it holds only the digests of the keys it checks: `docs/auth.md`). The rule
+  that is now built: **a credential the gateway itself checks is removed before the request is forwarded**
+  (the header an authenticating route reads is dropped in `forward.rewrite_auth`, unless the route says `auth_forward = true`; `tests/auth_test.py` shows the upstream never sees it, over plain, TLS and a WebSocket upgrade). `Proxy-Authorization` is
   removed already. A client's own `Authorization` is the upstream's business and is forwarded unless a route's auth policy consumes it.
 
 ## 3. The request id
@@ -128,5 +128,4 @@ harness against the build just before this change (5 interleaved rounds, one cor
   first end-to-end tests, because with one request at a time the two are equal, and is killed by the 0.4 s test above.
 - The authority report did not change except for the pure-function list and counts (no new effect); the 2,000-line gate holds.
 
-**Not done, and why:** no `X-Forwarded-For` or `Forwarded: for=` of the gateway's own (no peer address: section 1); the credential rule for #8 is recorded, and tested when #8 has a
-credential to strip.
+**Not done, and why:** no `X-Forwarded-For` or `Forwarded: for=` of the gateway's own (no peer address: section 1); the credential rule for #8 is built and tested (`docs/auth.md` section 3).

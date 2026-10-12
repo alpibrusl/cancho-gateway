@@ -1,0 +1,47 @@
+# Example 10: API keys. Upstream: python3 scripts/demo_upstream.py 9000
+#
+# The binary holds the SHA-256 digest of each key and a name for it, never a key. The three keys below are DEMO keys, printed in docs/examples.html so that you can
+# follow the walk-through; make your own with `python3 scripts/mkkey.py <name>` (it prints the key once, on standard error, and the table to paste on standard output).
+listen = 8080
+admin_listen = 9090
+auth_allow_plain = true         # a key sent over plain HTTP crosses the network in clear. Here the plain port is only for this walk-through on localhost; in a deployment it
+                                # is for a port that a TLS-terminating front reaches, or leave `listen` out and serve `tls_listen` alone (docs/auth.md section 7.3)
+
+[[upstream]]
+name = "api"
+addr = "127.0.0.1:9000"
+
+[[api_key]]
+name = "alice"
+sha256 = "fb47ee213d02fb5bccbec1cf686ae136cc9a12f8594a995f090a7d7992cfe45f"
+
+[[api_key]]
+name = "bob"
+sha256 = "819d5f3306d79fc2df309bc677d9607b1fc7fdfc084472582f2fde56a1ada73c"
+
+[[api_key]]
+name = "reports"
+sha256 = "7534fef50c45322e057ca16dbbbb0535ac492d5a0d63a5a4fe84b1a05e56a738"
+
+[[route]]
+name = "api"
+path_prefix = "/api"
+upstream = "api"
+auth = "api-key"                # the credential is `Authorization: Bearer <key>`; the header is removed before the upstream sees the request
+auth_keys = ["alice", "bob"]    # the keys this route admits (default: every [[api_key]]); another valid key is answered 403
+rate_limit = "1/m"              # one token a minute is added to each identity's bucket (slow on purpose, so the example is readable)
+rate_burst = 3
+rate_key = "auth"               # one bucket per authenticated key: a caller cannot rotate its name, as it can an X-Api-Key value
+
+[[route]]
+name = "reports"
+path_prefix = "/reports"
+upstream = "api"
+auth = "api-key"
+auth_header = "X-Api-Key"       # read the whole value of this header instead (no scheme); a challenge then says which header to send
+auth_keys = ["reports", "alice"]
+
+[[route]]
+name = "health"
+path_prefix = "/health"
+upstream = "api"                # no auth: nothing here asks for a credential
