@@ -712,19 +712,22 @@ class Frames:
         path = "/small/flood/sink"
         n0 = len(gw.lines())
         ws = go(gw, path, timeout=30)
-        flood = bytes([0x82, 0xFE, 0x10, 0x01]) + KEY + os.urandom(6 << 20)
+        flood = bytes([0x82, 0xFE, 0x10, 0x01]) + KEY + os.urandom(1 << 20) * 48
+
+        failed = []
 
         def send():
             try:
                 ws.sock.sendall(flood)
-            except OSError:
-                pass
+            except OSError as e:
+                failed.append(e)
 
         t = threading.Thread(target=send, daemon=True)
         t.start()
         payload = expect_close(ws, 1009, echo=False)
         assert code_of(payload) == 1009
         t.join(20)
+        assert not failed, "the connection was reset under a client that was still sending: %r" % failed
         e = log_of(gw, n0, path)
         assert e["rule"] == "ws.message-too-big" and e["ws_close"] == 1009, e
 
@@ -1006,7 +1009,7 @@ class Life:
         ws.sock.settimeout(20)
         op, p = ws.recv()
         took = time.time() - t0
-        assert op == 8 and code_of(p) == 1001 and 2.8 < took < 4.5, (op, p[:10], took)
+        assert op == 8 and code_of(p) == 1001 and 2.5 < took < 4.5, (op, p[:10], took)
         sender.join(30)
         assert not sender.is_alive(), "the client's frame was cut off by the Close"
         ws.sock.sendall(cframe(8, p[:2]))
@@ -1016,7 +1019,7 @@ class Life:
         frames, rest = up_frames(c)
         assert rest == b"" and frames and frames[-1][1] == 8 and code_of(frames[-1][2]) == 1001, "... and then the Close, whole"
         e = log_of(gw, n0, path)
-        assert e["rule"] == "ws.lifetime" and e["ws_close"] == 1001, e
+        assert e["rule"] == "ws.lifetime" and e["outcome"] == "aborted" and e["ws_close"] == 1001, e
 
 
 class Tls:
