@@ -117,3 +117,14 @@ fn test_a_401_carries_the_routes_challenge_and_no_other_response_does() -> [] in
     }
     return 0;
 }
+
+fn test_the_route_ceilings_429_is_the_same_response_with_its_own_rule() -> [] int {
+    region a {
+        let buf = alloc_slice[a](512, byte_of(0));
+        let n = problem.response_after(buf, 429, "limit.rate-route", "1a-1f90-0000002a", 3);
+        let want = "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/problem+json\r\nContent-Length: 121\r\nRetry-After: 3\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: close\r\n\r\n{\"type\":\"about:blank\",\"title\":\"Too Many Requests\",\"status\":429,\"rule\":\"limit.rate-route\",\"request_id\":\"1a-1f90-0000002a\"}";
+        test.assert_eq(n, len(want));
+        test.assert(bytes.equal(buf[0..n], want));
+    }
+    return 0;
+}
