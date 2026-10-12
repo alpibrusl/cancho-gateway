@@ -128,4 +128,4 @@ harness against the build just before this change (5 interleaved rounds, one cor
   first end-to-end tests, because with one request at a time the two are equal, and is killed by the 0.4 s test above.
 - The authority report did not change except for the pure-function list and counts (no new effect); the 2,000-line gate holds.
 
-**Not done, and why:** no `X-Forwarded-For` or `Forwarded: for=` of the gateway's own (no peer address: section 1); the credential rule for #8 is built and tested (`docs/auth.md` section 3).
+**Not done, and why:** no `X-Forwarded-For` or `Forwarded: for=` of the gateway's own (no peer address: section 1); the credential rule for #8 is built and tested (`docs/auth.md` section 3), and it covers a JWT exactly as it covers an API key: the `Authorization` header of a route that accepts tokens is removed before the upstream sees the request unless `auth_forward = true` (`docs/jwt.md` section 8; `tests/jwt_test.py` checks the token is not in what the upstream recorded). The gateway forwards no claim of the token and injects no identity header.
