@@ -213,8 +213,8 @@ nav a[aria-current] { color: var(--fg); font-weight: 650; }
   <h2>Request framing</h2>
   <p class="sub">Run with <code>python3 tests/smuggling/run.py</code> against the pinned compiler.</p>
   <div class="stats">
-    <div><b>60</b><span>head cases, each with the bytes, the expected outcome and its source</span></div>
-    <div><b>39</b><span>chunked-body cases, each delivered whole and in pieces of 1, 2, 3, 5 and 7 bytes</span></div>
+    <div><b>67</b><span>head cases, each with the bytes, the expected outcome and its source</span></div>
+    <div><b>43</b><span>chunked-body cases, each delivered whole and in pieces of 1, 2, 3, 5 and 7 bytes</span></div>
     <div><b>2,494</b><span>proper prefixes of the corpus: an accepted head&rsquo;s are all &ldquo;more&rdquo;, a refused head&rsquo;s are never accepted</span></div>
     <div><b>1,500 + 1,500</b><span>seeded mutations of heads and of chunked bodies: 0 traps, no delivery disagrees with another</span></div>
   </div>
