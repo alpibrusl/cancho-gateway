@@ -53,15 +53,12 @@ pub fn capacity(per_ms: int, burst: int) -> [] int {
 }
 
 // The units a bucket that held `units` at `last` holds at `now`. No time passes if the clock stood still or went back; a gap of more than `max_elapsed()`
-// counts as that much; the result never exceeds the capacity, and the arithmetic compares before it adds, so no sum can overflow.
+// counts as that much; the result never exceeds the capacity (a count above it is cut to it), and the arithmetic compares before it adds, so no sum can overflow.
 pub fn refill(units: int, last: int, now: int, rate: int, per_ms: int, burst: int) -> [] int {
     let cap = capacity(per_ms, burst);
     var have = units;
     if have < 0 {
         have = 0;
-    }
-    if have >= cap {
-        return cap;
     }
     var elapsed = 0;
     if now > last {
@@ -93,11 +90,8 @@ pub fn retry_secs(units: int, rate: int, per_ms: int) -> [] int {
         r = 1;
     }
     let ms = (deficit + r - 1) / r;
-    let secs = (ms + 999) / 1000;
-    if secs < 1 {
-        return 1;
-    }
-    return secs;
+    // `deficit` and `r` are at least 1, so `ms` is, and so is the seconds' rounding up.
+    return (ms + 999) / 1000;
 }
 
 // Two polynomial hashes of `key`, each kept below 2^31 (a state times a multiplier below 2^16 is below 2^47). Both start at 0, so the empty key is 0 and 0.

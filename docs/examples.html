@@ -603,7 +603,7 @@ HTTP/1.1 403 Forbidden
 <aside class="status" id="not-yet">
   <h2>What these cases do not cover yet</h2>
   <ul>
-    <li><strong>Authentication</strong> and <strong>rate limiting</strong>: planned, not built. Do the check at your front for now.</li>
+    <li><strong>Authentication</strong>: planned, not built. Do the check at your front for now. <strong>Rate limiting</strong> is built (example 9), without a client address: the key is the route, a header or an <code>X-Forwarded-For</code> element.</li>
     <li><strong>TLS</strong>: a change of an identity&rsquo;s names, or of the set of identities, needs a restart (only the certificate and key are read again on <code>SIGHUP</code>); a stop on <code>SIGTERM</code> does not drain requests in flight, tunnels included. <strong>WebSocket</strong> (example 8) is a byte tunnel: the handshake is checked, the frames are not read, so there is no message limit, no ping policy and no close handshake of the gateway&rsquo;s own, and at most 127 tunnels fit.</li>
     <li><strong>The admin port</strong> (metrics, health) binds every interface and has no authentication: firewall it. No alerting, no tracing.</li>
     <li><strong>Client addresses</strong> in logs and headers: the compiler does not provide one yet.</li>

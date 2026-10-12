@@ -77,6 +77,8 @@ fn test_retry_after_is_rounded_up_and_never_zero() -> [] int {
     test.assert_eq(ratelimit.retry_secs(0, 1, 2001), 3);
     // The deficit is rounded up before the rate divides it: 7 units at 2 a millisecond is 4 ms.
     test.assert_eq(ratelimit.retry_secs(993, 2, 1000), 1);
+    // The milliseconds are rounded up before the seconds: 3,001 units at 3 a millisecond is 1,001 ms, which is 2 s (rounded down it would be 1,000 ms, 1 s).
+    test.assert_eq(ratelimit.retry_secs(0, 3, 3001), 2);
     // A rate or a deficit that should not occur is clamped, not divided by.
     test.assert_eq(ratelimit.retry_secs(0, 0, 1000), 1);
     test.assert_eq(ratelimit.retry_secs(1000, 5, 1000), 1);

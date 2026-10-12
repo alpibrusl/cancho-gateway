@@ -3,8 +3,7 @@
 Status: **a working reverse proxy, with deliberate gaps.** (Upstream keep-alive and the pool arrived in `docs/pool.md`; the first slice below opened one connection per request.) One thread, one poller, memory sized at start. Built: accept, head
 framing and routing (tasks #3, #4), a fresh upstream connection per request, request body forwarding (Content-Length and
 chunked), response relay, backpressure both ways, deadlines, refusals as `application/problem+json`. **Not built:** keep-alive
-on either side and the upstream pool (#6), (the header policy of #7 is built: `docs/headers.md`), authentication (#8), rate limits
-(#9), the metrics endpoint (#10; the access log is built), WebSockets (#15; built as a byte tunnel: `docs/websocket.md`). Section 6 lists what is untested.
+on either side and the upstream pool (#6), (the header policy of #7 is built: `docs/headers.md`), authentication (#8), (rate limits per route, #9, are built: `docs/ratelimit.md`), the metrics endpoint (#10; the access log is built), WebSockets (#15; built as a byte tunnel: `docs/websocket.md`). Section 6 lists what is untested.
 
 ## 1. The flow of one request
 

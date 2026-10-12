@@ -98,7 +98,7 @@ Everything is sized at start from the config; nothing is allocated afterwards (t
 | request body (per route) | per route | `limit.body` | 413, close |
 | upstream connections per upstream | 64 | `limit.pool` | 503 |
 | route table entries | 256 | `config.routes` | startup |
-| rate-limit keys | 65,536 | policy in #9 | 429 |
+| rate-limit keys | 65,536 | `limit.rate`, `limit.rate-table` (`docs/ratelimit.md`) | 429 |
 
 Per-connection buffers are slabs from one arena; the arena size is `connections * (head + buffer)` plus pool buffers, printed
 by `check` (§8). Defaults are starting points, fixed by the first measurement in #5, not claims.
