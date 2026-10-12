@@ -144,7 +144,7 @@ rate_buckets = 65536
 
 
 class Gateway:
-    def __init__(self, tmp, up_port, ws_port, routes, tls=True):
+    def __init__(self, tmp, up_port, ws_port, routes, tls=True, top=""):
         self.tmp = pathlib.Path(tmp)
         self.port, self.admin = pt.free_port(), pt.free_port()
         self.tls_port = pt.free_port() if tls else None
@@ -153,6 +153,7 @@ class Gateway:
             certs = self.tmp / "certs"
             self.chain_api = tt.make_identity(certs, "api", "api.example")
             tlsconf = 'tls_listen = %d\ntls_dir = "%s"\ntls_identities = ["api"]\n' % (self.tls_port, certs)
+        tlsconf += top
         deploy = self.tmp / "deploy.toml"
         deploy.write_text("""listen = %d
 admin_listen = %d
