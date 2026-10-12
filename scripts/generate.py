@@ -61,6 +61,8 @@ WS_CLOSE_MS, WS_CLOSE_RANGE = 5000, (100, 60000)
 RATE_MAX, BURST_MAX = 1000000, 1000000
 RATE_PERIODS = {"s": 1000, "m": 60000, "h": 3600000}
 BUCKETS, BUCKETS_RANGE, BUCKETS_TOTAL = 1024, (4, 65536), 65536
+# Slice 2 (docs/ratelimit.md section 13): the IPv6 prefix an xff key is aggregated on (1..128, default 64); a route's ceiling is one more bucket in the route's slice of the table.
+XFF_PREFIX, XFF_PREFIX_RANGE = 64, (1, 128)
 # Headers a rate_key may not name: the hop-by-hop ones and the framing and routing ones (the gateway removes or owns them), and, unless the route trusts
 # forwarding claims, the claims themselves.
 RATE_REFUSED_HEADERS = ["connection", "keep-alive", "proxy-connection", "proxy-authorization", "te", "trailer", "upgrade", "content-length", "transfer-encoding", "host"]
@@ -90,7 +92,7 @@ KEYS = {
     "api_key": ["name", "sha256"],
     "jwt_key": ["name", "public_key"],
     "route": ["name", "host", "path_prefix", "methods", "upstream", "max_body", "trust_forwarded", "websocket", "subprotocols", "origins", "ws_max_message_bytes",
-              "rate_limit", "rate_burst", "rate_key", "rate_buckets", "auth", "auth_header", "auth_keys", "auth_forward",
+              "rate_limit", "rate_burst", "rate_key", "rate_buckets", "rate_route_limit", "rate_route_burst", "rate_xff_prefix", "auth", "auth_header", "auth_keys", "auth_forward",
               "jwt_alg", "jwt_keys", "jwt_aud", "jwt_iss", "jwt_leeway"],
 }
 
@@ -168,9 +170,9 @@ def rate_hashes(key):
 def rate_options(r, trust, identities, refuse, i, jwt=False):
     """The rate-limit keys of one route (docs/ratelimit.md section 4), checked; answers the fields of its record. `identities` is the names of the keys the route
     admits, or None if it has no auth (docs/auth.md). `refuse(rule, message, section, index, key)` raises."""
-    none = {"rate": 0, "per_ms": 0, "burst": 0, "rate_key": "", "buckets": 0}
+    none = {"rate": 0, "per_ms": 0, "burst": 0, "rate_key": "", "buckets": 0, "c_rate": 0, "c_per_ms": 0, "c_burst": 0, "c_at": 0, "xff_prefix": 0}
     if "rate_limit" not in r:
-        for key in ("rate_burst", "rate_key", "rate_buckets"):
+        for key in ("rate_burst", "rate_key", "rate_buckets", "rate_route_limit", "rate_route_burst", "rate_xff_prefix"):
             if key in r:
                 refuse("config.ratelimit", "%s needs rate_limit on the same route (docs/ratelimit.md section 4)" % key, "route", i, key)
         return none
@@ -216,6 +218,28 @@ def rate_options(r, trust, identities, refuse, i, jwt=False):
         buckets = r.get("rate_buckets", BUCKETS)
         if not isinstance(buckets, int) or isinstance(buckets, bool) or not BUCKETS_RANGE[0] <= buckets <= BUCKETS_RANGE[1] or buckets % 4:
             bad("rate_buckets must be an integer, a multiple of 4, in %d..%d" % BUCKETS_RANGE, "rate_buckets")
+    prefix = 0
+    if key.startswith("x:"):
+        prefix = r.get("rate_xff_prefix", XFF_PREFIX)
+        if not isinstance(prefix, int) or isinstance(prefix, bool) or not XFF_PREFIX_RANGE[0] <= prefix <= XFF_PREFIX_RANGE[1]:
+            bad("rate_xff_prefix must be an integer in %d..%d: the bits of an IPv6 address an xff key is aggregated on (docs/ratelimit.md section 13.2)" % XFF_PREFIX_RANGE, "rate_xff_prefix")
+    elif "rate_xff_prefix" in r:
+        bad('rate_xff_prefix has no meaning without rate_key = "xff:last" or "xff:first": no other key is an address (docs/ratelimit.md section 13.2)', "rate_xff_prefix")
+    ceiling = {"c_rate": 0, "c_per_ms": 0, "c_burst": 0}
+    if "rate_route_limit" in r:
+        route_limit = r["rate_route_limit"]
+        cm = re.fullmatch(r"([1-9][0-9]{0,6})/([smh])", route_limit) if isinstance(route_limit, str) else None
+        if not cm or int(cm.group(1)) > RATE_MAX:
+            bad('rate_route_limit must be a string "N/s", "N/m" or "N/h" with N an integer in 1..%d (docs/ratelimit.md section 13.1)' % RATE_MAX, "rate_route_limit")
+        if key == "r":
+            bad('rate_route_limit has no meaning with rate_key = "route": the one bucket of a route key already is a ceiling on the whole route (docs/ratelimit.md section 13.1)', "rate_route_limit")
+        c_rate, c_per_ms = int(cm.group(1)), RATE_PERIODS[cm.group(2)]
+        c_burst = r.get("rate_route_burst", c_rate)
+        if not isinstance(c_burst, int) or isinstance(c_burst, bool) or not 1 <= c_burst <= BURST_MAX:
+            bad("rate_route_burst must be an integer in 1..%d" % BURST_MAX, "rate_route_burst")
+        ceiling = {"c_rate": c_rate, "c_per_ms": c_per_ms, "c_burst": c_burst}
+    elif "rate_route_burst" in r:
+        bad("rate_route_burst needs rate_route_limit on the same route (docs/ratelimit.md section 13.1)", "rate_route_burst")
     if key == "a":
         # The identities are known now, so whether the table can ever refuse one is decided now (docs/auth.md section 9): no more than four to a set of four buckets,
         # (a 62-bit fingerprint of two names being equal is not looked for: it is 2^-62 by chance and cannot be built from names a person chose). Then no authenticated caller is ever answered `limit.rate-table`.
@@ -229,7 +253,7 @@ def rate_options(r, trust, identities, refuse, i, jwt=False):
         if crowded:
             bad("rate_buckets %d puts %d of the route's keys (%s) in one set of four buckets, so one of them could be answered limit.rate-table: raise rate_buckets (the sets are fixed by the names)" %
                 (buckets, len(crowded), ", ".join(crowded)), "rate_buckets" if "rate_buckets" in r else "rate_key")
-    return {"rate": rate, "per_ms": per_ms, "burst": burst, "rate_key": key, "buckets": buckets}
+    return {"rate": rate, "per_ms": per_ms, "burst": burst, "rate_key": key, "buckets": buckets, "c_at": 0, "xff_prefix": prefix, **ceiling}
 
 
 def jwt_algorithm_message(alg):
@@ -542,9 +566,12 @@ def load(path):
     for j, r in enumerate(routes):
         r["base"] = base
         base += r["buckets"]
+        if r["c_rate"]:
+            r["c_at"] = base
+            base += 1
         if base > BUCKETS_TOTAL:
-            refuse("config.ratelimit", "the routes' rate-limit tables add up to more than %d buckets (a route key counts one)" % BUCKETS_TOTAL, "route", j,
-                   "rate_buckets" if "rate_buckets" in routes_in[j] else "rate_limit")
+            refuse("config.ratelimit", "the routes' rate-limit tables add up to more than %d buckets (a route key counts one, a route's ceiling one more)" % BUCKETS_TOTAL, "route", j,
+                   "rate_route_limit" if "rate_route_limit" in routes_in[j] else "rate_buckets" if "rate_buckets" in routes_in[j] else "rate_limit")
     timeouts["rate_total"] = base
     auth_routes = [j for j, r in enumerate(routes) if r["auth"]]
     if api_keys and not any(r["auth"] & 1 for r in routes):
@@ -717,11 +744,13 @@ def table_blob(routes):
     (empty, `r`, `a`, `x:l`, `x:f` or `h:<lowercase name>`), the buckets, and where the route's buckets begin; then authentication (docs/auth.md): 1 if the route
     authenticates (1 API keys, 2 JWTs, 3 both), the lowercase header it reads, 1 if it forwards the credential, the allowed key indices (`*` for all, else comma-separated), and the
     `WWW-Authenticate` challenge; then the JWT fields (docs/jwt.md): the allowed JWT key indices, the required audience and issuer (empty: none) and the leeway in seconds;
-    then the route's `ws_max_message_bytes` (docs/websocket-frames.md); tab-separated, in file order."""
-    return "".join("%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\n" % (
+    then the route's `ws_max_message_bytes` (docs/websocket-frames.md); then the route's ceiling (docs/ratelimit.md section 13.1): tokens per period (0: none), the period in ms, the burst, the
+    bucket it is (in the one table), and the IPv6 prefix of an xff key (0: not an xff key); tab-separated, in file order."""
+    return "".join("%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n" % (
         r["host"] or "*", r["prefix"], r["mask"], r["upstream"], r["max_body"], r["trust"], r["name"], r["ws"], ",".join(r["protocols"]), ",".join(r["origins"]),
         r["rate"], r["per_ms"], r["burst"], r["rate_key"], r["buckets"], r["base"],
-        r["auth"], r["auth_header"], r["auth_forward"], r["auth_keys"], r["challenge"], r["jwt_keys"], r["jwt_aud"], r["jwt_iss"], r["jwt_leeway"], r["ws_message"]) for r in routes)
+        r["auth"], r["auth_header"], r["auth_forward"], r["auth_keys"], r["challenge"], r["jwt_keys"], r["jwt_aud"], r["jwt_iss"], r["jwt_leeway"], r["ws_message"],
+        r["c_rate"], r["c_per_ms"], r["c_burst"], r["c_at"], r["xff_prefix"]) for r in routes)
 
 
 def render_routes(routes, rate_total, api_keys, jwt_keys):
@@ -733,7 +762,8 @@ def render_routes(routes, rate_total, api_keys, jwt_keys):
         "// empty; docs/websocket.md), then the rate limit (docs/ratelimit.md): tokens per period (0: none), the period in ms, the burst, the key, the buckets, and the",
         "// first bucket of the route's table, then authentication (docs/auth.md): 1 if the route authenticates, the header it reads, 1 if it forwards the credential, the",
         "// allowed key indices (`*`: all) and the WWW-Authenticate challenge, then the JWT fields (docs/jwt.md): the allowed public-key indices, the required audience and issuer",
-        "// (empty: none) and the leeway in seconds, then the WebSocket message limit (docs/websocket-frames.md). Tab-separated, in file order; `gateway.route` reads it.", "",
+        "// (empty: none) and the leeway in seconds, then the WebSocket message limit (docs/websocket-frames.md), then the route's ceiling (docs/ratelimit.md section 13.1: tokens per period,",
+        "// the period in ms, the burst, the bucket it is) and the IPv6 prefix of an xff key (0: not one). Tab-separated, in file order; `gateway.route` reads it.", "",
         "pub fn count() -> [] int {", "    return %d;" % len(routes), "}", "",
         "// The buckets of every route's rate-limit table, added up (docs/ratelimit.md section 6): what the table is sized to.",
         "pub fn rate_buckets_total() -> [] int {", "    return %d;" % rate_total, "}", "",
@@ -787,6 +817,8 @@ def main():
             print("route %d: %s %s -> %s (max body %d%s)" % (n, r["host"] or "*", r["prefix"], ups[r["upstream"]][0], r["max_body"], ", trusts forwarding headers" if r["trust"] else "") +
                   ("; websocket, subprotocols %s, origins %s, messages up to %d bytes" % (r["protocols"] or "none", r["origins"] or "none", r["ws_message"]) if r["ws"] else "") +
                   ("; limit %d per %d ms, burst %d, key %s, %d bucket(s)" % (r["rate"], r["per_ms"], r["burst"], r["rate_key"], r["buckets"]) if r["rate"] else "") +
+                  ("; ceiling %d per %d ms, burst %d (bucket %d)" % (r["c_rate"], r["c_per_ms"], r["c_burst"], r["c_at"]) if r["c_rate"] else "") +
+                  ("; ipv6 prefix /%d" % r["xff_prefix"] if r["xff_prefix"] else "") +
                   ("; authenticates with the %s header, %s%s" % (r["auth_header"], ("keys %s" % ("all" if r["auth_keys"] == "*" else ", ".join(timeouts["api_keys"][int(x)][0] for x in r["auth_keys"].split(",")))) if r["auth"] & 1 else "jwt only",
                                                                 ", forwards the credential" if r["auth_forward"] else "") if r["auth"] else ""))
         for n, r in enumerate(routes):

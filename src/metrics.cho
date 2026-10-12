@@ -24,10 +24,12 @@ import gateway.routes_table;
 // Slots 23 and 24 of a route's 32 (docs/ratelimit.md section 9): requests the route's rate limit refused (`limit.rate`), and requests refused because the key's
 // set of buckets had none to give (`limit.rate-table`).
 //
+// Slot 40 (docs/ratelimit.md section 13.1): requests the route's ceiling refused (`limit.rate-route`), after their own key's bucket had admitted them.
+//
 // Slots 25 to 28 (docs/auth.md section 12): requests the route's authentication refused, by kind: `auth.missing`, `auth.malformed`, `auth.invalid` (all 401) and `auth.forbidden` (403).
 //
 // Slots 29 to 39 (docs/jwt.md section 9): tokens the route refused, by kind (the order of `gateway.jwt`'s rules): malformed, alg, header, kid, claims, expired, not_yet_valid, audience,
-// issuer, clock, signature. Every one was answered 401 `auth.invalid`; only the counter and the log say which. The route's block is 48 ints, 40 to 47 unused.
+// issuer, clock, signature. Every one was answered 401 `auth.invalid`; only the counter and the log say which. The route's block is 48 ints, 41 to 47 unused.
 //
 // Every number is written saturated at 10^18 - 1 (a counter does not get there in the life of a process), so that the size of an answer
 // has a bound that `worst_case()` states and the unit test checks.
@@ -266,6 +268,15 @@ pub fn rate_refused[&s](stats: &!s [int], route_index: int, table_full: bool) ->
     return 0;
 }
 
+// A request on route `route_index` was refused by the route's ceiling (`limit.rate-route`, docs/ratelimit.md section 13.1).
+pub fn rate_route_refused[&s](stats: &!s [int], route_index: int) -> [] int {
+    if route_index >= 0 && route_index < routes() {
+        let at = route_index * route_block() + 40;
+        stats[at] = stats[at] + 1;
+    }
+    return 0;
+}
+
 // A request on route `route_index` was refused by its authentication: `rule` 1 `auth.missing`, 2 `auth.malformed`, 3 `auth.invalid`, 4 `auth.forbidden` (`gateway.auth`); another number counts nothing.
 pub fn auth_refused[&s](stats: &!s [int], route_index: int, rule: int) -> [] int {
     if route_index >= 0 && route_index < routes() && rule >= 1 && rule <= 4 {
@@ -493,6 +504,8 @@ pub fn json[&o, &s, &n, &g](out: &!o [byte], at: int, stats: &s [int], names: &n
         k = jnum(out, k, "rate_limited", stats[base + 23]);
         k = out.put(out, k, ",");
         k = jnum(out, k, "rate_table_full", stats[base + 24]);
+        k = out.put(out, k, ",");
+        k = jnum(out, k, "rate_route_limited", stats[base + 40]);
         k = out.put(out, k, ",\"auth_refused\":{");
         k = jnum(out, k, "missing", stats[base + 25]);
         k = out.put(out, k, ",");
@@ -760,6 +773,12 @@ pub fn prometheus[&o, &s, &n, &g](out: &!o [byte], at: int, stats: &s [int], nam
         k = sample(out, k, "rate_table_full_total", "", "route", route.name(i), stats[i * route_block() + 24]);
         i = i + 1;
     }
+    k = family(out, k, "rate_route_limited_total", "counter", "Requests refused because the route's ceiling was spent, by route.");
+    i = 0;
+    while i < routes() {
+        k = sample(out, k, "rate_route_limited_total", "", "route", route.name(i), stats[i * route_block() + 40]);
+        i = i + 1;
+    }
     k = family(out, k, "auth_refused_total", "counter", "Requests refused by the route's authentication, by route and kind.");
     i = 0;
     while i < routes() {
@@ -938,12 +957,12 @@ pub fn frame[&o](out: &!o [byte], status: int, ctype: &static [byte], end: int) 
 // An upper bound on the response to a scrape, for this deployment: what the buffer is sized to, and within a tenth of the largest answer there
 // can be (the unit test checks both). In the Prometheus text, which is the larger format: the families' comments and the six plain
 // lines (4,3xx bytes with the reload, tunnel and WebSocket frame counters, rounded up), a line for each rule and one for `other` (98 bytes: the name's 40 and an 18-digit number), per route
-// 39 lines (2,152 bytes and its name 28 times, the four of `auth_refused_total` among them, and the eleven of `jwt_refused_total`: 850 bytes and its name 11 times; the name is counted 41 times in all), per upstream 21 lines (1,615 bytes and its name 21 times).
+// 39 lines (2,152 bytes and its name 28 times, the four of `auth_refused_total` among them, and the eleven of `jwt_refused_total`: 850 bytes and its name 11 times; the name is counted 42 times in all; the ceiling's counter, `rate_route_limited_total`, adds a line of 69 bytes and its name once, and a member of the JSON of 42, 112 bytes in all, and its family's two comment lines 180 once), per upstream 21 lines (1,615 bytes and its name 21 times).
 pub fn worst_case() -> [] int {
-    var bytes = head_room() + 4372 + 384 + 512 + 160 + 256 + (rule_cap() + 1) * 98 + 64;
+    var bytes = head_room() + 4372 + 384 + 512 + 160 + 256 + 180 + (rule_cap() + 1) * 98 + 64;
     var i = 0;
     while i < routes() {
-        bytes = bytes + 1836 + 316 + 130 + 850 + 41 * len(route.name(i));
+        bytes = bytes + 1836 + 316 + 130 + 850 + 112 + 42 * len(route.name(i));
         i = i + 1;
     }
     i = 0;

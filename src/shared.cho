@@ -185,6 +185,8 @@ pub res struct Core {
     rnames: Box[[byte]],
     gauge: Box[[int]],
     abuf: Box[[byte]],
+    // The scratch the key of an IPv6 client is written in (`ipkey.scratch_len()` bytes, docs/ratelimit.md section 13.2).
+    rkey: Box[[byte]],
     // The rate limiter's buckets (docs/ratelimit.md section 6): three ints each, `routes_table.rate_buckets_total()` of them, sized at start.
     rl: Box[[int]],
     // The frame parsers of the WebSocket tunnels, `wsframe.state_len()` ints for each client slot (docs/websocket-frames.md section 11).
