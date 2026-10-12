@@ -68,3 +68,20 @@ fn test_a_buffer_too_small_is_refused() -> [] int {
     }
     return 0;
 }
+
+fn test_a_429_names_when_to_come_back_and_no_other_response_does() -> [] int {
+    region a {
+        let buf = alloc_slice[a](512, byte_of(0));
+        let n = problem.response_after(buf, 429, "limit.rate", "1a-1f90-0000002a", 7);
+        let want = "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/problem+json\r\nContent-Length: 115\r\nRetry-After: 7\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: close\r\n\r\n{\"type\":\"about:blank\",\"title\":\"Too Many Requests\",\"status\":429,\"rule\":\"limit.rate\",\"request_id\":\"1a-1f90-0000002a\"}";
+        test.assert_eq(n, len(want));
+        test.assert(bytes.equal(buf[0..n], want));
+        // Without a wait, the bytes are those of `response`; a wait of 0 or less adds nothing.
+        let plain = problem.response(buf, 429, "limit.rate", "1a-1f90-0000002a");
+        test.assert(bytes.find(buf[0..plain], "Retry-After") < 0);
+        test.assert_eq(problem.response_after(buf, 429, "limit.rate", "1a-1f90-0000002a", 0), plain);
+        test.assert_eq(problem.response_after(buf, 429, "limit.rate", "1a-1f90-0000002a", 0 - 3), plain);
+        test.assert_eq(problem.response_after(buf, 429, "limit.rate", "1a-1f90-0000002a", 3600), plain + len("\r\nRetry-After: 3600"));
+    }
+    return 0;
+}

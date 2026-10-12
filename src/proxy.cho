@@ -17,8 +17,10 @@ import gateway.framing;
 import gateway.metrics;
 import gateway.out;
 import gateway.problem;
+import gateway.ratelimit;
 import gateway.response;
 import gateway.route;
+import gateway.routes_table;
 import gateway.shared;
 import gateway.adminloop;
 import gateway.tlsio;
@@ -355,7 +357,7 @@ fn refuse[&t, &c, &r](tab: &!t conns.Table, core: &!c shared.Core, k: int, statu
     shared.flag_set(core, k, 1);
     shared.meta_put(core, k, 68, 40, 1, rule);
     let base = k * shared.pend_size();
-    let n = problem.response(pd[base..base + shared.pend_size()], status, rule, shared.meta_get(core, k, 4, 0));
+    let n = problem.response_after(pd[base..base + shared.pend_size()], status, rule, shared.meta_get(core, k, 4, 0), st[p + shared.retry_after()]);
     if n < 0 {
         shared.drop_session(tab, core, k);
         return 0;
@@ -765,6 +767,31 @@ fn pump_request[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now
     return 0;
 }
 
+// Take one token for the request of client `k`, which route `sel` chose, from the bucket of its key. If there is none the client is refused (429, `limit.rate` or
+// `limit.rate-table`, with `Retry-After`), counted, and an upgrade it asked for is forgotten, so that it holds no tunnel place while it lingers. Answers true if it was refused.
+fn rate_limited[&t, &c, &v, &b](tab: &!t conns.Table, core: &!c shared.Core, k: int, sel: int, view: &v [byte], tb: &b [int], now: int) -> [conn_write, poll] bool {
+    if route.rate(sel) == 0 {
+        return false;
+    }
+    let verdict = ratelimit.admit(contents(core.rl), route.rate_base(sel), route.rate_buckets(sel), ratelimit.key(view, tb, route.rate_key(sel)), route.rate(sel), route.rate_per_ms(sel), route.rate_burst(sel), now);
+    if verdict == 0 {
+        return false;
+    }
+    let st = contents(core.state);
+    let p = shared.stride() * k;
+    st[p + shared.ws_mode()] = 0;
+    if verdict > 0 {
+        st[p + shared.retry_after()] = verdict;
+        metrics.rate_refused(contents(core.stats), sel, false);
+        refuse(tab, core, k, 429, "limit.rate", now);
+    } else {
+        st[p + shared.retry_after()] = 0 - verdict;
+        metrics.rate_refused(contents(core.stats), sel, true);
+        refuse(tab, core, k, 429, "limit.rate-table", now);
+    }
+    return true;
+}
+
 // Client `k` has bytes while its head is arriving: judge them, route the request, and ask for an upstream connection.
 fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: int) -> [conn_write, poll] int {
     let st = contents(core.state);
@@ -825,6 +852,10 @@ fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: 
     } else {
         st[p + 9] = 0;
         st[p + 10] = 1;
+    }
+    // The route's rate limit (docs/ratelimit.md section 7): a token of the key's bucket, after every other local check and before the circuit's.
+    if rate_limited(tab, core, k, sel, view, tb, now) {
+        return 0;
     }
     // Last of the checks the gateway makes itself: a request refused above never uses up the circuit's one trial.
     let admit = circuit_admit(core, route.upstream(sel), now);
@@ -1430,7 +1461,7 @@ pub fn run[&h, &l, &a, &x, &q, &w, &n, &k, &i](heap: &!h Heap, listener: &!l Lis
                 }
             }
             let limit = shared.slot_limit();
-            var core = shared.Core { poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, shared.stride() * limit, 0), bufs: box_slice(heap, limit * shared.buf_size(), byte_of(0)), pends: box_slice(heap, limit * shared.pend_size(), byte_of(0)), table: box_slice(heap, http.slots(64), 0), chunks: box_slice(heap, limit * chunked.state_len(), 0), health: box_slice(heap, 4 * 256, 0), ids: box_slice(heap, 16, 0), meta: box_slice(heap, limit * shared.meta_size(), byte_of(0)), logq: box_slice(heap, shared.logq_size(), byte_of(0)), stats: box_slice(heap, metrics.stats_len(), 0), rnames: box_slice(heap, metrics.names_len(), byte_of(0)), gauge: box_slice(heap, metrics.gauge_len(), 0), abuf: box_slice(heap, shared.admin_buffer_len(), byte_of(0)), tls: tlsstate };
+            var core = shared.Core { poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, shared.stride() * limit, 0), bufs: box_slice(heap, limit * shared.buf_size(), byte_of(0)), pends: box_slice(heap, limit * shared.pend_size(), byte_of(0)), table: box_slice(heap, http.slots(64), 0), chunks: box_slice(heap, limit * chunked.state_len(), 0), health: box_slice(heap, 4 * 256, 0), ids: box_slice(heap, 16, 0), meta: box_slice(heap, limit * shared.meta_size(), byte_of(0)), logq: box_slice(heap, shared.logq_size(), byte_of(0)), stats: box_slice(heap, metrics.stats_len(), 0), rnames: box_slice(heap, metrics.names_len(), byte_of(0)), gauge: box_slice(heap, metrics.gauge_len(), 0), abuf: box_slice(heap, shared.admin_buffer_len(), byte_of(0)), rl: box_slice(heap, ratelimit.table_len(routes_table.rate_buckets_total()), 0), tls: tlsstate };
             var tab = conns.empty(heap, 64);
             borrow mut core as &!cw in {
                 let mono = clock_ms(clock);
@@ -1573,7 +1604,7 @@ pub fn run[&h, &l, &a, &x, &q, &w, &n, &k, &i](heap: &!h Heap, listener: &!l Lis
                 }
             }
             conns.drop(heap, tab);
-            let shared.Core { poller, events, state, bufs, pends, table, chunks, health, ids, meta, logq, stats, rnames, gauge, abuf, tls } = core;
+            let shared.Core { poller, events, state, bufs, pends, table, chunks, health, ids, meta, logq, stats, rnames, gauge, abuf, rl, tls } = core;
             poller_close(poller);
             unbox_slice(heap, events);
             unbox_slice(heap, state);
@@ -1589,6 +1620,7 @@ pub fn run[&h, &l, &a, &x, &q, &w, &n, &k, &i](heap: &!h Heap, listener: &!l Lis
             unbox_slice(heap, rnames);
             unbox_slice(heap, gauge);
             unbox_slice(heap, abuf);
+            unbox_slice(heap, rl);
             tlsio.close(heap, tls);
             return status;
         }

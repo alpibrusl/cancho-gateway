@@ -38,6 +38,9 @@ pub fn reason(status: int) -> [] &static [byte] {
     if status == 426 {
         return "Upgrade Required";
     }
+    if status == 429 {
+        return "Too Many Requests";
+    }
     if status == 431 {
         return "Request Header Fields Too Large";
     }
@@ -78,6 +81,11 @@ pub fn body[&o, &t, &d](out: &!o [byte], at: int, status: int, rule: &t [byte], 
 
 // Head and body, from offset 0; answers the length, or `0 - 1` if `out` is too small. The head carries the id too.
 pub fn response[&o, &t, &d](out: &!o [byte], status: int, rule: &t [byte], id: &d [byte]) -> [] int {
+    return response_after(out, status, rule, id, 0);
+}
+
+// `response`, with `Retry-After: <retry>` (whole seconds, docs/ratelimit.md section 5) between `Content-Length` and the rest when `retry` is above 0.
+pub fn response_after[&o, &t, &d](out: &!o [byte], status: int, rule: &t [byte], id: &d [byte], retry: int) -> [] int {
     // The body's length is known without writing it twice: everything but the variable parts is fixed.
     let fixed = len("{\"type\":\"about:blank\",\"title\":\"") + len("\",\"status\":") + len(",\"rule\":\"") + len("\",\"request_id\":\"") + len("\"}");
     let length = fixed + len(reason(status)) + out.digits(status) + len(rule) + len(id);
@@ -87,6 +95,10 @@ pub fn response[&o, &t, &d](out: &!o [byte], status: int, rule: &t [byte], id: &
     k = out.put(out, k, reason(status));
     k = out.put(out, k, "\r\nContent-Type: application/problem+json\r\nContent-Length: ");
     k = out.put_int(out, k, length);
+    if retry > 0 {
+        k = out.put(out, k, "\r\nRetry-After: ");
+        k = out.put_int(out, k, retry);
+    }
     if status == 426 {
         // RFC 6455 4.4: the versions the server speaks (docs/websocket.md section 4, row 7).
         k = out.put(out, k, "\r\nSec-WebSocket-Version: 13");

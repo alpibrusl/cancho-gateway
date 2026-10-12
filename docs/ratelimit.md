@@ -241,7 +241,7 @@ past a limit during an outage). The limit comes **before** the circuit so that a
 
       HTTP/1.1 429 Too Many Requests
       Content-Type: application/problem+json
-      Content-Length: 136
+      Content-Length: 115
       Retry-After: 1
       X-Request-Id: 19b3c2a1f00-1f90-0000002a
       Connection: close
