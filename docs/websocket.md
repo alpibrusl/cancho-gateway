@@ -5,7 +5,7 @@ the build found the design false; a claim found false is corrected in place and 
 compiler (`cancho.toml`, `2fcf4cd`). **Slice 2 (frames, ping/pong, close handshake, message limit, UTF-8) is `docs/websocket-frames.md`**: it supersedes sections 7 and 8 and the "Not done" list below where they say that no frame is read.
 
 The use case is OCPP-J: EV chargers connect to a back office over a WebSocket (`ws`, or `wss` in production) and speak a subprotocol, `ocpp1.6` or `ocpp2.0.1`, for hours or weeks. The gateway sits in front of the
-back office: it is where the strict parsing, the upstream set, the access log, the metrics and TLS already are. This slice makes the gateway carry the connection. It does **not** understand OCPP and does **not**
+back office: it is where the strict parsing, the upstream set, the access log, the metrics and TLS already are. This slice makes the gateway carry the connection. It does **not** understand OCPP (*slice 3, `docs/ocpp.md`, checks the shape of the frames: not their meaning*) and does **not**
 read WebSocket frames.
 
 ## 1. Scope

@@ -176,6 +176,7 @@ REFUSALS = [
     ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = {a = 1}\n'),
     ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nws_ocpp = "1.6"\n'),
     ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nws_ocpp = ["1.6", "2.0.1"]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nws_ocpp = []\n'),
     ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp2.0.1"]\nws_ocpp = "1.6"\n'),
     ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6", "ocpp2.0.1"]\nws_ocpp = "1.6"\n'),
     ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6", "other"]\nws_ocpp = "1.6"\n'),

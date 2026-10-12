@@ -29,7 +29,7 @@ size and time limits; per-route rate limiting from the clock (built: `docs/ratel
 primitives, but HMAC needs a secret the binary must not hold); upstream connection reuse; health checks; an access log. HTTP/1.1, over plain TCP or TLS 1.3 from the client side.
 
 Not in v1: HTTP/2 and gRPC, TLS to the upstreams, client certificates, caching, response rewriting, dynamic upstream
-discovery, clustering. WebSocket compression and OCPP message validation are not done (below).
+discovery, clustering. WebSocket compression is not done, and OCPP message validation checks the shape of a frame, not the OCPP in it (below).
 
 **WebSocket, built 2026-10-08 (slice 1).** A route with `websocket = true` (and `subprotocols`, `origins`) admits an RFC 6455 opening handshake after the
 checks of `docs/websocket.md` section 4, forwards it on a fresh connection without extensions, checks the upstream's `101` (including the
@@ -41,8 +41,15 @@ is enforced (reserved bits and opcodes, control frames, masking in the right dir
 (default 1 MiB, counted over its fragments) and invalid UTF-8 in a text message are refused, and a violation never reaches the other side. The gateway now sends **Close frames** of its own at
 frame boundaries (1001 for a timer, 1002/1007/1009 for the client's fault, 1011 to a client whose upstream broke the rules), waits a bounded time for the echo (`ws_close_ms`) and passes a
 peer's Close through. An optional **keepalive** (`ws_ping_ms`, `ws_pong_ms`) Pings a silent charger and closes it when the Pong does not come, so a charger whose NAT mapping died frees its slot in
-seconds instead of at the idle timeout; the upstream never sees the gateway's Ping or its Pong. **Not done:** `permessage-deflate` (stripped), OCPP-J message validation, per-message rate limits,
+seconds instead of at the idle timeout; the upstream never sees the gateway's Ping or its Pong. **Not done:** `permessage-deflate` (stripped), per-message rate limits,
 TLS to the upstream, and more than 127 concurrent tunnels (the slot table's size).
+
+**OCPP-J message validation, built 2026-10-12 (slice 3).** A route with `ws_ocpp = "1.6"`, `"2.0.1"` or a list of both (its `subprotocols` must be exactly the matching `ocpp...` tokens) checks that every
+text message, in both directions and after its fragments are put together, is a well-formed OCPP-J frame (`docs/ocpp.md`): a JSON array of the right length for its type (`[2, id, action, payload]`,
+`[3, id, payload]`, `[4, id, code, description, details]`), an id of 1 to 36 plain ASCII characters, an action that is 1 to 64 letters and digits, a payload that is a JSON object (well formed, nested at most
+32 deep). It is a streaming recogniser of eight ints a direction: no message is held, so a refusal that comes in the same read as its frame's header never reaches the other side, and one that comes later leaves
+the other side with a frame that never ends (the document says which). Refusals are a Close 1007 (not a frame) or 1008 (binary message, nesting past the bound), a tag `ws.ocpp-*` and a counter
+(`ocpp_violations`). **Not validated:** the action against the version's list, the payload against its JSON schema, the id against the call it answers, duplicate member names, OCPP 2.1.
 
 **TLS, built 2026-10-08 (slice 1), reload and TLS-only the same day (slice 2).** This file used to say TLS "needs foreign code and would make the authority report unbounded". That
 reason stopped holding when cancho shipped a TLS 1.3 server written in cancho (`packages/tls`; cancho's own notes say it has not been

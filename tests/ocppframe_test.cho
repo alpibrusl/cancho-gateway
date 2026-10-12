@@ -350,6 +350,7 @@ fn test_json_that_is_not_json_is_refused_inside_a_payload() -> [] int {
     bad("[2,\"a\",\"B\",{\"a\":\"\\x\"}]", r_json());
     bad("[2,\"a\",\"B\",{\"a\":\"\\u12G4\"}]", r_json());
     bad("[2,\"a\",\"B\",{\"a\":\"\\u12\"}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":\"\\u00e\"}]", r_json());
     bad("[2,\"a\",\"B\",{\"a\":\"\\'\"}]", r_json());
     bad("[2,\"a\",\"B\",{\"a\":\"line\nbreak\"}]", r_json());
     bad("[2,\"a\",\"B\",{\"a\":\"tab\there\"}]", r_json());
