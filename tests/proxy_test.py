@@ -1475,6 +1475,68 @@ class T:
         assert sorted(results).count(503) == 4 and flap.accepted - accepted == 1, (sorted(results), flap.accepted - accepted)
         assert split(request(gw, GET % b"/flap/ok"))[0] == 200, "the trial's success should have closed the circuit"
 
+    def the_half_open_trial_has_one_life_from_open_to_closed(gw, up):
+        # docs/ratelimit.md section 13.3. The whole life in order, counted by the upstream's own accepted connections (the upstream stays UP throughout, so a request
+        # the circuit lets through is a connection it sees): open lets nothing through; after the period exactly ONE connection is made, however many ask;
+        # its failure reopens the circuit for a FULL period (not what was left of the old one); the next period again lets exactly one through; its success closes it,
+        # the count of failures is forgotten, and everything goes through.
+        heal(gw)
+        flap = gw.flap
+
+        def burst(path, n):
+            """n simultaneous requests: (status, rule or None) of each."""
+            results = []
+
+            def one():
+                status, _, body = split(request(gw, GET % path, timeout=8))
+                try:
+                    results.append((status, json.loads(body)["rule"]))
+                except (ValueError, KeyError):
+                    results.append((status, None))
+            threads = [threading.Thread(target=one) for _ in range(n)]
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join()
+            return results
+
+        # 1. Three unreadable answers in a row open it (the upstream is up and accepts each connection).
+        for _ in range(3):
+            assert refusal(request(gw, GET % b"/flap/garbage"))[0] == 502
+        t_open = time.time()
+        # 2. Open: eight requests, none reaches the upstream, though it is up and would answer.
+        accepted = flap.accepted
+        for _ in range(8):
+            assert refusal(request(gw, GET % b"/flap/ok")) == (503, "proxy.circuit-open")
+        assert flap.accepted == accepted, "an open circuit let a connection through"
+        assert time.time() - t_open < 0.8, "the machine is too slow for this test to say anything about the open period"
+        # 3. The period ends: five at once, and exactly one connection reaches the upstream. It is unreadable, so it fails.
+        time.sleep(max(0.0, t_open + 1.05 - time.time()))
+        accepted = flap.accepted
+        results = burst(b"/flap/garbage", 5)
+        t_fail = time.time()
+        assert flap.accepted - accepted == 1, ("not exactly one trial", flap.accepted - accepted, results)
+        assert sorted(r[0] for r in results) == [502, 503, 503, 503, 503], results
+        assert [r[1] for r in results if r[0] == 503] == ["proxy.circuit-open"] * 4, results
+        # 4. The failed trial reopened it, for a full period: refused at once and again after most of a period, and nothing reached the upstream.
+        accepted = flap.accepted
+        assert refusal(request(gw, GET % b"/flap/ok")) == (503, "proxy.circuit-open"), "a failed trial should reopen the circuit"
+        time.sleep(max(0.0, t_fail + 0.7 - time.time()))
+        assert refusal(request(gw, GET % b"/flap/ok")) == (503, "proxy.circuit-open"), "the reopened circuit admitted a request before a full period had passed"
+        assert flap.accepted == accepted, "a reopened circuit let a connection through"
+        # 5. The next period ends: five at once, exactly one connection; this one succeeds (it takes 0.6 s, while the others are refused).
+        time.sleep(max(0.0, t_fail + 1.1 - time.time()))
+        accepted = flap.accepted
+        results = burst(b"/flap/slow", 5)
+        assert flap.accepted - accepted == 1, ("not exactly one second trial", flap.accepted - accepted, results)
+        assert sorted(r[0] for r in results) == [200, 503, 503, 503, 503], results
+        # 6. The trial's success closed it and forgot the count: everything goes through, and it takes three fresh failures to open it again.
+        for _ in range(6):
+            assert split(request(gw, GET % b"/flap/ok"))[0] == 200
+        assert refusal(request(gw, GET % b"/flap/garbage"))[0] == 502
+        assert refusal(request(gw, GET % b"/flap/garbage"))[0] == 502
+        assert split(request(gw, GET % b"/flap/ok"))[0] == 200, "the count of failures was not forgotten when the trial succeeded"
+
     def a_trial_abandoned_by_its_client_is_handed_back(gw, up):
         # The half-open trial is a request whose client leaves in the middle of its upload: the gateway drops the session and no
         # success or failure is ever recorded for it. The circuit must offer the trial to the next request at once.
