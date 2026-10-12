@@ -14,6 +14,7 @@ All of these pass before anything is called done (CI runs them, `.github/workflo
     python3 tests/websocket_test.py              # WebSocket handshake and tunnel, plain and over TLS (docs/websocket.md)
     python3 tests/route_test.py 12 400          # route selection vs the reference; also --fixed (docs/routes.md)
     python3 tests/ratelimit_test.py             # rate limiting, end to end (docs/ratelimit.md); its mutants: tests/ratelimit_mutants.py
+    python3 tests/auth_test.py                  # API-key authentication, end to end (docs/auth.md); its mutants: tests/auth_mutants.py
     cancho build
     cancho test
     python3 tests/smuggling/run.py --gateway    # also --prefixes, --fuzz 1500, --chunked (docs/framing.md)

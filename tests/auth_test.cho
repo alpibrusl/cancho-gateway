@@ -1,0 +1,361 @@
+edition 5;
+
+import std.bytes;
+import std.http;
+import std.test;
+import gateway.auth;
+import gateway.out;
+
+// API-key authentication without a gateway (docs/auth.md sections 3 and 4, gate 1): the digest of known credentials against `hashlib`, the comparison over a table of keys, and the
+// parsing of the credential header in every shape that matters, with the extremes (no key, 64 keys, 0 and 10,000 bytes of credential, every byte value).
+
+fn want_hex(cred: &static [byte], hex: &static [byte]) -> [] bool {
+    var ok = false;
+    region a {
+        let out = alloc_slice[a](64, byte_of(0));
+        ok = auth.hex_digest(cred, out) == 64 && bytes.equal(out[0..64], hex);
+    }
+    return ok;
+}
+
+fn test_the_digest_of_known_credentials_is_the_sha256_in_lowercase_hex() -> [] int {
+    test.assert(want_hex("abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
+    test.assert(want_hex("ck_alpha", "e5294d2b3da2402ebf9601783779f7d56371cbdf66daebc371497a9fa732a04d"));
+    test.assert(want_hex("", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+    return 0;
+}
+
+fn digest_of_repeated(n: int, hex: &static [byte]) -> [] bool {
+    var ok = false;
+    region a {
+        let msg = alloc_slice[a](n, byte_of(97));
+        let out = alloc_slice[a](64, byte_of(0));
+        auth.hex_digest(msg, out);
+        ok = bytes.equal(out[0..64], hex);
+    }
+    return ok;
+}
+
+fn test_the_digest_is_right_across_the_padding_boundaries_and_at_the_longest_credential() -> [] int {
+    test.assert(digest_of_repeated(55, "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318"));
+    test.assert(digest_of_repeated(56, "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a"));
+    test.assert(digest_of_repeated(63, "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34"));
+    test.assert(digest_of_repeated(64, "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"));
+    test.assert(digest_of_repeated(65, "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0"));
+    test.assert(digest_of_repeated(119, "31eba51c313a5c08226adf18d4a359cfdfd8d2e816b13f4af952f7ea6584dcfb"));
+    test.assert(digest_of_repeated(120, "2f3d335432c70b580af0e8e1b3674a7c020d683aa5f73aaaedfdc55af904c21c"));
+    test.assert(digest_of_repeated(256, "02d7160d77e18c6447be80c2e355c7ed4388545271702c50253b0914c65ce5fe"));
+    return 0;
+}
+
+// ---- the comparison ----
+
+fn three() -> [] &static [byte] {
+    return "alpha\te5294d2b3da2402ebf9601783779f7d56371cbdf66daebc371497a9fa732a04d\nbravo\t636247f8dc3721e740ca5fa3ddc07358e3eb034f92438efef2a963ce18a84291\ncharlie\tcaada39029d3f7bfa05c343fb397ff01e57008e545f835f8f762b5607322c304\n";
+}
+
+fn test_a_key_is_found_at_the_first_a_middle_and_the_last_place_and_nowhere_else() -> [] int {
+    test.assert_eq(auth.lookup_in("ck_alpha", three()), 1);
+    test.assert_eq(auth.lookup_in("ck_bravo", three()), 2);
+    test.assert_eq(auth.lookup_in("ck_charlie", three()), 3);
+    test.assert_eq(auth.lookup_in("ck_delta", three()), 0);
+    test.assert_eq(auth.count_in(three()), 3);
+    test.assert(bytes.equal(auth.name_in(three(), 0), "alpha"));
+    test.assert(bytes.equal(auth.name_in(three(), 1), "bravo"));
+    test.assert(bytes.equal(auth.name_in(three(), 2), "charlie"));
+    test.assert_eq(len(auth.name_in(three(), 3)), 0);
+    test.assert_eq(len(auth.name_in(three(), 0 - 1)), 0);
+    return 0;
+}
+
+fn test_a_prefix_an_extension_a_case_change_and_a_neighbour_are_not_the_key() -> [] int {
+    test.assert_eq(auth.lookup_in("ck_alph", three()), 0);
+    test.assert_eq(auth.lookup_in("ck_alpha1", three()), 0);
+    test.assert_eq(auth.lookup_in("ck_alpha ", three()), 0);
+    test.assert_eq(auth.lookup_in("CK_ALPHA", three()), 0);
+    test.assert_eq(auth.lookup_in("ck_Alpha", three()), 0);
+    test.assert_eq(auth.lookup_in("k_alpha", three()), 0);
+    test.assert_eq(auth.lookup_in("", three()), 0);
+    return 0;
+}
+
+// A digest that differs from the table's in one digit, at the first place, the last and a middle one, is not a match: the whole of it is compared.
+fn test_a_digest_that_differs_in_the_first_or_the_last_digit_is_not_a_match() -> [] int {
+    let good = "ck_alpha";
+    test.assert_eq(auth.lookup_in(good, "x\te5294d2b3da2402ebf9601783779f7d56371cbdf66daebc371497a9fa732a04d\n"), 1);
+    test.assert_eq(auth.lookup_in(good, "x\tf5294d2b3da2402ebf9601783779f7d56371cbdf66daebc371497a9fa732a04d\n"), 0);
+    test.assert_eq(auth.lookup_in(good, "x\te5294d2b3da2402ebf9601783779f7d56371cbdf66daebc371497a9fa732a04e\n"), 0);
+    test.assert_eq(auth.lookup_in(good, "x\te5294d2b3da2402ebf9601783779f7d5637bcbdf66daebc371497a9fa732a04d\n"), 0);
+    // Uppercase digits are different bytes: the generator never writes them, and a table that did would match nothing.
+    test.assert_eq(auth.lookup_in(good, "x\tE5294D2B3DA2402EBF9601783779F7D56371CBDF66DAEBC371497A9FA732A04D\n"), 0);
+    return 0;
+}
+
+fn test_a_table_with_no_key_or_a_damaged_line_matches_nothing_and_reads_nothing_out_of_range() -> [] int {
+    test.assert_eq(auth.lookup_in("ck_alpha", ""), 0);
+    test.assert_eq(auth.count_in(""), 0);
+    test.assert_eq(auth.lookup_in("ck_alpha", "\n"), 0);
+    test.assert_eq(auth.lookup_in("ck_alpha", "alpha\n"), 0);
+    test.assert_eq(auth.lookup_in("ck_alpha", "alpha\te5294d2b3da2402ebf9601783779f7d5\n"), 0);
+    test.assert_eq(auth.lookup_in("ck_alpha", "alpha\t"), 0);
+    test.assert_eq(auth.lookup_in("ck_alpha", "alpha"), 0);
+    // A table whose last line has no newline still holds its key.
+    test.assert_eq(auth.lookup_in("ck_alpha", "alpha\te5294d2b3da2402ebf9601783779f7d56371cbdf66daebc371497a9fa732a04d"), 1);
+    // A damaged line does not hide the good one after it.
+    test.assert_eq(auth.lookup_in("ck_bravo", "junk\nbravo\t636247f8dc3721e740ca5fa3ddc07358e3eb034f92438efef2a963ce18a84291\n"), 2);
+    return 0;
+}
+
+// A table of the most keys a deployment holds: every key is found at its own place, and a key that is not in it is not.
+fn test_a_table_of_sixty_four_keys_finds_each_one_at_its_own_place() -> [] int {
+    region a {
+        let blob = alloc_slice[a](64 * 80, byte_of(0));
+        let cred = alloc_slice[a](16, byte_of(0));
+        var k = 0;
+        var i = 0;
+        while i < auth.max_keys() {
+            k = out.put(blob, k, "key");
+            k = out.put_int(blob, k, i);
+            k = out.put(blob, k, "\t");
+            var n = out.put(cred, 0, "ck_");
+            n = out.put_int(cred, n, i);
+            auth.hex_digest(cred[0..n], blob[k..k + 64]);
+            k = k + 64;
+            k = out.put(blob, k, "\n");
+            i = i + 1;
+        }
+        let table = blob[0..k];
+        test.assert_eq(auth.count_in(table), 64);
+        i = 0;
+        while i < auth.max_keys() {
+            var n = out.put(cred, 0, "ck_");
+            n = out.put_int(cred, n, i);
+            test.assert_eq(auth.lookup_in(cred[0..n], table), i + 1);
+            i = i + 1;
+        }
+        var n = out.put(cred, 0, "ck_");
+        n = out.put_int(cred, n, 64);
+        test.assert_eq(auth.lookup_in(cred[0..n], table), 0);
+        test.assert(bytes.equal(auth.name_in(table, 63), "key63"));
+    }
+    return 0;
+}
+
+fn test_a_credential_of_any_length_is_hashed_without_a_panic() -> [] int {
+    region a {
+        let big = alloc_slice[a](10000, byte_of(107));
+        test.assert_eq(auth.lookup_in(big, three()), 0);
+        test.assert(!auth.credential_ok(big));
+        let none = alloc_slice[a](1, byte_of(0));
+        test.assert_eq(auth.lookup_in(none[0..0], three()), 0);
+        test.assert(!auth.credential_ok(none[0..0]));
+    }
+    return 0;
+}
+
+// ---- the parsing ----
+
+fn rule_of(req: &static [byte], name: &static [byte]) -> [] int {
+    var rule = 99;
+    region a {
+        let table = alloc_slice[a](http.slots(32), 0);
+        if http.parse(req, table) > 0 {
+            rule = auth.parse(req, table, name);
+        }
+    }
+    return rule;
+}
+
+fn cred_is(req: &static [byte], name: &static [byte], want: &static [byte]) -> [] bool {
+    var ok = false;
+    region a {
+        let table = alloc_slice[a](http.slots(32), 0);
+        if http.parse(req, table) > 0 {
+            ok = bytes.equal(auth.credential(req, table, name), want);
+        }
+    }
+    return ok;
+}
+
+fn test_a_bearer_token_is_the_credential() -> [] int {
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Bearer ck_alpha\r\n\r\n", "authorization"), 0);
+    test.assert(cred_is("GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Bearer ck_alpha\r\n\r\n", "authorization", "ck_alpha"));
+    // The name and the scheme are case-insensitive; the credential is not changed.
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nAUTHORIZATION: bEaReR Ck_Alpha\r\n\r\n", "authorization"), 0);
+    test.assert(cred_is("GET / HTTP/1.1\r\nHost: a\r\nAUTHORIZATION: bEaReR Ck_Alpha\r\n\r\n", "authorization", "Ck_Alpha"));
+    // Blanks around the whole value are not part of it.
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nAuthorization:   Bearer ck_alpha \t\r\n\r\n", "authorization"), 0);
+    test.assert(cred_is("GET / HTTP/1.1\r\nHost: a\r\nAuthorization:   Bearer ck_alpha \t\r\n\r\n", "authorization", "ck_alpha"));
+    // Every character of the token68 alphabet.
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Bearer aZ09-._~+/==\r\n\r\n", "authorization"), 0);
+    return 0;
+}
+
+fn test_a_header_is_the_credential_whole() -> [] int {
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key: ck_alpha\r\n\r\n", "x-api-key"), 0);
+    test.assert(cred_is("GET / HTTP/1.1\r\nHost: a\r\nx-API-key:  ck_alpha \r\n\r\n", "x-api-key", "ck_alpha"));
+    // No scheme is read from a custom header: `Bearer ck_alpha` is a credential with a space in it.
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key: Bearer ck_alpha\r\n\r\n", "x-api-key"), 2);
+    return 0;
+}
+
+fn test_no_header_is_missing_and_an_empty_one_is_not() -> [] int {
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\n\r\n", "authorization"), 1);
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nX-Other: 1\r\n\r\n", "x-api-key"), 1);
+    // A header whose name merely contains or extends the route's is another header.
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key-2: k\r\n\r\n", "x-api-key"), 1);
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nX-Api: k\r\n\r\n", "x-api-key"), 1);
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key:\r\n\r\n", "x-api-key"), 2);
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key:    \r\n\r\n", "x-api-key"), 2);
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nAuthorization:\r\n\r\n", "authorization"), 2);
+    return 0;
+}
+
+fn test_a_header_twice_is_malformed_even_when_both_are_the_same_good_key() -> [] int {
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key: ck_alpha\r\nX-Api-Key: ck_alpha\r\n\r\n", "x-api-key"), 2);
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Bearer ck_alpha\r\nauthorization: Bearer ck_alpha\r\n\r\n", "authorization"), 2);
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key: ck_alpha\r\nX-Api-Key:\r\n\r\n", "x-api-key"), 2);
+    // The other header on a route that reads this one does not count.
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Bearer x\r\nAuthorization: Bearer y\r\nX-Api-Key: ck_alpha\r\n\r\n", "x-api-key"), 0);
+    return 0;
+}
+
+fn test_the_scheme_and_its_one_space_are_exact() -> [] int {
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Basic dXNlcjpwYXNz\r\n\r\n", "authorization"), 2);
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nAuthorization: ck_alpha\r\n\r\n", "authorization"), 2);
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Bearer\r\n\r\n", "authorization"), 2);
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Bearer \r\n\r\n", "authorization"), 2);
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Bearerck_alpha\r\n\r\n", "authorization"), 2);
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Bearer  ck_alpha\r\n\r\n", "authorization"), 2);
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Bearer\tck_alpha\r\n\r\n", "authorization"), 2);
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Bearer ck_alpha extra\r\n\r\n", "authorization"), 2);
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Bearer, ck_alpha\r\n\r\n", "authorization"), 2);
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Bearers ck_alpha\r\n\r\n", "authorization"), 2);
+    return 0;
+}
+
+fn test_a_credential_outside_the_alphabet_is_malformed() -> [] int {
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key: ck alpha\r\n\r\n", "x-api-key"), 2);
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key: ck,alpha\r\n\r\n", "x-api-key"), 2);
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key: \"ck_alpha\"\r\n\r\n", "x-api-key"), 2);
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key: ck_alpha;\r\n\r\n", "x-api-key"), 2);
+    test.assert_eq(rule_of("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key: ck%20alpha\r\n\r\n", "x-api-key"), 2);
+    return 0;
+}
+
+// Every byte value as a one-byte credential: accepted exactly when it is in the alphabet.
+fn test_exactly_the_token68_alphabet_is_accepted_one_byte_at_a_time() -> [] int {
+    region a {
+        let one = alloc_slice[a](1, byte_of(0));
+        var accepted = 0;
+        var c = 0;
+        while c < 256 {
+            one[0] = byte_of(c);
+            let in_alphabet = bytes.is_alpha(c) || bytes.is_digit(c) || c == '-' || c == '.' || c == '_' || c == '~' || c == '+' || c == '/' || c == '=';
+            test.assert(auth.credential_ok(one) == in_alphabet);
+            if in_alphabet {
+                accepted = accepted + 1;
+            }
+            c = c + 1;
+        }
+        // 26 + 26 + 10 letters and digits and seven marks.
+        test.assert_eq(accepted, 69);
+    }
+    return 0;
+}
+
+fn rule_of_length(n: int, bearer: bool) -> [] int {
+    var rule = 99;
+    region a {
+        let buf = alloc_slice[a](600, byte_of(0));
+        var k = out.put(buf, 0, "GET / HTTP/1.1\r\nHost: a\r\n");
+        if bearer {
+            k = out.put(buf, k, "Authorization: Bearer ");
+        } else {
+            k = out.put(buf, k, "X-Api-Key: ");
+        }
+        var i = 0;
+        while i < n {
+            k = out.put(buf, k, "k");
+            i = i + 1;
+        }
+        k = out.put(buf, k, "\r\n\r\n");
+        let table = alloc_slice[a](http.slots(32), 0);
+        let req = buf[0..k];
+        if http.parse(req, table) > 0 {
+            if bearer {
+                rule = auth.parse(req, table, "authorization");
+            } else {
+                rule = auth.parse(req, table, "x-api-key");
+            }
+        }
+    }
+    return rule;
+}
+
+fn test_a_credential_of_256_bytes_is_accepted_and_of_257_is_not() -> [] int {
+    test.assert_eq(rule_of_length(1, false), 0);
+    test.assert_eq(rule_of_length(255, false), 0);
+    test.assert_eq(rule_of_length(256, false), 0);
+    test.assert_eq(rule_of_length(257, false), 2);
+    test.assert_eq(rule_of_length(300, false), 2);
+    test.assert_eq(rule_of_length(256, true), 0);
+    test.assert_eq(rule_of_length(257, true), 2);
+    test.assert_eq(rule_of_length(0, true), 2);
+    test.assert_eq(rule_of_length(0, false), 2);
+    return 0;
+}
+
+fn test_a_credential_of_ten_thousand_bytes_is_malformed_not_a_panic() -> [] int {
+    region a {
+        let buf = alloc_slice[a](10100, byte_of(107));
+        var k = out.put(buf, 0, "GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key: ");
+        k = k + 10000;
+        k = out.put(buf, k, "\r\n\r\n");
+        let table = alloc_slice[a](http.slots(32), 0);
+        test.assert(http.parse(buf[0..k], table) > 0);
+        test.assert_eq(auth.parse(buf[0..k], table, "x-api-key"), 2);
+        test.assert_eq(len(auth.credential(buf[0..k], table, "x-api-key")), 10000);
+    }
+    return 0;
+}
+
+// ---- the route's key list, the rules ----
+
+fn test_a_routes_key_list_allows_all_or_the_keys_it_names() -> [] int {
+    test.assert(auth.allowed("*", 0));
+    test.assert(auth.allowed("*", 63));
+    test.assert(auth.allowed("0,2,5", 0));
+    test.assert(auth.allowed("0,2,5", 2));
+    test.assert(auth.allowed("0,2,5", 5));
+    test.assert(!auth.allowed("0,2,5", 1));
+    test.assert(!auth.allowed("0,2,5", 4));
+    test.assert(!auth.allowed("0,2,5", 25));
+    test.assert(auth.allowed("12,3", 12));
+    test.assert(!auth.allowed("12,3", 1));
+    test.assert(auth.allowed("63", 63));
+    test.assert(!auth.allowed("", 0));
+    test.assert(!auth.allowed(",", 0));
+    test.assert(!auth.allowed("a", 0));
+    test.assert(!auth.allowed("1x,3", 1));
+    test.assert(auth.allowed("1x,3", 3));
+    test.assert(!auth.allowed("99999999999999999999999999,1", 0));
+    return 0;
+}
+
+fn test_the_rules_have_a_tag_and_a_status() -> [] int {
+    test.assert_eq(auth.rule_count(), 4);
+    test.assert(bytes.equal(auth.tag(1), "auth.missing"));
+    test.assert(bytes.equal(auth.tag(2), "auth.malformed"));
+    test.assert(bytes.equal(auth.tag(3), "auth.invalid"));
+    test.assert(bytes.equal(auth.tag(4), "auth.forbidden"));
+    test.assert_eq(len(auth.tag(0)), 0);
+    test.assert_eq(len(auth.tag(5)), 0);
+    test.assert_eq(auth.status(1), 401);
+    test.assert_eq(auth.status(2), 401);
+    test.assert_eq(auth.status(3), 401);
+    test.assert_eq(auth.status(4), 403);
+    test.assert_eq(auth.status(0), 0);
+    test.assert_eq(auth.status(5), 0);
+    return 0;
+}

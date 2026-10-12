@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Table tests of scripts/generate.py: the prefix rule, and one refusal per rule tag."""
 
+import hashlib
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -234,6 +236,142 @@ ACCEPTED = [
 ]
 
 
+# --- authentication (docs/auth.md section 6): one refusal per rule, plus the variants of each
+D1 = hashlib.sha256(b"ck_alpha").hexdigest()
+D2 = hashlib.sha256(b"ck_bravo").hexdigest()
+TOP = 'listen = 80\nauth_allow_plain = true\n'          # lines 1 and 2
+ONE = '[[upstream]]\nname = "a"\naddr = "10.0.0.1:1"\n'
+K1 = '[[api_key]]\nname = "alice"\nsha256 = "%s"\n' % D1
+K2 = '[[api_key]]\nname = "bob"\nsha256 = "%s"\n' % D2
+AR = '[[route]]\nupstream = "a"\npath_prefix = "/"\nauth = "api-key"\n'
+BASE = TOP + ONE + K1 + K2          # keys at lines 6 to 8 (alice) and 9 to 11 (bob)
+
+
+def at(text, marker, last=False):
+    """The line of the first (or last) line of `text` that contains `marker`."""
+    found = [n for n, line in enumerate(text.splitlines(), 1) if marker in line]
+    return found[-1 if last else 0]
+
+
+def auth_refusal(rule, marker, text, last=False):
+    return (rule, at(text, marker, last), text)
+
+
+def auth_cases():
+    out = []
+    # 1: the name
+    for name in ('"Alice"', '""', '"%s"' % ("a" * 33), "5", '"al ice"', '"-alice"', '"alice@x"'):
+        out.append(auth_refusal("config.auth", "name = ", TOP + ONE + '[[api_key]]\nname = %s\nsha256 = "%s"\n' % (name, D1) + AR, last=True))
+    out.append(auth_refusal("config.auth", "[[api_key]]", TOP + ONE + '[[api_key]]\nsha256 = "%s"\n' % D1 + AR))
+    # 2: a name twice
+    out.append(auth_refusal("config.auth", 'name = "alice"', TOP + ONE + K1 + '[[api_key]]\nname = "alice"\nsha256 = "%s"\n' % D2 + AR, last=True))
+    # 3: the digest
+    for digest in ('"%s"' % D1[:63], '"%s"' % (D1 + "0"), '"%s"' % D1.upper(), '"%s"' % ("g" + D1[1:]), '""', "5", '"%s"' % ("0x" + D1[2:]), '"%s "' % D1, '[1]'):
+        out.append(auth_refusal("config.auth", "sha256", TOP + ONE + '[[api_key]]\nname = "alice"\nsha256 = %s\n' % digest + AR))
+    out.append(auth_refusal("config.auth", "[[api_key]]", TOP + ONE + '[[api_key]]\nname = "alice"\n' + AR))
+    # 4: the same digest under two names
+    out.append(auth_refusal("config.auth", "sha256", TOP + ONE + K1 + '[[api_key]]\nname = "bob"\nsha256 = "%s"\n' % D1 + AR, last=True))
+    # 5: more than 64 keys (and exactly 64 is accepted, below)
+    many = "".join('[[api_key]]\nname = "k%d"\nsha256 = "%s"\n' % (i, hashlib.sha256(b"ck_%d" % i).hexdigest()) for i in range(65))
+    out.append(("config.auth", None, TOP + ONE + many + AR))
+    # 6: the kind
+    for kind in ('"jwt"', "true", '"API-KEY"', '""', "1"):
+        out.append(auth_refusal("config.auth", "auth = ", TOP + ONE + K1 + '[[route]]\nupstream = "a"\npath_prefix = "/"\nauth = %s\n' % kind))
+    # 7: auth_* without auth
+    for extra in ('auth_header = "X-Api-Key"\n', 'auth_keys = ["alice"]\n', "auth_forward = true\n"):
+        out.append(auth_refusal("config.auth", extra.split(" =")[0], TOP + ONE + K1 + '[[route]]\nupstream = "a"\npath_prefix = "/"\n' + extra))
+    # 8: the header
+    for header in ("Host", "Connection", "Content-Length", "Transfer-Encoding", "Proxy-Authorization", "Upgrade", "TE", "X-Forwarded-For", "Forwarded", "X-Real-IP", "X-Request-Id",
+                   "X Key", "", "x" * 65, "Bad:Name", "naïve"):
+        out.append(auth_refusal("config.auth", "auth_header", TOP + ONE + K1 + AR + 'auth_header = "%s"\n' % header))
+    out.append(auth_refusal("config.auth", "auth_header", TOP + ONE + K1 + AR + "auth_header = 5\n"))
+    # 9: the key list
+    for keys in ("[]", '["nobody"]', '["alice", "alice"]', '"alice"', "[1]", '["alice", "nobody"]', '["Alice"]'):
+        out.append(auth_refusal("config.auth", "auth_keys", TOP + ONE + K1 + AR + "auth_keys = %s\n" % keys))
+    # 10: forwarding the credential
+    for value in ('"yes"', "1", '"true"'):
+        out.append(auth_refusal("config.auth", "auth_forward", TOP + ONE + K1 + AR + "auth_forward = %s\n" % value))
+    # 11: auth and no key at all
+    out.append(auth_refusal("config.auth", "auth = ", TOP + ONE + AR))
+    # 12: keys and no route that authenticates
+    out.append(auth_refusal("config.auth", "[[api_key]]", TOP + ONE + K1 + '[[route]]\nupstream = "a"\npath_prefix = "/"\n'))
+    # 13: a key on a plain listener unless the deployment says a front terminates TLS
+    out.append(auth_refusal("config.auth", "auth = ", 'listen = 80\n' + ONE + K1 + AR))
+    out.append(auth_refusal("config.auth", "auth = ", 'listen = 80\nauth_allow_plain = false\n' + ONE + K1 + AR))
+    out.append(auth_refusal("config.auth", "auth = ", 'listen = 80\ntls_listen = 443\ntls_dir = "/etc/cancho/tls"\n' + ONE + K1 + AR))
+    # 14: the flag itself
+    for value in ('"yes"', "1"):
+        out.append(auth_refusal("config.auth", "auth_allow_plain", 'listen = 80\nauth_allow_plain = %s\n' % value + ONE + K1 + AR))
+    out.append(auth_refusal("config.auth", "auth_allow_plain", 'tls_listen = 443\ntls_dir = "/etc/cancho/tls"\nauth_allow_plain = true\n' + ONE + K1 + AR))
+    out.append(auth_refusal("config.auth", "auth_allow_plain", TOP + ONE + '[[route]]\nupstream = "a"\npath_prefix = "/"\n'))
+    # 15: the identity as a rate-limit key needs an identity
+    out.append(auth_refusal("config.ratelimit", "rate_key", TOP + ONE + K1 + '[[route]]\nupstream = "a"\npath_prefix = "/"\nrate_limit = "5/s"\nrate_key = "auth"\n'))
+    # 16: the identities must fit the table: five keys cannot all have a bucket in a table of four, so one could be refused limit.rate-table
+    five = "".join('[[api_key]]\nname = "k%d"\nsha256 = "%s"\n' % (i, hashlib.sha256(b"ck_%d" % i).hexdigest()) for i in range(5))
+    out.append(auth_refusal("config.ratelimit", "rate_buckets", TOP + ONE + five + AR + 'rate_limit = "5/s"\nrate_key = "auth"\nrate_buckets = 4\n'))
+    # (the same with the names that the gateway's hash puts together: five names in two sets of four, all in one; this pins the generator's copy of the hash)
+    out.append(auth_refusal("config.ratelimit", "rate_buckets", TOP + ONE + five + AR + 'rate_limit = "5/s"\nrate_key = "auth"\nrate_buckets = 8\n'))
+    # an unknown key of [[api_key]] is named like any other
+    out.append(auth_refusal("config.unknown-key", "colour", TOP + ONE + K1 + 'colour = "red"\n' + AR))
+    return out
+
+
+def auth_accepted():
+    sixty_four = "".join('[[api_key]]\nname = "k%d"\nsha256 = "%s"\n' % (i, hashlib.sha256(b"ck_%d" % i).hexdigest()) for i in range(64))
+    tls = 'tls_listen = 443\ntls_dir = "/etc/cancho/tls"\n'
+    return [
+        TOP + ONE + K1 + AR,
+        TOP + ONE + K1 + K2 + AR + 'auth_header = "X-Api-Key"\nauth_keys = ["bob"]\nauth_forward = true\n',
+        TOP + ONE + K1 + K2 + AR + 'auth_header = "authorization"\nauth_keys = ["bob", "alice"]\nauth_forward = false\nrate_limit = "5/s"\nrate_key = "auth"\nrate_buckets = 4\n',
+        TOP + ONE + K1 + K2 + AR + 'auth_header = "X-Custom_Key.1"\n',
+        TOP + ONE + sixty_four + AR,
+        TOP + ONE + K1 + AR + '[[route]]\nupstream = "a"\npath_prefix = "/open"\n',
+        # an identity as the rate key: four keys fit a table of four, a route that admits four of five fits one too, and 64 keys fit a table of 4,096
+        TOP + ONE + "".join('[[api_key]]\nname = "k%d"\nsha256 = "%s"\n' % (i, hashlib.sha256(b"ck_%d" % i).hexdigest()) for i in range(4)) + AR + 'rate_limit = "5/s"\nrate_key = "auth"\nrate_buckets = 4\n',
+        TOP + ONE + "".join('[[api_key]]\nname = "k%d"\nsha256 = "%s"\n' % (i, hashlib.sha256(b"ck_%d" % i).hexdigest()) for i in range(5)) + AR + 'auth_keys = ["k0", "k1", "k2", "k3"]\nrate_limit = "5/s"\nrate_key = "auth"\nrate_buckets = 4\n',
+        TOP + ONE + sixty_four + AR + 'rate_limit = "5/s"\nrate_key = "auth"\nrate_buckets = 4096\n',
+        # TLS only: a key never crosses a plain listener, and no flag is needed (or allowed)
+        tls + ONE + K1 + AR,
+        'listen = 80\nauth_allow_plain = true\n' + tls + ONE + K1 + AR,
+        TOP + ONE + K1 + AR + 'websocket = true\ntrust_forwarded = true\nrate_limit = "5/s"\nrate_key = "header:X-Real-IP"\n',
+    ]
+
+
+REFUSALS += auth_cases()
+ACCEPTED += auth_accepted()
+
+
+def auth_compiled(run, failures):
+    """What authentication compiles (docs/auth.md sections 4.1 and 6): the key table, the route's record, and what --explain says."""
+    text = (TOP + ONE + K1 + K2 + AR + 'auth_header = "X-Api-Key"\nauth_keys = ["bob"]\n' + '[[route]]\nupstream = "a"\npath_prefix = "/b"\nauth = "api-key"\nrate_limit = "5/s"\nrate_key = "auth"\nrate_buckets = 8\n' +
+            '[[route]]\nupstream = "a"\npath_prefix = "/c"\n')
+    with tempfile.TemporaryDirectory() as tmp:
+        f = pathlib.Path(tmp) / "d.toml"
+        f.write_text(text)
+        subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(f), "--out", tmp], check=True)
+        table = (pathlib.Path(tmp) / "routes.cho").read_text()
+        explained = run(text).stdout
+    keys = '"alice\\t%s\\nbob\\t%s\\n"' % (D1, D2)
+    wants = ["pub fn key_count() -> [] int {\n    return 2;", "return " + keys + ";",
+             '\\t1\\tx-api-key\\t0\\t1\\tApiKey realm=\\"cancho-gateway\\", header=\\"x-api-key\\"\\n',
+             '\\ta\\t8\\t0\\t1\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\n',
+             '\\t0\\t\\t0\\t\\t\\n']
+    for want in wants:
+        if want not in table:
+            print("FAIL the routes table must contain %r" % want)
+            failures += 1
+    for want in ("authenticates with the x-api-key header, keys bob", "authenticates with the authorization header, keys all", "api keys: alice, bob (digests only compiled in)",
+                 "auth_allow_plain"):
+        if want not in explained:
+            print("FAIL --explain must say %r: %r" % (want, explained[-400:]))
+            failures += 1
+    # A deployment without keys compiles an empty table, and the digests are the only trace of a key: no key, only its digest, is in what was written.
+    if "ck_alpha" in table:
+        print("FAIL a key must not be written")
+        failures += 1
+    return failures
+
+
 def run(text, *extra):
     with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
         f.write(text)
@@ -241,6 +379,47 @@ def run(text, *extra):
                          capture_output=True, text=True)
     pathlib.Path(f.name).unlink()
     return out
+
+
+def mkkey_checks(failures):
+    """scripts/mkkey.py (docs/auth.md section 5): the key is on standard error only, the digest is the key's, nothing is written, the output is a deployment the generator accepts."""
+    script = str(ROOT / "scripts" / "mkkey.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        before = sorted(p.name for p in pathlib.Path(tmp).iterdir())
+        made = subprocess.run([sys.executable, script, "carol"], capture_output=True, text=True, cwd=tmp)
+        again = subprocess.run([sys.executable, script, "carol"], capture_output=True, text=True, cwd=tmp)
+        after = sorted(p.name for p in pathlib.Path(tmp).iterdir())
+    m = re.search(r"(ck_[A-Za-z0-9_-]{43})\s*$", made.stderr)
+    if made.returncode != 0 or not m:
+        print("FAIL mkkey must print a ck_ key of 43 characters on standard error: %r" % made.stderr)
+        return failures + 1
+    key = m.group(1)
+    want = '[[api_key]]\nname = "carol"\nsha256 = "%s"\n' % hashlib.sha256(key.encode()).hexdigest()
+    if made.stdout != want:
+        print("FAIL mkkey must print the table with the key's SHA-256 on standard output: %r" % made.stdout)
+        failures += 1
+    if key in made.stdout or before != after:
+        print("FAIL mkkey must not put the key on standard output nor write a file")
+        failures += 1
+    other = re.search(r"(ck_[A-Za-z0-9_-]{43})\s*$", again.stderr)
+    if not other or other.group(1) == key:
+        print("FAIL two keys must differ")
+        failures += 1
+    hashed = subprocess.run([sys.executable, script, "carol", "--stdin"], input=key + "\n", capture_output=True, text=True)
+    if hashed.returncode != 0 or hashed.stdout != want or hashed.stderr:
+        print("FAIL mkkey --stdin must print the same table and nothing on standard error: %r %r" % (hashed.stdout, hashed.stderr))
+        failures += 1
+    for args, text in ((["Carol"], ""), (["carol", "--stdin"], "has space"), (["carol", "--stdin"], ""), (["carol", "--bogus"], ""), ([], "")):
+        bad = subprocess.run([sys.executable, script, *args], input=text, capture_output=True, text=True)
+        if bad.returncode != 2 or bad.stdout:
+            print("FAIL mkkey %r must be refused with exit 2 and print nothing on standard output: %r" % (args, bad.stdout))
+            failures += 1
+    # The output goes into a deployment the generator accepts, and the gateway's credential rule accepts the key.
+    out = run(TOP + ONE + made.stdout + AR)
+    if out.returncode != 0:
+        print("FAIL a deployment with mkkey's table must be accepted: %r" % out.stderr)
+        failures += 1
+    return failures
 
 
 def main():
@@ -296,7 +475,7 @@ def main():
         subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(f), "--out", tmp], check=True)
         table = (pathlib.Path(tmp) / "routes.cho").read_text()
         explained = run(limited).stdout
-    for want in ("\\t10\\t60000\\t3\\th:x-api-key\\t64\\t0\\n", "\\t0\\t0\\t0\\t\\t0\\t64\\n", "\\t7\\t1000\\t7\\tx:l\\t1024\\t64\\n", "\\t2\\t3600000\\t2\\tr\\t1\\t1088\\n",
+    for want in ("\\t10\\t60000\\t3\\th:x-api-key\\t64\\t0\\t0\\t\\t0\\t\\t\\n", "\\t0\\t0\\t0\\t\\t0\\t64\\t0\\t\\t0\\t\\t\\n", "\\t7\\t1000\\t7\\tx:l\\t1024\\t64\\t0\\t\\t0\\t\\t\\n", "\\t2\\t3600000\\t2\\tr\\t1\\t1088\\t0\\t\\t0\\t\\t\\n",
                  "pub fn rate_buckets_total() -> [] int {\n    return 1089;"):
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
@@ -304,6 +483,8 @@ def main():
     if "limit 10 per 60000 ms, burst 3, key h:x-api-key, 64 bucket(s)" not in explained:
         print("FAIL --explain must say what a route's limit is: %r" % explained[-300:])
         failures += 1
+    failures = auth_compiled(run, failures)
+    failures = mkkey_checks(failures)
     print("%d prefix cases, %d refusal cases, %d accepted, %d failures" % (len(PREFIX), len(REFUSALS), len(ACCEPTED), failures))
     return 1 if failures else 0
 

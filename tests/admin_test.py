@@ -129,7 +129,8 @@ class T:
         assert [r["name"] for r in m["routes"]] == ["dead", "ka", "flap", "trusted", "main"], [r["name"] for r in m["routes"]]
         assert [u["name"] for u in m["upstreams"]] == ["up", "dead", "ka", "flap"]
         for r in m["routes"]:
-            assert list(r) == ["name", "requests", "bytes_in", "bytes_out", "duration_ms", "rate_limited", "rate_table_full"] and r["rate_limited"] == 0 and r["rate_table_full"] == 0, list(r)
+            assert list(r) == ["name", "requests", "bytes_in", "bytes_out", "duration_ms", "rate_limited", "rate_table_full", "auth_refused"] and r["rate_limited"] == 0 and r["rate_table_full"] == 0, list(r)
+            assert r["auth_refused"] == {"missing": 0, "malformed": 0, "invalid": 0, "forbidden": 0}, r["auth_refused"]
             assert list(r["requests"]) == ["none", "1xx", "2xx", "3xx", "4xx", "5xx"]
             assert len(r["duration_ms"]["buckets"]) == 14 and r["duration_ms"]["count"] == sum(r["duration_ms"]["buckets"])
         for u in m["upstreams"]:

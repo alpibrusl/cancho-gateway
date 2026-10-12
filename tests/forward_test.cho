@@ -264,3 +264,42 @@ fn test_an_upgrade_is_forwarded_with_its_own_connection_headers_and_without_exte
     }
     return 0;
 }
+
+// ---- the credential header (docs/auth.md section 3) ----
+
+fn strips_to(req: &static [byte], strip: &static [byte], upgrade: bool, want: &static [byte]) -> [] bool {
+    var ok = false;
+    region a {
+        let table = alloc_slice[a](http.slots(32), 0);
+        let out = alloc_slice[a](2048, byte_of(0));
+        if http.parse(req, table) > 0 {
+            var n = 0;
+            if upgrade {
+                n = forward.rewrite_upgrade_auth(req, table, out, false, false, "1a-1f90-0000002a", strip);
+            } else {
+                n = forward.rewrite_auth(req, table, out, false, false, false, "1a-1f90-0000002a", strip);
+            }
+            ok = n == len(want) && bytes.equal(out[0..n], want);
+        }
+    }
+    return ok;
+}
+
+fn test_the_credential_header_the_route_read_is_not_forwarded() -> [] int {
+    let tail = "Via: 1.1 cancho-gateway\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: close\r\n\r\n";
+    test.assert(strips_to("GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Bearer ck_alpha\r\nX-Keep: 1\r\n\r\n", "authorization", false, "GET / HTTP/1.1\r\nHost: a\r\nX-Keep: 1\r\nVia: 1.1 cancho-gateway\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: close\r\n\r\n"));
+    test.assert(strips_to("GET / HTTP/1.1\r\nHost: a\r\nx-API-key: ck_alpha\r\nX-Keep: 1\r\n\r\n", "x-api-key", false, "GET / HTTP/1.1\r\nHost: a\r\nX-Keep: 1\r\nVia: 1.1 cancho-gateway\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: close\r\n\r\n"));
+    // Only the header the route read: a client's own `Authorization` on a route that reads `X-Api-Key` is the upstream's business.
+    test.assert(strips_to("GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Bearer theirs\r\nX-Api-Key: ck_alpha\r\n\r\n", "x-api-key", false, "GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Bearer theirs\r\nVia: 1.1 cancho-gateway\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: close\r\n\r\n"));
+    // A name that merely starts with or contains the credential header's is another header.
+    test.assert(strips_to("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key-2: keep\r\nX-Api: keep\r\nX-Api-Key: ck_alpha\r\n\r\n", "x-api-key", false, "GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key-2: keep\r\nX-Api: keep\r\nVia: 1.1 cancho-gateway\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: close\r\n\r\n"));
+    // No header to strip: the bytes `rewrite` writes.
+    test.assert(strips_to("GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Bearer ck_alpha\r\n\r\n", "", false, "GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Bearer ck_alpha\r\nVia: 1.1 cancho-gateway\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: close\r\n\r\n"));
+    test.assert(len(tail) > 0);
+    return 0;
+}
+
+fn test_a_credential_header_is_stripped_from_an_upgrade_too() -> [] int {
+    test.assert(strips_to("GET /ws HTTP/1.1\r\nHost: a\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nAuthorization: Bearer ck_alpha\r\nSec-WebSocket-Key: k\r\n\r\n", "authorization", true, "GET /ws HTTP/1.1\r\nHost: a\r\nSec-WebSocket-Key: k\r\nVia: 1.1 cancho-gateway\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"));
+    return 0;
+}

@@ -7,6 +7,7 @@ import std.conns;
 import std.http;
 import std.io;
 import std.signals as sg;
+import gateway.auth;
 import gateway.accesslog;
 import gateway.admin;
 import gateway.chunked;
@@ -357,7 +358,12 @@ fn refuse[&t, &c, &r](tab: &!t conns.Table, core: &!c shared.Core, k: int, statu
     shared.flag_set(core, k, 1);
     shared.meta_put(core, k, 68, 40, 1, rule);
     let base = k * shared.pend_size();
-    let n = problem.response_after(pd[base..base + shared.pend_size()], status, rule, shared.meta_get(core, k, 4, 0), st[p + shared.retry_after()]);
+    // A 401 names how to authenticate: the challenge of the route that refused it (docs/auth.md section 7.2).
+    var challenge = "";
+    if status == 401 && st[p + 31] > 0 {
+        challenge = route.auth_challenge(st[p + 31] - 1);
+    }
+    let n = problem.response_challenge(pd[base..base + shared.pend_size()], status, rule, shared.meta_get(core, k, 4, 0), st[p + shared.retry_after()], challenge);
     if n < 0 {
         shared.drop_session(tab, core, k);
         return 0;
@@ -767,18 +773,54 @@ fn pump_request[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now
     return 0;
 }
 
+// Authenticate the request of client `k`, which route `sel` chose (docs/auth.md section 7.1): the credential from the route's header, hashed and compared with every key. If it is missing, malformed,
+// unknown or a key the route does not allow, the client is refused (401, or 403 for a key that is valid and not allowed), counted by kind, and nothing else about the request has been
+// decided: no WebSocket state, no token, no upstream. A key that matched is remembered, for the access log and for `rate_key = "auth"`. Answers true if it was refused.
+fn unauthenticated[&t, &c, &v, &b](tab: &!t conns.Table, core: &!c shared.Core, k: int, sel: int, view: &v [byte], tb: &b [int], now: int) -> [conn_write, poll] bool {
+    if route.auth(sel) == 0 {
+        return false;
+    }
+    let st = contents(core.state);
+    let p = shared.stride() * k;
+    let header = route.auth_header(sel);
+    var rule = auth.parse(view, tb, header);
+    if rule == 0 {
+        let found = auth.lookup(auth.credential(view, tb, header));
+        if found == 0 {
+            rule = 3;
+        } else {
+            st[p + shared.auth_slot()] = found;
+            if !auth.allowed(route.auth_keys(sel), found - 1) {
+                rule = 4;
+            }
+        }
+    }
+    if rule == 0 {
+        return false;
+    }
+    metrics.auth_refused(contents(core.stats), sel, rule);
+    refuse(tab, core, k, auth.status(rule), auth.tag(rule), now);
+    return true;
+}
+
 // Take one token for the request of client `k`, which route `sel` chose, from the bucket of its key. If there is none the client is refused (429, `limit.rate` or
 // `limit.rate-table`, with `Retry-After`), counted, and an upgrade it asked for is forgotten, so that it holds no tunnel place while it lingers. Answers true if it was refused.
 fn rate_limited[&t, &c, &v, &b](tab: &!t conns.Table, core: &!c shared.Core, k: int, sel: int, view: &v [byte], tb: &b [int], now: int) -> [conn_write, poll] bool {
     if route.rate(sel) == 0 {
         return false;
     }
-    let verdict = ratelimit.admit(contents(core.rl), route.rate_base(sel), route.rate_buckets(sel), ratelimit.key(view, tb, route.rate_key(sel)), route.rate(sel), route.rate_per_ms(sel), route.rate_burst(sel), now);
+    let st = contents(core.state);
+    let p = shared.stride() * k;
+    var verdict = 0;
+    if bytes.equal(route.rate_key(sel), "a") {
+        // `rate_key = "auth"` (docs/auth.md section 9): the bucket of the name of the key the request authenticated as.
+        verdict = ratelimit.admit(contents(core.rl), route.rate_base(sel), route.rate_buckets(sel), auth.key_name(st[p + shared.auth_slot()] - 1), route.rate(sel), route.rate_per_ms(sel), route.rate_burst(sel), now);
+    } else {
+        verdict = ratelimit.admit(contents(core.rl), route.rate_base(sel), route.rate_buckets(sel), ratelimit.key(view, tb, route.rate_key(sel)), route.rate(sel), route.rate_per_ms(sel), route.rate_burst(sel), now);
+    }
     if verdict == 0 {
         return false;
     }
-    let st = contents(core.state);
-    let p = shared.stride() * k;
     st[p + shared.ws_mode()] = 0;
     if verdict > 0 {
         st[p + shared.retry_after()] = verdict;
@@ -821,6 +863,10 @@ fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: 
     // The route is known: the access log names it and its upstream even if the request is refused from here on.
     st[p + 31] = sel + 1;
     st[p + 11] = route.upstream(sel);
+    // Authentication (docs/auth.md section 7.1): the first policy check on a routed request, before the WebSocket state, the body, the rate limit and the dial.
+    if unauthenticated(tab, core, k, sel, view, tb, now) {
+        return 0;
+    }
     if route.websocket(sel) == 1 && websocket.asks_upgrade(view, tb) {
         // A WebSocket upgrade (docs/websocket.md section 4): all of it is checked here, before anything else is decided about the request. It has no body (`ws.body`).
         let w = websocket.judge(view, tb, route.subprotocols(sel), route.origins(sel));
@@ -916,10 +962,15 @@ fn attach[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, slot: int
         failed = 1;
     } else {
         var m = 0;
+        // The header the route read the credential from is not forwarded, unless the route says so (docs/auth.md section 3).
+        var strip = "";
+        if st[p + 31] > 0 && route.auth(st[p + 31] - 1) == 1 && route.auth_forward(st[p + 31] - 1) == 0 {
+            strip = route.auth_header(st[p + 31] - 1);
+        }
         if st[p + shared.ws_mode()] == 1 {
-            m = forward.rewrite_upgrade(view, tb, pd[slot * shared.pend_size()..slot * shared.pend_size() + shared.pend_size()], st[p + 23] % 2 == 1, st[p + tlsio.f_mode()] != 0, shared.meta_get(core, k, 4, 0));
+            m = forward.rewrite_upgrade_auth(view, tb, pd[slot * shared.pend_size()..slot * shared.pend_size() + shared.pend_size()], st[p + 23] % 2 == 1, st[p + tlsio.f_mode()] != 0, shared.meta_get(core, k, 4, 0), strip);
         } else {
-            m = forward.rewrite(view, tb, pd[slot * shared.pend_size()..slot * shared.pend_size() + shared.pend_size()], shared.pool_max() > 0, st[p + 23] % 2 == 1, st[p + tlsio.f_mode()] != 0, shared.meta_get(core, k, 4, 0));
+            m = forward.rewrite_auth(view, tb, pd[slot * shared.pend_size()..slot * shared.pend_size() + shared.pend_size()], shared.pool_max() > 0, st[p + 23] % 2 == 1, st[p + tlsio.f_mode()] != 0, shared.meta_get(core, k, 4, 0), strip);
         }
         if m < 0 {
             failed = 0 - m + 1;

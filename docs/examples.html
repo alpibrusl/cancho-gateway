@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>cancho-gateway examples: routes, limits, TLS, metrics, download</title>
-<meta name="description" content="Eight runnable cancho-gateway examples: deployment file, commands and output, from internal APIs and strict doors to HTTPS at the edge. Download the demo.">
+<meta name="description" content="Ten runnable cancho-gateway examples: deployment file, commands and output, from internal APIs and strict doors to HTTPS at the edge. Download the demo.">
 <link rel="canonical" href="https://alpibrusl.github.io/cancho-gateway/examples.html">
 <meta name="robots" content="index, follow, max-image-preview:large">
 <meta name="theme-color" content="#265e8d">
@@ -13,14 +13,14 @@
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://alpibrusl.github.io/cancho-gateway/examples.html">
 <meta property="og:title" content="cancho-gateway: examples and download">
-<meta property="og:description" content="Eight runnable examples with their deployment files, commands and output, plus the demo binary. Alpha.">
+<meta property="og:description" content="Ten runnable examples with their deployment files, commands and output, plus the demo binary. Alpha.">
 <meta property="og:image" content="https://alpibrusl.github.io/cancho-gateway/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="cancho-gateway: an auditable HTTP/1.1 reverse proxy. Strict parsing. Every limit refused by name. A report CI checks.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="cancho-gateway: examples and download">
-<meta name="twitter:description" content="Eight runnable examples with their deployment files, commands and output, plus the demo binary. Alpha.">
+<meta name="twitter:description" content="Ten runnable examples with their deployment files, commands and output, plus the demo binary. Alpha.">
 <meta name="twitter:image" content="https://alpibrusl.github.io/cancho-gateway/og.png">
 <script type="application/ld+json">
 {
@@ -29,7 +29,7 @@
   {
    "@type": "WebPage",
    "name": "cancho-gateway examples: routes, limits, TLS, metrics, download",
-   "description": "Eight runnable cancho-gateway examples: deployment file, commands and output, from internal APIs and strict doors to HTTPS at the edge. Download the demo.",
+   "description": "Ten runnable cancho-gateway examples: deployment file, commands and output, from internal APIs and strict doors to HTTPS at the edge. Download the demo.",
    "url": "https://alpibrusl.github.io/cancho-gateway/examples.html",
    "isPartOf": {
     "@type": "WebSite",
@@ -191,7 +191,7 @@ pre.out { background: var(--surface); border: 1px dashed var(--line); border-rad
 <div style="padding-top:3.5rem">
   <a class="badge" href="index.html#status"><i></i>Alpha · only what is built is shown here</a>
   <h1>Where it earns its place.</h1>
-  <p class="lead">Eight situations. Each has the deployment file, the commands to run it in a terminal, and what you should see. Every command and every line of output below was run against the real gateway.</p>
+  <p class="lead">Ten situations. Each has the deployment file, the commands to run it in a terminal, and what you should see. Every command and every line of output below was run against the real gateway.</p>
 </div>
 
 <section id="download">
@@ -224,7 +224,7 @@ HTTP/1.1 400 Bad Request
 
 <section id="setup">
   <h2>Build from source, once</h2>
-  <p class="sub">Examples 1 to 9 build a gateway for each deployment file. That needs the pinned cancho compiler and Python 3. Nothing is installed system-wide, and <code>scripts/try.sh</code> builds in a temporary copy, so your checkout stays clean.</p>
+  <p class="sub">Examples 1 to 10 build a gateway for each deployment file. That needs the pinned cancho compiler and Python 3. Nothing is installed system-wide, and <code>scripts/try.sh</code> builds in a temporary copy, so your checkout stays clean.</p>
   <pre class="code" tabindex="0"><code>git clone https://github.com/alpibrusl/cancho &amp;&amp; git clone https://github.com/alpibrusl/cancho-gateway
 git -C cancho checkout "$(sed -n 's/^cancho *= *"\([0-9a-f]*\)".*/\1/p' cancho-gateway/cancho.toml)"
 (cd cancho &amp;&amp; cargo build --release -p cancho)
@@ -657,10 +657,154 @@ cancho_gateway_rate_table_full_total{route="health"} 0</code></pre>
   <p class="note"><strong>What this does not do.</strong> A client that changes the value of <code>X-Api-Key</code> on every request gets a fresh bucket each time: use a header key for a credential that something else checks, or <code>xff:last</code> behind a front that appends the address it saw (and only reachable through it). A request without the header, with it empty or with it twice shares one bucket with the others like it. When the table has no bucket to give a new key the answer is <code>429</code> with the rule <code>limit.rate-table</code>, never an allocation. An upgrade to WebSocket is one request, one token; a limited one takes no tunnel place. Nothing limits a single abusive client that sends no distinguishing header: the route key is a ceiling for the upstream, not fairness.</p>
 </section>
 
+<section id="auth">
+  <h2>10. API keys: who is asking</h2>
+  <p class="sub">A route can ask for a key. The gateway keeps <strong>only the SHA-256 digest of each key and a short name for it</strong>, compiled into the binary: stealing the binary or the deployment file gives nobody a key. A request is checked against every key, without stopping at the first mismatch, <em>before</em> the rate limit, the WebSocket checks and the upstream, so a flood of bad keys costs a hash each and spends nobody&rsquo;s budget. The credential is read from <code>Authorization: Bearer</code> or from one header you name, <strong>exactly one</strong> of it (a repeated, empty or oversized one is refused, never guessed), and <strong>removed before the upstream sees the request</strong>. Refusals are <code>401</code> with <code>WWW-Authenticate</code>, or <code>403</code> for a key that is valid but not allowed on the route. The name of the key is in the access log and can be the rate-limit key. What it protects and what it does not is <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/docs/auth.md"><code>docs/auth.md</code></a>.</p>
+  <p class="note" style="margin-bottom:0">Deployment: <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/deploy/examples/auth.toml"><code>deploy/examples/auth.toml</code></a></p>
+  <pre class="code" tabindex="0"><code># Example 10: API keys. Upstream: python3 scripts/demo_upstream.py 9000
+#
+# The binary holds the SHA-256 digest of each key and a name for it, never a key. The three keys below are DEMO keys, printed in docs/examples.html so that you can
+# follow the walk-through; make your own with `python3 scripts/mkkey.py &lt;name&gt;` (it prints the key once, on standard error, and the table to paste on standard output).
+listen = 8080
+admin_listen = 9090
+auth_allow_plain = true         # a key sent over plain HTTP crosses the network in clear. Here the plain port is only for this walk-through on localhost; in a deployment it
+                                # is for a port that a TLS-terminating front reaches, or leave `listen` out and serve `tls_listen` alone (docs/auth.md section 7.3)
+
+[[upstream]]
+name = "api"
+addr = "127.0.0.1:9000"
+
+[[api_key]]
+name = "alice"
+sha256 = "fb47ee213d02fb5bccbec1cf686ae136cc9a12f8594a995f090a7d7992cfe45f"
+
+[[api_key]]
+name = "bob"
+sha256 = "819d5f3306d79fc2df309bc677d9607b1fc7fdfc084472582f2fde56a1ada73c"
+
+[[api_key]]
+name = "reports"
+sha256 = "7534fef50c45322e057ca16dbbbb0535ac492d5a0d63a5a4fe84b1a05e56a738"
+
+[[route]]
+name = "api"
+path_prefix = "/api"
+upstream = "api"
+auth = "api-key"                # the credential is `Authorization: Bearer &lt;key&gt;`; the header is removed before the upstream sees the request
+auth_keys = ["alice", "bob"]    # the keys this route admits (default: every [[api_key]]); another valid key is answered 403
+rate_limit = "1/m"              # one token a minute is added to each identity's bucket (slow on purpose, so the example is readable)
+rate_burst = 3
+rate_key = "auth"               # one bucket per authenticated key: a caller cannot rotate its name, as it can an X-Api-Key value
+
+[[route]]
+name = "reports"
+path_prefix = "/reports"
+upstream = "api"
+auth = "api-key"
+auth_header = "X-Api-Key"       # read the whole value of this header instead (no scheme); a challenge then says which header to send
+auth_keys = ["reports", "alice"]
+
+[[route]]
+name = "health"
+path_prefix = "/health"
+upstream = "api"                # no auth: nothing here asks for a credential</code></pre>
+  <p class="step"><span>1</span>Make a key of your own. The key is printed once, on standard error; only its digest goes to standard output, so appending that to your deployment file cannot put the key in the file. The three keys of this example are demo keys, printed on this page.</p>
+  <pre class="code" tabindex="0"><code>python3 scripts/mkkey.py carol &gt;&gt; my-deployment.toml
+tail -3 my-deployment.toml</code></pre>
+  <pre class="out" tabindex="0"><code>key for carol (shown once; the gateway cannot show it again): ck_ndIC5zSPJPz77_TYUPKzdTaz5jamiGbzfVz_tJPn1ZI
+[[api_key]]
+name = "carol"
+sha256 = "017979d3acba891d55f301ccaaccaf10998b28c489c632ec3e86a5f8039efdc1"</code></pre>
+  <p class="step"><span>2</span>Terminal 1: <code>python3 scripts/demo_upstream.py 9000</code>. Terminal 2: <code>scripts/try.sh deploy/examples/auth.toml</code>. Terminal 3, with the demo keys: no key, a key that is not one, then alice&rsquo;s. The upstream&rsquo;s report shows what it was sent: <strong>no <code>Authorization</code> header</strong>.</p>
+  <pre class="code" tabindex="0"><code>export ALICE=ck_KpfhzCzB_f7inFJk6ZWOjctrI6bPuuaqzQ-v_JSi_eI BOB=ck_isPK05FXPkopEXV--KLuAGqupgp7gKCfQ4NkE5vHF1E REPORTS=ck_wRU18ri-UoSruX_loK4km3SfVFCMxCNEgYQEcfwwCvA
+curl -si localhost:8080/api
+curl -si localhost:8080/api -H 'Authorization: Bearer ck_not_a_key'
+curl -si localhost:8080/api/orders -H "Authorization: Bearer $ALICE"</code></pre>
+  <pre class="out" tabindex="0"><code>HTTP/1.1 401 Unauthorized
+Content-Type: application/problem+json
+Content-Length: 116
+WWW-Authenticate: Bearer realm="cancho-gateway"
+X-Request-Id: 1f8ea2-1f90-00000003
+Connection: close
+
+{"type":"about:blank","title":"Unauthorized","status":401,"rule":"auth.missing","request_id":"1f8ea2-1f90-00000003"}
+
+HTTP/1.1 401 Unauthorized
+Content-Type: application/problem+json
+Content-Length: 116
+WWW-Authenticate: Bearer realm="cancho-gateway", error="invalid_token"
+X-Request-Id: 1f8ea2-1f90-00000004
+Connection: close
+
+{"type":"about:blank","title":"Unauthorized","status":401,"rule":"auth.invalid","request_id":"1f8ea2-1f90-00000004"}
+
+HTTP/1.1 200 OK
+...
+upstream :9000 saw
+GET /api/orders
+Host: localhost:8080
+User-Agent: curl/8.5.0
+Accept: */*
+Via: 1.1 cancho-gateway
+X-Forwarded-Host: localhost:8080
+X-Forwarded-Proto: http
+X-Request-Id: 1f8ea2-1f90-00000005
+body bytes: 0</code></pre>
+  <p class="step"><span>3</span>A key that is valid but not allowed on the route is a <code>403</code> (no new credential would help, so no challenge). The <code>reports</code> route reads another header and says which; the key it checked is not in what the upstream got.</p>
+  <pre class="code" tabindex="0"><code>curl -si localhost:8080/api -H "Authorization: Bearer $REPORTS"
+curl -si localhost:8080/reports -H 'Authorization: Bearer x'
+curl -s localhost:8080/reports/q3 -H "X-Api-Key: $REPORTS" | grep -ci x-api-key</code></pre>
+  <pre class="out" tabindex="0"><code>HTTP/1.1 403 Forbidden
+Content-Type: application/problem+json
+Content-Length: 115
+X-Request-Id: 1f8ea2-1f90-00000006
+Connection: close
+
+{"type":"about:blank","title":"Forbidden","status":403,"rule":"auth.forbidden","request_id":"1f8ea2-1f90-00000006"}
+
+HTTP/1.1 401 Unauthorized
+Content-Type: application/problem+json
+Content-Length: 116
+WWW-Authenticate: ApiKey realm="cancho-gateway", header="x-api-key"
+X-Request-Id: 1f8ea2-1f90-00000007
+Connection: close
+
+{"type":"about:blank","title":"Unauthorized","status":401,"rule":"auth.missing","request_id":"1f8ea2-1f90-00000007"}
+0</code></pre>
+  <p class="step"><span>4</span>The rate limit is keyed on <em>who</em> asked (<code>rate_key = "auth"</code>), and a caller cannot change its name: alice has used her three, bob has his own, and a bad key is still a <code>401</code>, not a <code>429</code>.</p>
+  <pre class="code" tabindex="0"><code>curl -s -o /dev/null -w "bob  : %{http_code}\n" localhost:8080/api -H "Authorization: Bearer $BOB"
+for i in 1 2 3 4; do curl -s -o /dev/null -w "alice: %{http_code} retry-after: %header{retry-after}\n" localhost:8080/api -H "Authorization: Bearer $ALICE"; done
+curl -s -o /dev/null -w "bob  : %{http_code}\n" localhost:8080/api -H "Authorization: Bearer $BOB"
+curl -s -o /dev/null -w "bad  : %{http_code}\n" localhost:8080/api -H "Authorization: Bearer nope"</code></pre>
+  <pre class="out" tabindex="0"><code>bob  : 200
+alice: 200 retry-after:
+alice: 200 retry-after:
+alice: 429 retry-after: 53
+alice: 429 retry-after: 53
+bob  : 200
+bad  : 401</code></pre>
+  <p class="step"><span>5</span>Terminal 2 names the caller on every request that authenticated, last, and on nothing else; a refusal for a missing or wrong key has no name (nobody was identified). The key itself is nowhere. The metrics count the refusals by route and kind.</p>
+  <pre class="code" tabindex="0"><code>curl -s 'localhost:9090/metrics?format=prometheus' | grep -E '^cancho_gateway_auth_refused_total\{route="(api|reports)"'</code></pre>
+  <pre class="out" tabindex="0"><code>{"t":1791814554276,"id":"1f8ea2-1f90-00000003","method":"GET","path":"/api","route":"api","upstream":"api","status":401,"rule":"auth.missing","outcome":"refused","ms":0,"upstream_ms":0,"bytes_in":0,"bytes_out":310}
+{"t":1791814554293,"id":"1f8ea2-1f90-00000005","method":"GET","path":"/api/orders","route":"api","upstream":"api","status":200,"rule":"","outcome":"ok","ms":2,"upstream_ms":1,"bytes_in":0,"bytes_out":441,"identity":"alice"}
+{"t":1791814561962,"id":"1f8ea2-1f90-00000006","method":"GET","path":"/api","route":"api","upstream":"api","status":403,"rule":"auth.forbidden","outcome":"refused","ms":0,"upstream_ms":0,"bytes_in":0,"bytes_out":257,"identity":"reports"}
+{"t":1791814562140,"id":"1f8ea2-1f90-0000000c","method":"GET","path":"/api","route":"api","upstream":"api","status":429,"rule":"limit.rate","outcome":"refused","ms":0,"upstream_ms":0,"bytes_in":0,"bytes_out":286,"identity":"alice"}
+
+cancho_gateway_auth_refused_total{route="api",kind="missing"} 1
+cancho_gateway_auth_refused_total{route="api",kind="malformed"} 0
+cancho_gateway_auth_refused_total{route="api",kind="invalid"} 2
+cancho_gateway_auth_refused_total{route="api",kind="forbidden"} 1
+cancho_gateway_auth_refused_total{route="reports",kind="missing"} 1
+cancho_gateway_auth_refused_total{route="reports",kind="malformed"} 0
+cancho_gateway_auth_refused_total{route="reports",kind="invalid"} 0
+cancho_gateway_auth_refused_total{route="reports",kind="forbidden"} 0</code></pre>
+  <p class="note"><strong>What this does not do.</strong> A key travels as the client sends it: <strong>over a plain port it is readable by anyone on the path</strong>, so a deployment with a route that has <code>auth</code> and a plain <code>listen</code> is refused unless it says <code>auth_allow_plain = true</code> (a TLS-terminating front in front of that port), or serves <code>tls_listen</code> only. A captured key works until it is removed from the binary: there is no nonce, no signature and no expiry, and <strong>changing a key needs a restart</strong> (adding the new key first, then removing the old one, is a restart each). No JWT, no client certificates, no key in the query string. The gateway does not pass the caller&rsquo;s name to the upstream. With <code>auth_forward = true</code> the upstream gets the credential too, and then protects it. The comparison has no early exit over the digests; that is a property of the source, not something the compiler proves (<code>docs/auth.md</code> section 4.3).</p>
+</section>
+
 <aside class="status" id="not-yet">
   <h2>What these cases do not cover yet</h2>
   <ul>
-    <li><strong>Authentication</strong>: planned, not built. Do the check at your front for now. <strong>Rate limiting</strong> is built (example 9), without a client address: the key is the route, a header or an <code>X-Forwarded-For</code> element.</li>
+    <li><strong>Authentication</strong> is built for API keys only (example 10): no JWT, no client certificates, no change of a key without a restart, and a key is only as private as the transport. <strong>Rate limiting</strong> is built (example 9), without a client address: the key is the route, a header, an <code>X-Forwarded-For</code> element or the authenticated key.</li>
     <li><strong>TLS</strong>: a change of an identity&rsquo;s names, or of the set of identities, needs a restart (only the certificate and key are read again on <code>SIGHUP</code>); a stop on <code>SIGTERM</code> does not drain requests in flight, tunnels included. <strong>WebSocket</strong> (example 8) is a byte tunnel: the handshake is checked, the frames are not read, so there is no message limit, no ping policy and no close handshake of the gateway&rsquo;s own, and at most 127 tunnels fit.</li>
     <li><strong>The admin port</strong> (metrics, health) binds every interface and has no authentication: firewall it. No alerting, no tracing.</li>
     <li><strong>Client addresses</strong> in logs and headers: the compiler does not provide one yet.</li>

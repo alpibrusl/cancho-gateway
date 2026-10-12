@@ -1,0 +1,287 @@
+edition 5;
+
+module gateway.auth;
+
+import std.bytes;
+import std.crypto;
+import std.http;
+import gateway.routes_table;
+
+// API-key authentication (task #8, docs/auth.md). Pure: no effect, nothing allocated beyond a 32-byte digest and its 64-digit text.
+//
+// The binary holds the SHA-256 digest of each key and a short name for it (`generated/routes.cho`, `keys_blob()`: one `name<TAB>digest` line per key, 64
+// lowercase hexadecimal digits), never a key. A request's credential is read from one header (`parse`, `credential`), hashed, and compared with EVERY key's
+// digest (`lookup_in`), with no early exit: the answer is complete before anything is decided on it.
+
+// The rules. A refusal is `0 - rule` of these, `tag` and `status` are what the client is told.
+pub fn rule_count() -> [] int {
+    return 4;
+}
+
+pub fn tag(rule: int) -> [] &static [byte] {
+    if rule == 1 {
+        return "auth.missing";
+    }
+    if rule == 2 {
+        return "auth.malformed";
+    }
+    if rule == 3 {
+        return "auth.invalid";
+    }
+    if rule == 4 {
+        return "auth.forbidden";
+    }
+    return "";
+}
+
+pub fn status(rule: int) -> [] int {
+    if rule >= 1 && rule <= 3 {
+        return 401;
+    }
+    if rule == 4 {
+        return 403;
+    }
+    return 0;
+}
+
+// The most keys a deployment holds (the generator's bound), and the longest credential (docs/auth.md section 3).
+pub fn max_keys() -> [] int {
+    return 64;
+}
+
+pub fn max_credential() -> [] int {
+    return 256;
+}
+
+// The length of a digest as text.
+pub fn hex_len() -> [] int {
+    return 64;
+}
+
+// `a` equals the lowercase literal `lower`, ignoring ASCII case.
+fn is_lower[&a, &l](a: &a [byte], lower: &l [byte]) -> [] bool {
+    if len(a) != len(lower) {
+        return false;
+    }
+    var i = 0;
+    while i < len(a) {
+        if bytes.to_lower(int_of(a[i])) != int_of(lower[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// The `token68` alphabet of RFC 9110 11.2: what a credential may be made of.
+fn token68(c: int) -> [] bool {
+    return bytes.is_alpha(c) || bytes.is_digit(c) || c == '-' || c == '.' || c == '_' || c == '~' || c == '+' || c == '/' || c == '=';
+}
+
+fn count_named[&s, &t, &n](src: &s [byte], table: &t [int], name: &n [byte]) -> [] int {
+    var found = 0;
+    var i = 0;
+    while i < http.header_count(table) {
+        if is_lower(http.header_name(src, table, i), name) {
+            found = found + 1;
+        }
+        i = i + 1;
+    }
+    return found;
+}
+
+fn find_named[&s, &t, &n](src: &s [byte], table: &t [int], name: &n [byte]) -> [] int {
+    var i = 0;
+    while i < http.header_count(table) {
+        if is_lower(http.header_name(src, table, i), name) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+// What follows the scheme: for `Authorization`, the value must be `Bearer`, exactly one space and the credential (empty if it is not); for any other header, the whole value.
+fn credential_of[&v](value: &v [byte], bearer: bool) -> [] &v [byte] {
+    if !bearer {
+        return value;
+    }
+    if len(value) < 7 || !is_lower(value[0..6], "bearer") || int_of(value[6]) != ' ' {
+        return value[0..0];
+    }
+    return value[7..len(value)];
+}
+
+// Is `cred` a credential: 1 to `max_credential()` bytes, all of the `token68` alphabet?
+pub fn credential_ok[&c](cred: &c [byte]) -> [] bool {
+    if len(cred) < 1 || len(cred) > max_credential() {
+        return false;
+    }
+    var i = 0;
+    while i < len(cred) {
+        if !token68(int_of(cred[i])) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// The credential of a request, read from the header `name` (lowercase; `authorization` is read as a Bearer token), or an empty slice if there is none; it may not be a valid
+// one: `parse` says.
+pub fn credential[&s, &t, &n](src: &s [byte], table: &t [int], name: &n [byte]) -> [] &s [byte] {
+    let at = find_named(src, table, name);
+    if at < 0 {
+        return src[0..0];
+    }
+    // The parser has taken the blanks off both ends of the value (`tests/auth_test.cho` pins it), so the value is the field.
+    return credential_of(http.header_value(src, table, at), is_lower(name, "authorization"));
+}
+
+// 0 if the request carries exactly one header `name` holding a credential that is well formed, else the rule that refuses it: 1 `auth.missing` (no such header),
+// 2 `auth.malformed` (the header twice, empty, another scheme, a credential that is empty, too long or outside the alphabet).
+pub fn parse[&s, &t, &n](src: &s [byte], table: &t [int], name: &n [byte]) -> [] int {
+    let found = count_named(src, table, name);
+    if found == 0 {
+        return 1;
+    }
+    if found > 1 {
+        return 2;
+    }
+    if !credential_ok(credential(src, table, name)) {
+        return 2;
+    }
+    return 0;
+}
+
+fn hex_digit(v: int) -> [] int {
+    if v < 10 {
+        return '0' + v;
+    }
+    return 'a' + v - 10;
+}
+
+// The SHA-256 of `cred` as 64 lowercase hexadecimal digits, into `out[0..64]`.
+pub fn hex_digest[&c, &o](cred: &c [byte], out: &!o [byte]) -> [] int {
+    region a {
+        let digest = alloc_slice[a](32, byte_of(0));
+        crypto.sha256(cred, digest);
+        var i = 0;
+        while i < 32 {
+            out[2 * i] = byte_of(hex_digit(int_of(digest[i]) / 16));
+            out[2 * i + 1] = byte_of(hex_digit(int_of(digest[i]) % 16));
+            i = i + 1;
+        }
+    }
+    return hex_len();
+}
+
+fn line_end[&b](blob: &b [byte], start: int) -> [] int {
+    var end = start;
+    while end < len(blob) && int_of(blob[end]) != '\n' {
+        end = end + 1;
+    }
+    return end;
+}
+
+// The number of keys in a table of `name<TAB>digest` lines.
+pub fn count_in[&b](blob: &b [byte]) -> [] int {
+    var n = 0;
+    var at = 0;
+    while at < len(blob) {
+        n = n + 1;
+        at = line_end(blob, at) + 1;
+    }
+    return n;
+}
+
+// 1 if the 64 digits of `hex` are the 64 digits at `from` in `blob`, else 0: an OR of XORs over all of them, with no early exit and no branch on a digit. A digest
+// that runs past the table's end does not match.
+fn same_digest[&h, &b](hex: &h [byte], blob: &b [byte], from: int) -> [] int {
+    if from < 0 || from + hex_len() > len(blob) {
+        return 0;
+    }
+    var diff = 0;
+    var i = 0;
+    while i < hex_len() {
+        diff = diff | int_of(hex[i]) ^ int_of(blob[from + i]);
+        i = i + 1;
+    }
+    // `diff` is in 0..255: (255 - diff) / 255 is 1 for 0 and 0 for the rest.
+    return (255 - diff) / 255;
+}
+
+// The key whose digest is the SHA-256 of `cred` in a table: 0 for none, else its index plus 1. EVERY key is compared, whatever the earlier ones did; two keys cannot share a digest
+// (the generator refuses it), so at most one term of the sum is not zero.
+pub fn lookup_in[&c, &b](cred: &c [byte], blob: &b [byte]) -> [] int {
+    var found = 0;
+    region a {
+        let hex = alloc_slice[a](64, byte_of(0));
+        hex_digest(cred, hex);
+        var index = 0;
+        var at = 0;
+        while at < len(blob) {
+            let end = line_end(blob, at);
+            // The digest follows the tab that ends the name.
+            var tab = at;
+            while tab < end && int_of(blob[tab]) != 9 {
+                tab = tab + 1;
+            }
+            found = found + (index + 1) * same_digest(hex, blob, tab + 1);
+            index = index + 1;
+            at = end + 1;
+        }
+    }
+    return found;
+}
+
+// The name of key `index` (0-based) in a table; empty past the end.
+pub fn name_in[&b](blob: &b [byte], index: int) -> [] &b [byte] {
+    var n = 0;
+    var at = 0;
+    while at < len(blob) {
+        let end = line_end(blob, at);
+        if n == index {
+            return bytes.field(blob[at..end], 9, 1);
+        }
+        n = n + 1;
+        at = end + 1;
+    }
+    return blob[0..0];
+}
+
+// Does the route's key list `keys` (`*` for all, else comma-separated indices) allow key `index`?
+pub fn allowed[&k](keys: &k [byte], index: int) -> [] bool {
+    if len(keys) == 1 && int_of(keys[0]) == '*' {
+        return true;
+    }
+    var v = 0;
+    var any = false;
+    var i = 0;
+    while i <= len(keys) {
+        if i == len(keys) || int_of(keys[i]) == ',' {
+            if any && v == index {
+                return true;
+            }
+            v = 0;
+            any = false;
+        } else if bytes.is_digit(int_of(keys[i])) && v < 1000 {
+            v = v * 10 + int_of(keys[i]) - '0';
+            any = true;
+        } else {
+            v = 1000;
+            any = false;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+// The deployment's table.
+pub fn lookup[&c](cred: &c [byte]) -> [] int {
+    return lookup_in(cred, routes_table.keys_blob());
+}
+
+pub fn key_name(index: int) -> [] &static [byte] {
+    return name_in(routes_table.keys_blob(), index);
+}

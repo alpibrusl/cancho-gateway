@@ -307,6 +307,38 @@ pub fn rate_base(index: int) -> [] int {
     return number(bytes.field(blob[at..line_end(blob, at)], 9, 16));
 }
 
+// Authentication of route `index` (docs/auth.md section 6): 1 if it authenticates, the lowercase header it reads (`authorization`: a Bearer token; any other: the whole value), 1 if the
+// credential is forwarded to the upstream, the key indices it allows (`*` for all, else comma-separated) and its `WWW-Authenticate` challenge (empty if it does not authenticate).
+pub fn auth(index: int) -> [] int {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return number(bytes.field(blob[at..line_end(blob, at)], 9, 17));
+}
+
+pub fn auth_header(index: int) -> [] &static [byte] {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return bytes.field(blob[at..line_end(blob, at)], 9, 18);
+}
+
+pub fn auth_forward(index: int) -> [] int {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return number(bytes.field(blob[at..line_end(blob, at)], 9, 19));
+}
+
+pub fn auth_keys(index: int) -> [] &static [byte] {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return bytes.field(blob[at..line_end(blob, at)], 9, 20);
+}
+
+pub fn auth_challenge(index: int) -> [] &static [byte] {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return bytes.field(blob[at..line_end(blob, at)], 9, 21);
+}
+
 pub fn select[&h, &m, &p](host: &h [byte], method: &m [byte], path: &p [byte]) -> [] int {
     let name = host_name(host);
     if len(name) == 0 {

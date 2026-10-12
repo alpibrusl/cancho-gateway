@@ -85,3 +85,35 @@ fn test_a_429_names_when_to_come_back_and_no_other_response_does() -> [] int {
     }
     return 0;
 }
+
+fn test_a_401_carries_the_routes_challenge_and_no_other_response_does() -> [] int {
+    region a {
+        let buf = alloc_slice[a](600, byte_of(0));
+        let ch = "Bearer realm=\"cancho-gateway\"";
+        let n = problem.response_challenge(buf, 401, "auth.missing", "1a-1f90-0000002a", 0, ch);
+        let want = "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/problem+json\r\nContent-Length: 112\r\nWWW-Authenticate: Bearer realm=\"cancho-gateway\"\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: close\r\n\r\n{\"type\":\"about:blank\",\"title\":\"Unauthorized\",\"status\":401,\"rule\":\"auth.missing\",\"request_id\":\"1a-1f90-0000002a\"}";
+        test.assert_eq(n, len(want));
+        test.assert(bytes.equal(buf[0..n], want));
+        // The kind of failure is an auth-param of the challenge (RFC 6750 3.1), except for a missing credential.
+        let m = problem.response_challenge(buf, 401, "auth.malformed", "i", 0, ch);
+        test.assert(bytes.find(buf[0..m], "WWW-Authenticate: Bearer realm=\"cancho-gateway\", error=\"invalid_request\"\r\nX-Request-Id: i\r\n") > 0);
+        let k = problem.response_challenge(buf, 401, "auth.invalid", "i", 0, ch);
+        test.assert(bytes.find(buf[0..k], "WWW-Authenticate: Bearer realm=\"cancho-gateway\", error=\"invalid_token\"\r\nX-Request-Id: i\r\n") > 0);
+        // A route that reads another header says which.
+        let h = problem.response_challenge(buf, 401, "auth.invalid", "i", 0, "ApiKey realm=\"cancho-gateway\", header=\"x-api-key\"");
+        test.assert(bytes.find(buf[0..h], "WWW-Authenticate: ApiKey realm=\"cancho-gateway\", header=\"x-api-key\", error=\"invalid_token\"\r\n") > 0);
+        // A 403 is not a challenge, and neither is anything else, whatever is passed; no challenge means the bytes of `response`.
+        let f = problem.response_challenge(buf, 403, "auth.forbidden", "i", 0, ch);
+        test.assert(bytes.find(buf[0..f], "WWW-Authenticate") < 0);
+        test.assert(bytes.find(buf[0..f], "403 Forbidden") > 0);
+        let r = problem.response_challenge(buf, 429, "limit.rate", "i", 7, ch);
+        test.assert(bytes.find(buf[0..r], "WWW-Authenticate") < 0);
+        let plain = problem.response(buf, 401, "auth.missing", "i");
+        test.assert(bytes.find(buf[0..plain], "WWW-Authenticate") < 0);
+        test.assert_eq(problem.response_challenge(buf, 401, "auth.missing", "i", 0, ""), plain);
+        // A buffer one byte short is refused, not overrun.
+        let tight = alloc_slice[a](n - 1, byte_of(0));
+        test.assert_eq(problem.response_challenge(tight, 401, "auth.missing", "1a-1f90-0000002a", 0, ch), 0 - 1);
+    }
+    return 0;
+}

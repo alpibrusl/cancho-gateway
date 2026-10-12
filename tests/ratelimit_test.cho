@@ -416,3 +416,20 @@ fn test_a_spec_the_generator_never_writes_is_the_absent_key() -> [] int {
     test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key: a\r\n\r\n", "h:", ""));
     return 0;
 }
+
+// The generator keeps its own copy of the two hashes to decide whether the identities of a route fit its table (scripts/generate.py `rate_hashes`, docs/auth.md section 9): these values
+// were computed there, so the two copies cannot drift apart unseen.
+fn test_the_generators_copy_of_the_hash_chooses_the_same_sets() -> [] int {
+    test.assert_eq(ratelimit.hash1("k0"), 5213317);
+    test.assert_eq(ratelimit.hash2("k0"), 1815205);
+    test.assert_eq(ratelimit.set_of("k0", 256), 42);
+    test.assert_eq(ratelimit.set_of("alice", 256), 78);
+    test.assert_eq(ratelimit.set_of("ck_x", 256), 67);
+    test.assert_eq(ratelimit.set_of("alice", 7), 3);
+    test.assert_eq(ratelimit.set_of("k0", 7), 4);
+    test.assert_eq(ratelimit.set_of("a", 7), 0);
+    test.assert_eq(ratelimit.set_of("", 256), 0);
+    test.assert_eq(ratelimit.hash1("alice"), 2020839199);
+    test.assert_eq(ratelimit.hash2("alice"), 1665511214);
+    return 0;
+}
