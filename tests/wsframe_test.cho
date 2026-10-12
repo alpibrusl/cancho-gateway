@@ -642,6 +642,14 @@ fn test_invalid_utf8_is_refused_in_every_class() -> [] int {
         bad_utf8(ws, work, buf, p, 2);
         p[0] = byte_of(255);
         bad_utf8(ws, work, buf, p, 1);
+        // the lead bytes F5 and FF with all the continuation bytes they would need
+        p[0] = byte_of(245);
+        p[1] = byte_of(128);
+        p[2] = byte_of(128);
+        p[3] = byte_of(128);
+        bad_utf8(ws, work, buf, p, 4);
+        p[0] = byte_of(255);
+        bad_utf8(ws, work, buf, p, 4);
         // a stray continuation byte
         p[0] = byte_of(128);
         bad_utf8(ws, work, buf, p, 1);
@@ -1130,6 +1138,38 @@ fn test_a_direction_that_has_carried_a_close_carries_no_second_one() -> [] int {
         test.assert_eq(ws[36 + 19], 1);
         test.assert_eq(ws[16 + 19], 0);
         test.assert_eq(ws[36 + 18], 1);
+    }
+    return 0;
+}
+
+fn test_a_close_frame_reports_its_code_whole_and_split() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let work = alloc_slice[a](128, byte_of(0));
+        let buf = alloc_slice[a](128, byte_of(0));
+        let pl = alloc_slice[a](5, byte_of(98));
+        pl[0] = byte_of(3);
+        pl[1] = byte_of(232);
+        var n = frame(buf, 0, 1, 8, true, 77, pl[0..5]);
+        var dir = 0;
+        fresh(ws);
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..n], 1048576, false, false), n);
+        test.assert_eq(ws[16 + 14], 2);
+        test.assert_eq(ws[16 + 15], 1000);
+        // the same cut after every byte
+        var cut = 0;
+        while cut <= n {
+            fresh(ws);
+            let (f, r, h, e) = drive(ws, work, buf[0..n], 0, cut, cut, 1048576);
+            test.assert_eq(f, n);
+            test.assert_eq(ws[16 + 11], 1000);
+            cut = cut + 1;
+        }
+        dir = 1;
+        n = frame(buf, 0, 1, 8, false, 0, "");
+        fresh(ws);
+        test.assert_eq(wsframe.scan(ws, dir, buf[0..n], 1048576, false, false), n);
+        test.assert_eq(ws[36 + 15], 1005);
     }
     return 0;
 }
