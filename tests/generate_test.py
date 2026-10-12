@@ -156,6 +156,49 @@ REFUSALS = [
     ("config.websocket", 2, WS + 'ws_max_tunnels = 128\n' + WSR),
     ("config.websocket", 2, WS + 'ws_max_tunnels = -1\n' + WSR),
     ("config.websocket", 2, WS + 'ws_max_tunnels = "64"\n' + WSR),
+    # --- rate limiting (docs/ratelimit.md section 4): one refusal per rule, plus the variants of each
+    ("config.ratelimit", 8, UP + R + 'path_prefix = "/"\nrate_limit = 100\n'),
+    ("config.ratelimit", 8, UP + R + 'path_prefix = "/"\nrate_limit = "100"\n'),
+    ("config.ratelimit", 8, UP + R + 'path_prefix = "/"\nrate_limit = "100/d"\n'),
+    ("config.ratelimit", 8, UP + R + 'path_prefix = "/"\nrate_limit = "0/s"\n'),
+    ("config.ratelimit", 8, UP + R + 'path_prefix = "/"\nrate_limit = "007/s"\n'),
+    ("config.ratelimit", 8, UP + R + 'path_prefix = "/"\nrate_limit = "1000001/s"\n'),
+    ("config.ratelimit", 8, UP + R + 'path_prefix = "/"\nrate_limit = " 5/s"\n'),
+    ("config.ratelimit", 8, UP + R + 'path_prefix = "/"\nrate_limit = "-5/s"\n'),
+    ("config.ratelimit", 8, UP + R + 'path_prefix = "/"\nrate_burst = 5\n'),
+    ("config.ratelimit", 8, UP + R + 'path_prefix = "/"\nrate_key = "route"\n'),
+    ("config.ratelimit", 8, UP + R + 'path_prefix = "/"\nrate_buckets = 64\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_burst = 0\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_burst = 1000001\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_burst = "5"\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_burst = true\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "ip"\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "peer"\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:"\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:X Key"\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:%s"\n' % ("x" * 65)),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = 5\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "xff:middle"\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:Host"\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:content-length"\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:Transfer-Encoding"\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:Connection"\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:Upgrade"\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:Proxy-Authorization"\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "xff:last"\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "xff:first"\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:X-Forwarded-For"\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:x-real-ip"\n'),
+    ("config.ratelimit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:Forwarded"\n'),
+    ("config.ratelimit", 10, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "route"\nrate_buckets = 4\n'),
+    ("config.ratelimit", 10, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:X-Key"\nrate_buckets = 3\n'),
+    ("config.ratelimit", 10, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:X-Key"\nrate_buckets = 0\n'),
+    ("config.ratelimit", 10, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:X-Key"\nrate_buckets = 65540\n'),
+    ("config.ratelimit", 10, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:X-Key"\nrate_buckets = "64"\n'),
+    ("config.ratelimit", 10, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:X-Key"\nrate_buckets = 6\n'),
+    # the routes' tables add up to more than 65,536 buckets (the second route is the one named)
+    ("config.ratelimit", 14, UP + R + 'path_prefix = "/a"\nrate_limit = "5/s"\nrate_key = "header:X-Key"\nrate_buckets = 65536\n' + R + 'path_prefix = "/b"\nrate_limit = "5/s"\n'),
+    ("config.ratelimit", 16, UP + R + 'path_prefix = "/a"\nrate_limit = "5/s"\nrate_key = "header:X-Key"\nrate_buckets = 65532\n' + R + 'path_prefix = "/b"\nrate_limit = "5/s"\nrate_key = "header:X-Key"\nrate_buckets = 8\n'),
     ("config.routes", None, UP + "".join('[[route]]\nupstream = "a"\npath_prefix = "/r%d"\n' % i for i in range(257))),
 ]
 
@@ -171,6 +214,17 @@ ACCEPTED = [
     UP + R + 'path_prefix = "/ocpp"\nwebsocket = true\nmethods = ["GET", "POST"]\nsubprotocols = ["ocpp1.6", "ocpp2.0.1"]\norigins = []\n',
     UP + R + 'path_prefix = "/ws"\nwebsocket = true\nsubprotocols = [%s]\norigins = [%s]\n' % (", ".join('"p%d"' % i for i in range(8)), ", ".join('"http://h%d.example:3000"' % i for i in range(16))),
     UP + R + 'path_prefix = "/ws"\nwebsocket = false\n',
+    # rate limiting: the shortest form, every unit, every bound, every key
+    UP + R + 'path_prefix = "/"\nrate_limit = "1/s"\n',
+    UP + R + 'path_prefix = "/"\nrate_limit = "10/m"\nrate_burst = 2\n',
+    UP + R + 'path_prefix = "/"\nrate_limit = "1000000/h"\nrate_burst = 1000000\nrate_key = "route"\n',
+    UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:X-Api-Key"\n',
+    UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:Authorization"\nrate_buckets = 4\n',
+    UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:X-Api-Key"\nrate_buckets = 65536\n',
+    UP + R + 'path_prefix = "/"\ntrust_forwarded = true\nrate_limit = "5/s"\nrate_key = "xff:last"\n',
+    UP + R + 'path_prefix = "/"\ntrust_forwarded = true\nrate_limit = "5/s"\nrate_key = "xff:first"\nrate_buckets = 2048\n',
+    UP + R + 'path_prefix = "/"\ntrust_forwarded = true\nrate_limit = "5/s"\nrate_key = "header:X-Real-IP"\n',
+    UP + R + 'path_prefix = "/a"\nrate_limit = "5/s"\nrate_key = "header:X-Key"\nrate_buckets = 65532\n' + R + 'path_prefix = "/b"\nrate_limit = "5/s"\nrate_key = "route"\n',
     # TLS: the directory alone, then identities and every bound
     'listen = 80\ntls_listen = 443\ntls_dir = "/etc/cancho/tls"\n[[upstream]]\nname = "a"\naddr = "10.0.0.1:1"\n[[route]]\nupstream = "a"\npath_prefix = "/"\n',
     # TLS only: no plain listener at all, with and without the admin one
@@ -232,6 +286,23 @@ def main():
         failures += 1
     if not explained.startswith("listen none (TLS only);"):
         print("FAIL --explain must say a TLS-only deployment has no plain listener: %r" % explained[:60])
+        failures += 1
+    # What a rate limit compiles (docs/ratelimit.md section 4): the record's six fields, the lowercased header name, the bases of the tables, the total.
+    limited = (UP + R + 'path_prefix = "/a"\nrate_limit = "10/m"\nrate_burst = 3\nrate_key = "header:X-API-Key"\nrate_buckets = 64\n' + R + 'path_prefix = "/b"\n' + R +
+               'path_prefix = "/c"\ntrust_forwarded = true\nrate_limit = "7/s"\nrate_key = "xff:last"\n' + R + 'path_prefix = "/d"\nrate_limit = "2/h"\n')
+    with tempfile.TemporaryDirectory() as tmp:
+        f = pathlib.Path(tmp) / "d.toml"
+        f.write_text(limited)
+        subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(f), "--out", tmp], check=True)
+        table = (pathlib.Path(tmp) / "routes.cho").read_text()
+        explained = run(limited).stdout
+    for want in ("\\t10\\t60000\\t3\\th:x-api-key\\t64\\t0\\n", "\\t0\\t0\\t0\\t\\t0\\t64\\n", "\\t7\\t1000\\t7\\tx:l\\t1024\\t64\\n", "\\t2\\t3600000\\t2\\tr\\t1\\t1088\\n",
+                 "pub fn rate_buckets_total() -> [] int {\n    return 1089;"):
+        if want not in table:
+            print("FAIL the routes table must contain %r" % want)
+            failures += 1
+    if "limit 10 per 60000 ms, burst 3, key h:x-api-key, 64 bucket(s)" not in explained:
+        print("FAIL --explain must say what a route's limit is: %r" % explained[-300:])
         failures += 1
     print("%d prefix cases, %d refusal cases, %d accepted, %d failures" % (len(PREFIX), len(REFUSALS), len(ACCEPTED), failures))
     return 1 if failures else 0
