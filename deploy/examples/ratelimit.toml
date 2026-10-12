@@ -1,0 +1,22 @@
+# Example 9: a limit on what one API key may ask. Upstream: python3 scripts/demo_upstream.py 9000
+listen = 8080
+admin_listen = 9090
+
+[[upstream]]
+name = "api"
+addr = "127.0.0.1:9000"
+
+[[route]]
+name = "api"
+path_prefix = "/api"
+upstream = "api"
+rate_limit = "1/m"              # one token a minute is added to each key's bucket (so the example is slow enough to read; "100/s" is the same syntax)
+rate_burst = 3                  # a key may use three at once after an idle time
+rate_key = "header:X-Api-Key"   # one bucket per value of this header. A header the client chooses can be rotated: use it for a key something else checks
+rate_buckets = 1024             # the table: 1024 keys at once (a multiple of 4; at most 65536 buckets in all, 24 bytes each)
+
+[[route]]
+name = "health"
+path_prefix = "/health"
+upstream = "api"
+rate_limit = "10/s"             # no rate_key: one bucket for the whole route, a ceiling that protects the upstream whoever asks

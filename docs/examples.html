@@ -224,7 +224,7 @@ HTTP/1.1 400 Bad Request
 
 <section id="setup">
   <h2>Build from source, once</h2>
-  <p class="sub">Examples 1 to 8 build a gateway for each deployment file. That needs the pinned cancho compiler and Python 3. Nothing is installed system-wide, and <code>scripts/try.sh</code> builds in a temporary copy, so your checkout stays clean.</p>
+  <p class="sub">Examples 1 to 9 build a gateway for each deployment file. That needs the pinned cancho compiler and Python 3. Nothing is installed system-wide, and <code>scripts/try.sh</code> builds in a temporary copy, so your checkout stays clean.</p>
   <pre class="code" tabindex="0"><code>git clone https://github.com/alpibrusl/cancho &amp;&amp; git clone https://github.com/alpibrusl/cancho-gateway
 git -C cancho checkout "$(sed -n 's/^cancho *= *"\([0-9a-f]*\)".*/\1/p' cancho-gateway/cancho.toml)"
 (cd cancho &amp;&amp; cargo build --release -p cancho)
@@ -600,10 +600,67 @@ HTTP/1.1 403 Forbidden
   <p class="note">A tunnel that nobody closes ends at <code>ws_idle_timeout_ms</code> or <code>ws_max_lifetime_ms</code> (<code>"rule":"ws.idle-timeout"</code> or <code>"ws.lifetime"</code> in its line, <code>"outcome":"aborted"</code>), and the gateway sends no WebSocket Close frame when it does: it does not parse frames, so it cannot know where one ends. Open tunnels are counted in the metrics (<code>ws_tunnels_active</code>). Add <code>tls_listen</code> (example 7) and the same route serves <code>wss</code>. At most 127 tunnels fit in the gateway&rsquo;s slot table: ten thousand chargers need a different budget (<code>docs/websocket.md</code> section 9).</p>
 </section>
 
+<section id="ratelimit">
+  <h2>9. A limit on what one key may ask</h2>
+  <p class="sub">A route can limit how fast it is asked: a token bucket, refilled from the clock, in a table of fixed size. Past the limit the request is answered <code>429</code> with <code>Retry-After</code> and <strong>never reaches the upstream</strong>. The gateway does not know the client&rsquo;s address (the compiler gives none), so the bucket belongs to the whole route, to the value of a header you name (an API key), or to an element of <code>X-Forwarded-For</code> on a route that believes its front. What each of these protects, and how an attacker gets around it, is <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/docs/ratelimit.md"><code>docs/ratelimit.md</code></a>.</p>
+  <p class="note" style="margin-bottom:0">Deployment: <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/deploy/examples/ratelimit.toml"><code>deploy/examples/ratelimit.toml</code></a></p>
+  <pre class="code" tabindex="0"><code># Example 9: a limit on what one API key may ask. Upstream: python3 scripts/demo_upstream.py 9000
+listen = 8080
+admin_listen = 9090
+
+[[upstream]]
+name = "api"
+addr = "127.0.0.1:9000"
+
+[[route]]
+name = "api"
+path_prefix = "/api"
+upstream = "api"
+rate_limit = "1/m"              # one token a minute is added to each key's bucket (so the example is slow enough to read; "100/s" is the same syntax)
+rate_burst = 3                  # a key may use three at once after an idle time
+rate_key = "header:X-Api-Key"   # one bucket per value of this header. A header the client chooses can be rotated: use it for a key something else checks
+rate_buckets = 1024             # the table: 1024 keys at once (a multiple of 4; at most 65536 buckets in all, 24 bytes each)
+
+[[route]]
+name = "health"
+path_prefix = "/health"
+upstream = "api"
+rate_limit = "10/s"             # no rate_key: one bucket for the whole route, a ceiling that protects the upstream whoever asks</code></pre>
+  <p class="step"><span>1</span>Terminal 1: <code>python3 scripts/demo_upstream.py 9000</code>. Terminal 2: <code>scripts/try.sh deploy/examples/ratelimit.toml</code>. Terminal 3, five requests with one key, then another key:</p>
+  <pre class="code" tabindex="0"><code>for i in 1 2 3 4 5; do curl -s -o /dev/null -w "%{http_code} retry-after: %header{retry-after}\n" localhost:8080/api -H 'X-Api-Key: alice'; done
+curl -s -o /dev/null -w "bob: %{http_code}\n" localhost:8080/api -H 'X-Api-Key: bob'</code></pre>
+  <pre class="out" tabindex="0"><code>200 retry-after:
+200 retry-after:
+200 retry-after:
+429 retry-after: 60
+429 retry-after: 60
+bob: 200</code></pre>
+  <p class="step"><span>2</span>The refusal, in full. <code>Retry-After</code> is whole seconds, rounded up: the wait is the time until the bucket holds one token again.</p>
+  <pre class="code" tabindex="0"><code>curl -si localhost:8080/api -H 'X-Api-Key: alice'</code></pre>
+  <pre class="out" tabindex="0"><code>HTTP/1.1 429 Too Many Requests
+Content-Type: application/problem+json
+Content-Length: 119
+Retry-After: 60
+X-Request-Id: 1990c9-1f90-00000007
+Connection: close
+
+{"type":"about:blank","title":"Too Many Requests","status":429,"rule":"limit.rate","request_id":"1990c9-1f90-00000007"}</code></pre>
+  <p class="step"><span>3</span>Terminal 2 shows the refusals as data, with nothing sent upstream (<code>upstream_ms</code> and <code>bytes_in</code> are 0), and the metrics count them per route:</p>
+  <pre class="code" tabindex="0"><code>curl -s 'localhost:9090/metrics?format=prometheus' | grep -E '^cancho_gateway_rate_(limited|table_full)'</code></pre>
+  <pre class="out" tabindex="0"><code>{"t":1791808769854,"id":"1990c9-1f90-00000004","method":"GET","path":"/api","route":"api","upstream":"api","status":429,"rule":"limit.rate","outcome":"refused","ms":0,"upstream_ms":0,"bytes_in":0,"bytes_out":286}
+{"t":1791808769930,"id":"1990c9-1f90-00000007","method":"GET","path":"/api","route":"api","upstream":"api","status":429,"rule":"limit.rate","outcome":"refused","ms":0,"upstream_ms":0,"bytes_in":0,"bytes_out":286}
+
+cancho_gateway_rate_limited_total{route="api"} 3
+cancho_gateway_rate_limited_total{route="health"} 0
+cancho_gateway_rate_table_full_total{route="api"} 0
+cancho_gateway_rate_table_full_total{route="health"} 0</code></pre>
+  <p class="note"><strong>What this does not do.</strong> A client that changes the value of <code>X-Api-Key</code> on every request gets a fresh bucket each time: use a header key for a credential that something else checks, or <code>xff:last</code> behind a front that appends the address it saw (and only reachable through it). A request without the header, with it empty or with it twice shares one bucket with the others like it. When the table has no bucket to give a new key the answer is <code>429</code> with the rule <code>limit.rate-table</code>, never an allocation. An upgrade to WebSocket is one request, one token; a limited one takes no tunnel place. Nothing limits a single abusive client that sends no distinguishing header: the route key is a ceiling for the upstream, not fairness.</p>
+</section>
+
 <aside class="status" id="not-yet">
   <h2>What these cases do not cover yet</h2>
   <ul>
-    <li><strong>Authentication</strong> and <strong>rate limiting</strong>: planned, not built. Do the check at your front for now.</li>
+    <li><strong>Authentication</strong>: planned, not built. Do the check at your front for now. <strong>Rate limiting</strong> is built (example 9), without a client address: the key is the route, a header or an <code>X-Forwarded-For</code> element.</li>
     <li><strong>TLS</strong>: a change of an identity&rsquo;s names, or of the set of identities, needs a restart (only the certificate and key are read again on <code>SIGHUP</code>); a stop on <code>SIGTERM</code> does not drain requests in flight, tunnels included. <strong>WebSocket</strong> (example 8) is a byte tunnel: the handshake is checked, the frames are not read, so there is no message limit, no ping policy and no close handshake of the gateway&rsquo;s own, and at most 127 tunnels fit.</li>
     <li><strong>The admin port</strong> (metrics, health) binds every interface and has no authentication: firewall it. No alerting, no tracing.</li>
     <li><strong>Client addresses</strong> in logs and headers: the compiler does not provide one yet.</li>

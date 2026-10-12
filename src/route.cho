@@ -268,6 +268,45 @@ pub fn origins(index: int) -> [] &static [byte] {
     return bytes.field(blob[at..line_end(blob, at)], 9, 10);
 }
 
+// The rate limit of route `index` (docs/ratelimit.md section 4): tokens added per period (0: the route is not limited), the period in milliseconds, the bucket's
+// size in tokens, the key (`r` the route, `x:l` and `x:f` the last and first element of `X-Forwarded-For`, `h:<lowercase name>` a header; empty if not limited), the
+// buckets of its table and where they begin in the one table of `Core`. The generator has bounded all of them.
+pub fn rate(index: int) -> [] int {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return number(bytes.field(blob[at..line_end(blob, at)], 9, 11));
+}
+
+pub fn rate_per_ms(index: int) -> [] int {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return number(bytes.field(blob[at..line_end(blob, at)], 9, 12));
+}
+
+pub fn rate_burst(index: int) -> [] int {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return number(bytes.field(blob[at..line_end(blob, at)], 9, 13));
+}
+
+pub fn rate_key(index: int) -> [] &static [byte] {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return bytes.field(blob[at..line_end(blob, at)], 9, 14);
+}
+
+pub fn rate_buckets(index: int) -> [] int {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return number(bytes.field(blob[at..line_end(blob, at)], 9, 15));
+}
+
+pub fn rate_base(index: int) -> [] int {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return number(bytes.field(blob[at..line_end(blob, at)], 9, 16));
+}
+
 pub fn select[&h, &m, &p](host: &h [byte], method: &m [byte], path: &p [byte]) -> [] int {
     let name = host_name(host);
     if len(name) == 0 {

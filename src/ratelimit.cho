@@ -1,0 +1,289 @@
+edition 5;
+
+module gateway.ratelimit;
+
+import std.bytes;
+import std.http;
+
+// Rate limiting (task #9, docs/ratelimit.md): a token bucket per key, kept in one fixed table. Pure: no effect, no allocation; the caller owns the table
+// (`table_len` ints, zero at start) and passes the clock of the turn.
+//
+// A bucket is three ints: its key's `fingerprint` (0: empty), its `units` and the clock (ms) when they were last brought up to date. A token is `per_ms` units
+// (the period in milliseconds: 1,000, 60,000 or 3,600,000), a bucket gains `rate` units per millisecond, holds at most `burst * per_ms`, and a request costs
+// `per_ms`. So `rate` tokens are added per period, exactly, and every product below is bounded by the constants in this file: nothing here can overflow.
+
+pub fn max_rate() -> [] int {
+    return 1000000;
+}
+
+pub fn max_burst() -> [] int {
+    return 1000000;
+}
+
+// A clock reading is trusted for this long (30 days, in ms) of refill at most: the one place a huge elapsed time is cut.
+pub fn max_elapsed() -> [] int {
+    return 2592000000;
+}
+
+// Buckets in a set (a route's key space is divided into sets of this many; a table of fewer buckets is one set), ints in a bucket.
+pub fn ways() -> [] int {
+    return 4;
+}
+
+pub fn bucket_ints() -> [] int {
+    return 3;
+}
+
+// `Retry-After` for a full table is never more than this many seconds (a day).
+pub fn max_retry() -> [] int {
+    return 86400;
+}
+
+// The ints of the table for `total` buckets (the generator's bound is 65,536); never empty.
+pub fn table_len(total: int) -> [] int {
+    if total < 1 {
+        return bucket_ints();
+    }
+    return bucket_ints() * total;
+}
+
+// The most units a bucket holds.
+pub fn capacity(per_ms: int, burst: int) -> [] int {
+    return burst * per_ms;
+}
+
+// The units a bucket that held `units` at `last` holds at `now`. No time passes if the clock stood still or went back; a gap of more than `max_elapsed()`
+// counts as that much; the result never exceeds the capacity (a count above it is cut to it), and the arithmetic compares before it adds, so no sum can overflow.
+pub fn refill(units: int, last: int, now: int, rate: int, per_ms: int, burst: int) -> [] int {
+    let cap = capacity(per_ms, burst);
+    var have = units;
+    if have < 0 {
+        have = 0;
+    }
+    var elapsed = 0;
+    if now > last {
+        if last < 0 {
+            elapsed = max_elapsed();
+        } else {
+            elapsed = now - last;
+        }
+    }
+    if elapsed > max_elapsed() {
+        elapsed = max_elapsed();
+    }
+    let gained = rate * elapsed;
+    if gained >= cap - have {
+        return cap;
+    }
+    return have + gained;
+}
+
+// Seconds to wait until a bucket holding `units` (fewer than `per_ms`) holds a whole token: the milliseconds, rounded up, then the seconds, rounded up, and
+// at least 1.
+pub fn retry_secs(units: int, rate: int, per_ms: int) -> [] int {
+    var deficit = per_ms - units;
+    if deficit < 1 {
+        deficit = 1;
+    }
+    var r = rate;
+    if r < 1 {
+        r = 1;
+    }
+    let ms = (deficit + r - 1) / r;
+    // `deficit` and `r` are at least 1, so `ms` is, and so is the seconds' rounding up.
+    return (ms + 999) / 1000;
+}
+
+// Two polynomial hashes of `key`, each kept below 2^31 (a state times a multiplier below 2^16 is below 2^47). Both start at 0, so the empty key is 0 and 0.
+pub fn hash1[&k](key: &k [byte]) -> [] int {
+    var h = 0;
+    var i = 0;
+    while i < len(key) {
+        h = (h * 48271 + int_of(key[i]) + 1) % 2147483647;
+        i = i + 1;
+    }
+    return h;
+}
+
+pub fn hash2[&k](key: &k [byte]) -> [] int {
+    var h = 0;
+    var i = 0;
+    while i < len(key) {
+        h = (h * 16807 + int_of(key[i]) + 1) % 2147483629;
+        i = i + 1;
+    }
+    return h;
+}
+
+// The 62-bit number a bucket is recognised by: never 0.
+pub fn fingerprint[&k](key: &k [byte]) -> [] int {
+    return hash1(key) * 2147483648 + hash2(key) + 1;
+}
+
+// The set of `sets` a key belongs to.
+pub fn set_of[&k](key: &k [byte], sets: int) -> [] int {
+    if sets < 2 {
+        return 0;
+    }
+    return (hash1(key) + hash2(key)) % 2147483647 % sets;
+}
+
+fn ways_of(buckets: int) -> [] int {
+    if buckets < ways() {
+        return 1;
+    }
+    return ways();
+}
+
+// Bring the bucket at `at` up to `now` and take one token if it has one: 0 taken, else the seconds to wait.
+fn spend[&t](table: &!t [int], at: int, rate: int, per_ms: int, burst: int, now: int) -> [] int {
+    let units = refill(table[at + 1], table[at + 2], now, rate, per_ms, burst);
+    table[at + 2] = now;
+    if units >= per_ms {
+        table[at + 1] = units - per_ms;
+        return 0;
+    }
+    table[at + 1] = units;
+    return retry_secs(units, rate, per_ms);
+}
+
+// One request with key `key` on a route whose table is `buckets` buckets from bucket `base` of `table`, limited to `rate` tokens per `per_ms` with room for
+// `burst`, at the clock `now`. Answers 0 if it may go on (one token spent), a positive number of seconds to wait if the key's bucket is empty (`limit.rate`),
+// or the same number negated if the key has no bucket and its set has none to give (`limit.rate-table`, docs/ratelimit.md section 6). A bucket that is
+// empty, or has refilled to its capacity, is as good as a new one and is the only kind ever taken over.
+pub fn admit[&t, &k](table: &!t [int], base: int, buckets: int, key: &k [byte], rate: int, per_ms: int, burst: int, now: int) -> [] int {
+    if base < 0 || buckets < 1 || base + buckets > len(table) / bucket_ints() {
+        // Cannot happen with a generated table: refused rather than read out of range.
+        return 0 - 1;
+    }
+    let w = ways_of(buckets);
+    let sets = buckets / w;
+    let first = (base + set_of(key, sets) * w) * bucket_ints();
+    let fp = fingerprint(key);
+    let cap = capacity(per_ms, burst);
+    var i = 0;
+    while i < w {
+        let at = first + i * bucket_ints();
+        if table[at] == fp {
+            return spend(table, at, rate, per_ms, burst, now);
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < w {
+        let at = first + i * bucket_ints();
+        if table[at] == 0 || refill(table[at + 1], table[at + 2], now, rate, per_ms, burst) >= cap {
+            table[at] = fp;
+            table[at + 1] = cap;
+            table[at + 2] = now;
+            return spend(table, at, rate, per_ms, burst, now);
+        }
+        i = i + 1;
+    }
+    // Every bucket of the set is still recovering. When will the first be whole again?
+    var soonest = 0;
+    i = 0;
+    while i < w {
+        let at = first + i * bucket_ints();
+        let have = refill(table[at + 1], table[at + 2], now, rate, per_ms, burst);
+        var r = rate;
+        if r < 1 {
+            r = 1;
+        }
+        let ms = (cap - have + r - 1) / r;
+        if i == 0 || ms < soonest {
+            soonest = ms;
+        }
+        i = i + 1;
+    }
+    var secs = (soonest + 999) / 1000;
+    if secs < 1 {
+        secs = 1;
+    }
+    if secs > max_retry() {
+        secs = max_retry();
+    }
+    return 0 - secs;
+}
+
+// ---- the key of a request ----
+
+fn is_lower[&a, &l](a: &a [byte], lower: &l [byte]) -> [] bool {
+    if len(a) != len(lower) {
+        return false;
+    }
+    var i = 0;
+    while i < len(a) {
+        if bytes.to_lower(int_of(a[i])) != int_of(lower[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// How many of the request's headers have this lowercase name.
+fn count_named[&s, &t, &n](src: &s [byte], table: &t [int], name: &n [byte]) -> [] int {
+    var found = 0;
+    var i = 0;
+    while i < http.header_count(table) {
+        if is_lower(http.header_name(src, table, i), name) {
+            found = found + 1;
+        }
+        i = i + 1;
+    }
+    return found;
+}
+
+// The index of the first (`last` false) or last (`last` true) header with this lowercase name, or `0 - 1`.
+fn find_named[&s, &t, &n](src: &s [byte], table: &t [int], name: &n [byte], last: bool) -> [] int {
+    var found = 0 - 1;
+    var i = 0;
+    while i < http.header_count(table) {
+        if is_lower(http.header_name(src, table, i), name) && (last || found < 0) {
+            found = i;
+        }
+        i = i + 1;
+    }
+    return found;
+}
+
+// The key of a request for the route key `spec` (docs/ratelimit.md section 3): `r` none (the whole route is one key), `h:<lowercase name>` the value of that header,
+// `x:l` the last element of the last `X-Forwarded-For`, `x:f` the first element of the first. An empty answer is "the key is absent": the header is missing,
+// empty, or (for `h:`) there is more than one of it, or the element is empty. Those requests share the one bucket of the empty key.
+pub fn key[&s, &t, &k](src: &s [byte], table: &t [int], spec: &k [byte]) -> [] &s [byte] {
+    if len(spec) < 3 {
+        return src[0..0];
+    }
+    if int_of(spec[0]) == 'h' {
+        let name = spec[2..len(spec)];
+        if count_named(src, table, name) != 1 {
+            return src[0..0];
+        }
+        return bytes.trim(http.header_value(src, table, find_named(src, table, name, false)));
+    }
+    if int_of(spec[0]) == 'x' {
+        let last = int_of(spec[2]) == 'l';
+        let at = find_named(src, table, "x-forwarded-for", last);
+        if at < 0 {
+            return src[0..0];
+        }
+        let value = http.header_value(src, table, at);
+        var cut = 0 - 1;
+        var i = 0;
+        while i < len(value) {
+            if int_of(value[i]) == ',' && (last || cut < 0) {
+                cut = i;
+            }
+            i = i + 1;
+        }
+        if cut < 0 {
+            return bytes.trim(value);
+        }
+        if last {
+            return bytes.trim(value[cut + 1..len(value)]);
+        }
+        return bytes.trim(value[0..cut]);
+    }
+    return src[0..0];
+}
