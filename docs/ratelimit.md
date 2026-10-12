@@ -233,7 +233,7 @@ past a limit during an outage). The limit comes **before** the circuit so that a
 - **TLS.** The same code: `head_ready` sees plaintext, whichever listener the bytes came from. The key of a request that arrived over `tls_listen` is computed from the same headers.
 - **Retries.** A request sent again on a fresh connection after its pooled connection turned out dead (`design.md` section 6) is **not** charged again: it was admitted once.
 - **WebSocket upgrades.** The limit **applies to upgrades**: an upgrade is a request on the route, and a route with `websocket = true` and a `rate_limit` limits how fast clients may *open* tunnels
-  (a charger that reconnects in a loop, the thing an OCPP back office most wants to slow). It is checked **after** the tunnel cap, so that over the cap the answer stays `ws.tunnels` (503, the more specific
+  (a charger that reconnects in a loop, the thing an OCPP back office most wants to slow). It is checked **after** the tunnel cap, so that over the cap the answer stays `ws.limit` (503, the more specific
   truth) and spends nothing; and a limited upgrade **never occupies a tunnel place**: the refused client's record is cleared of its upgrade state before the refusal, so a flood of limited upgrades cannot
   fill `ws_max_tunnels`. The limit says nothing about an open tunnel: the frames in it are not requests, and `ws_idle_timeout_ms` and `ws_max_lifetime_ms` are what bound it.
 - **The refusal.** Through `refuse` like every other: the upstream half, if any, is closed, the response is `429 Too Many Requests` as `application/problem+json`, `Connection: close`, with the request's id in the

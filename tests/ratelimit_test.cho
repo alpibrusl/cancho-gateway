@@ -197,6 +197,8 @@ fn test_a_set_of_recovering_buckets_refuses_a_new_key_and_still_serves_the_old()
         // The four keys that hold buckets are served as before (k1 spends its second token).
         test.assert_eq(ratelimit.admit(t, 0, 4, "k1", 1, 1000, 2, 500), 0);
         test.assert(ratelimit.admit(t, 0, 4, "k1", 1, 1000, 2, 500) > 0);
+        // k1 is now the slowest to be whole (1.5 s) and the others the quickest (0.5 s): the wait named is the shortest.
+        test.assert_eq(ratelimit.admit(t, 0, 4, "k5", 1, 1000, 2, 500), 0 - 1);
         // A second later k2, k3 and k4 are whole again (a whole bucket is as good as an empty one) and k5 takes the first of them.
         test.assert_eq(ratelimit.admit(t, 0, 4, "k5", 1, 1000, 2, 1000), 0);
         // k1 was never taken over: it spent its second token at 500 ms, has half a token back since, and the half it was owed before: one whole token.
