@@ -243,3 +243,24 @@ fn test_the_upstreams_own_request_id_is_replaced_by_the_requests() -> [] int {
     }
     return 0;
 }
+
+// An upgrade (docs/websocket.md section 5): the client's `Connection` and `Upgrade` are replaced by the gateway's own pair at the end of the head, `Connection: close` is not
+// written, `Sec-WebSocket-Extensions` is removed, and the key, the version, the subprotocol and the origin are copied as received.
+fn test_an_upgrade_is_forwarded_with_its_own_connection_headers_and_without_extensions() -> [] int {
+    region a {
+        let table = alloc_slice[a](http.slots(32), 0);
+        let out = alloc_slice[a](2048, byte_of(0));
+        let req = "GET /ocpp/CP1 HTTP/1.1\r\nHost: csms.example\r\nUpgrade: WebSocket\r\nConnection: keep-alive, Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: ocpp1.6\r\nSec-WebSocket-Extensions: permessage-deflate\r\nOrigin: https://a.example\r\n\r\n";
+        test.assert(http.parse(req, table) > 0);
+        let n = forward.rewrite_upgrade(req, table, out, false, false, "1a-1f90-0000002a");
+        let want = "GET /ocpp/CP1 HTTP/1.1\r\nHost: csms.example\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: ocpp1.6\r\nOrigin: https://a.example\r\nVia: 1.1 cancho-gateway\r\nX-Forwarded-Host: csms.example\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n";
+        test.assert_eq(n, len(want));
+        test.assert(bytes.equal(out[0..n], want));
+        // An ordinary rewrite of the same request (a route without `websocket`) drops `Connection` and `Upgrade`, adds nothing of the upgrade's, and closes.
+        let m = forward.rewrite(req, table, out, false, false, false, "1a-1f90-0000002a");
+        let plain = "GET /ocpp/CP1 HTTP/1.1\r\nHost: csms.example\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: ocpp1.6\r\nSec-WebSocket-Extensions: permessage-deflate\r\nOrigin: https://a.example\r\nVia: 1.1 cancho-gateway\r\nX-Forwarded-Host: csms.example\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: close\r\n\r\n";
+        test.assert_eq(m, len(plain));
+        test.assert(bytes.equal(out[0..m], plain));
+    }
+    return 0;
+}

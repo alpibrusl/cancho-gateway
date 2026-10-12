@@ -20,6 +20,9 @@ pub fn reason(status: int) -> [] &static [byte] {
     if status == 400 {
         return "Bad Request";
     }
+    if status == 403 {
+        return "Forbidden";
+    }
     if status == 404 {
         return "Not Found";
     }
@@ -31,6 +34,9 @@ pub fn reason(status: int) -> [] &static [byte] {
     }
     if status == 413 {
         return "Content Too Large";
+    }
+    if status == 426 {
+        return "Upgrade Required";
     }
     if status == 431 {
         return "Request Header Fields Too Large";
@@ -81,6 +87,10 @@ pub fn response[&o, &t, &d](out: &!o [byte], status: int, rule: &t [byte], id: &
     k = out.put(out, k, reason(status));
     k = out.put(out, k, "\r\nContent-Type: application/problem+json\r\nContent-Length: ");
     k = out.put_int(out, k, length);
+    if status == 426 {
+        // RFC 6455 4.4: the versions the server speaks (docs/websocket.md section 4, row 7).
+        k = out.put(out, k, "\r\nSec-WebSocket-Version: 13");
+    }
     k = out.put(out, k, "\r\nX-Request-Id: ");
     k = out.put(out, k, id);
     k = out.put(out, k, "\r\nConnection: close\r\n\r\n");

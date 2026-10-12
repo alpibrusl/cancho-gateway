@@ -8,7 +8,7 @@ import gateway.out;
 fn test_an_ok_line_byte_for_byte() -> [] int {
     region a {
         let buf = alloc_slice[a](accesslog.max_line(), byte_of(0));
-        let n = accesslog.line(buf, 1791363042117, "19b3c2a1f00-1f90-0000002a", "GET", "/users/7", "api", "api", 200, "", 0, 12, 9, 0, 1834, false);
+        let n = accesslog.line(buf, 1791363042117, "19b3c2a1f00-1f90-0000002a", "GET", "/users/7", "api", "api", 200, "", 0, 12, 9, 0, 1834, false, false);
         let want = "{\"t\":1791363042117,\"id\":\"19b3c2a1f00-1f90-0000002a\",\"method\":\"GET\",\"path\":\"/users/7\",\"route\":\"api\",\"upstream\":\"api\",\"status\":200,\"rule\":\"\",\"outcome\":\"ok\",\"ms\":12,\"upstream_ms\":9,\"bytes_in\":0,\"bytes_out\":1834}\n";
         test.assert_eq(n, len(want));
         test.assert(bytes.equal(buf[0..n], want));
@@ -19,9 +19,9 @@ fn test_an_ok_line_byte_for_byte() -> [] int {
 fn test_a_refusal_and_an_abort_carry_their_outcome_and_rule() -> [] int {
     region a {
         let buf = alloc_slice[a](accesslog.max_line(), byte_of(0));
-        let n = accesslog.line(buf, 5, "x-1", "POST", "/a", "", "", 413, "limit.body", 1, 3, 0, 0, 0, false);
+        let n = accesslog.line(buf, 5, "x-1", "POST", "/a", "", "", 413, "limit.body", 1, 3, 0, 0, 0, false, false);
         test.assert(bytes.equal(buf[0..n], "{\"t\":5,\"id\":\"x-1\",\"method\":\"POST\",\"path\":\"/a\",\"route\":\"\",\"upstream\":\"\",\"status\":413,\"rule\":\"limit.body\",\"outcome\":\"refused\",\"ms\":3,\"upstream_ms\":0,\"bytes_in\":0,\"bytes_out\":0}\n"));
-        let m = accesslog.line(buf, 5, "x-1", "GET", "/a", "r", "u", 0, "", 2, 3, 0, 0, 0, false);
+        let m = accesslog.line(buf, 5, "x-1", "GET", "/a", "r", "u", 0, "", 2, 3, 0, 0, 0, false, false);
         test.assert(bytes.equal(buf[0..m], "{\"t\":5,\"id\":\"x-1\",\"method\":\"GET\",\"path\":\"/a\",\"route\":\"r\",\"upstream\":\"u\",\"status\":0,\"rule\":\"\",\"outcome\":\"aborted\",\"ms\":3,\"upstream_ms\":0,\"bytes_in\":0,\"bytes_out\":0}\n"));
     }
     return 0;
@@ -30,9 +30,9 @@ fn test_a_refusal_and_an_abort_carry_their_outcome_and_rule() -> [] int {
 fn test_a_tls_connection_carries_the_field_and_a_plain_one_does_not() -> [] int {
     region a {
         let buf = alloc_slice[a](768, byte_of(0));
-        let n = accesslog.line(buf, 5, "x-1", "GET", "/a", "r", "u", 200, "", 0, 3, 1, 0, 7, true);
+        let n = accesslog.line(buf, 5, "x-1", "GET", "/a", "r", "u", 200, "", 0, 3, 1, 0, 7, true, false);
         test.assert(bytes.equal(buf[0..n], "{\"t\":5,\"id\":\"x-1\",\"method\":\"GET\",\"path\":\"/a\",\"route\":\"r\",\"upstream\":\"u\",\"status\":200,\"rule\":\"\",\"outcome\":\"ok\",\"ms\":3,\"upstream_ms\":1,\"bytes_in\":0,\"bytes_out\":7,\"tls\":true}\n"));
-        let m = accesslog.line(buf, 5, "x-1", "GET", "/a", "r", "u", 200, "", 0, 3, 1, 0, 7, false);
+        let m = accesslog.line(buf, 5, "x-1", "GET", "/a", "r", "u", 200, "", 0, 3, 1, 0, 7, false, false);
         test.assert(bytes.equal(buf[m - 15..m], "\"bytes_out\":7}\n"));
     }
     return 0;
@@ -103,7 +103,7 @@ fn test_a_long_path_is_cut_at_128_bytes_and_says_so() -> [] int {
     region a {
         let buf = alloc_slice[a](accesslog.max_line(), byte_of(0));
         let path = alloc_slice[a](200, byte_of(97));
-        let n = accesslog.line(buf, 1, "i", "GET", path, "r", "u", 200, "", 0, 1, 1, 0, 0, false);
+        let n = accesslog.line(buf, 1, "i", "GET", path, "r", "u", 200, "", 0, 1, 1, 0, 0, false, false);
         test.assert(n > 0);
         let want = alloc_slice[a](400, byte_of(0));
         var k = out.put(want, 0, "\"path\":\"");
@@ -122,7 +122,7 @@ fn test_an_escaped_path_is_cut_at_256_output_bytes_between_escapes() -> [] int {
     region a {
         let buf = alloc_slice[a](accesslog.max_line(), byte_of(0));
         let path = alloc_slice[a](128, byte_of(1));
-        let n = accesslog.line(buf, 1, "i", "GET", path, "r", "u", 200, "", 0, 1, 1, 0, 0, false);
+        let n = accesslog.line(buf, 1, "i", "GET", path, "r", "u", 200, "", 0, 1, 1, 0, 0, false, false);
         test.assert(n > 0);
         // 256 / 6 = 42 whole escapes (252 bytes); the 43rd would be 258.
         let want = alloc_slice[a](400, byte_of(0));
@@ -161,7 +161,7 @@ fn test_the_worst_line_fits_the_bound_and_is_one_line() -> [] int {
         let route = alloc_slice[a](32, byte_of(114));
         let up = alloc_slice[a](32, byte_of(117));
         let rule = alloc_slice[a](40, byte_of(108));
-        let n = accesslog.line(buf, 9999999999999, id, method, path, route, up, 504, rule, 2, 2147483647, 2147483647, 1073741824, 9007199254740991, false);
+        let n = accesslog.line(buf, 9999999999999, id, method, path, route, up, 504, rule, 2, 2147483647, 2147483647, 1073741824, 9007199254740991, false, false);
         test.assert(n > 0);
         test.assert(n <= accesslog.max_line());
         // The only newline is the last byte, and no control byte appears before it.
@@ -180,7 +180,7 @@ fn test_the_worst_line_fits_the_bound_and_is_one_line() -> [] int {
 fn test_a_window_that_is_too_small_is_refused_not_overrun() -> [] int {
     region a {
         let buf = alloc_slice[a](40, byte_of(0));
-        test.assert_eq(accesslog.line(buf, 1, "i", "GET", "/", "r", "u", 200, "", 0, 1, 1, 0, 0, false), 0 - 1);
+        test.assert_eq(accesslog.line(buf, 1, "i", "GET", "/", "r", "u", 200, "", 0, 1, 1, 0, 0, false, false), 0 - 1);
     }
     return 0;
 }
@@ -203,6 +203,27 @@ fn test_hex_is_padded_and_lowercase() -> [] int {
         test.assert(bytes.equal(buf[0..m], "0"));
         let q = out.put_hex(buf, 0, 4294967295, 1);
         test.assert(bytes.equal(buf[0..q], "ffffffff"));
+    }
+    return 0;
+}
+
+fn test_an_upgrade_carries_its_field_last_and_the_worst_line_with_both_still_fits() -> [] int {
+    region a {
+        let buf = alloc_slice[a](accesslog.max_line(), byte_of(0));
+        let n = accesslog.line(buf, 5, "x-1", "GET", "/ocpp/CP1", "ocpp", "csms", 101, "", 0, 3, 1, 10, 70, false, true);
+        test.assert(bytes.equal(buf[0..n], "{\"t\":5,\"id\":\"x-1\",\"method\":\"GET\",\"path\":\"/ocpp/CP1\",\"route\":\"ocpp\",\"upstream\":\"csms\",\"status\":101,\"rule\":\"\",\"outcome\":\"ok\",\"ms\":3,\"upstream_ms\":1,\"bytes_in\":10,\"bytes_out\":70,\"upgrade\":\"websocket\"}\n"));
+        let m = accesslog.line(buf, 5, "x-1", "GET", "/a", "r", "u", 101, "ws.idle-timeout", 2, 3, 1, 0, 7, true, true);
+        test.assert(bytes.equal(buf[0..m], "{\"t\":5,\"id\":\"x-1\",\"method\":\"GET\",\"path\":\"/a\",\"route\":\"r\",\"upstream\":\"u\",\"status\":101,\"rule\":\"ws.idle-timeout\",\"outcome\":\"aborted\",\"ms\":3,\"upstream_ms\":1,\"bytes_in\":0,\"bytes_out\":7,\"tls\":true,\"upgrade\":\"websocket\"}\n"));
+        let id = alloc_slice[a](64, byte_of(105));
+        let method = alloc_slice[a](16, byte_of(1));
+        let path = alloc_slice[a](128, byte_of(1));
+        let route = alloc_slice[a](32, byte_of(114));
+        let up = alloc_slice[a](32, byte_of(117));
+        let rule = alloc_slice[a](40, byte_of(108));
+        let w = accesslog.line(buf, 9999999999999, id, method, path, route, up, 504, rule, 2, 2147483647, 2147483647, 1073741824, 9007199254740991, true, true);
+        test.assert(w > 0);
+        test.assert(w <= accesslog.max_line());
+        test.assert_eq(w, 676 + 11 + 22);
     }
     return 0;
 }

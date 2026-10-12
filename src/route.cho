@@ -248,6 +248,26 @@ pub fn trust_forwarded(index: int) -> [] int {
     return number(bytes.field(blob[at..line_end(blob, at)], 9, 6));
 }
 
+// 1 if route `index` accepts WebSocket upgrades (docs/websocket.md section 3), else 0.
+pub fn websocket(index: int) -> [] int {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return number(bytes.field(blob[at..line_end(blob, at)], 9, 8));
+}
+
+// The subprotocols route `index` serves, comma-separated (empty: none), and the browser origins it admits, comma-separated (empty: none).
+pub fn subprotocols(index: int) -> [] &static [byte] {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return bytes.field(blob[at..line_end(blob, at)], 9, 9);
+}
+
+pub fn origins(index: int) -> [] &static [byte] {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return bytes.field(blob[at..line_end(blob, at)], 9, 10);
+}
+
 pub fn select[&h, &m, &p](host: &h [byte], method: &m [byte], path: &p [byte]) -> [] int {
     let name = host_name(host);
     if len(name) == 0 {

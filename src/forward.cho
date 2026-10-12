@@ -208,6 +208,16 @@ pub fn put_generated_id[&o](out: &!o [byte], at: int, stamp: int, port: int, seq
 // `X-Forwarded-Host` (the Host as received) and `X-Forwarded-Proto: http` (`https` when `secure`, the client spoke TLS) are added; `Via` is appended; `X-Request-Id` is the client's
 // own where `id_choice` says it is believed, else `id` (the one the proxy fixed for the session) is added.
 pub fn rewrite[&s, &t, &o, &d](src: &s [byte], table: &t [int], out: &!o [byte], keep_alive: bool, trust: bool, secure: bool, id: &d [byte]) -> [] int {
+    return rewrite_with(src, table, out, keep_alive, trust, secure, id, false);
+}
+
+// `rewrite`, for a request admitted as a WebSocket upgrade (docs/websocket.md section 5): `Sec-WebSocket-Extensions` is removed (none is offered, so none can be
+// negotiated), and the head ends with `Connection: Upgrade` and `Upgrade: websocket` in place of `Connection: close`.
+pub fn rewrite_upgrade[&s, &t, &o, &d](src: &s [byte], table: &t [int], out: &!o [byte], trust: bool, secure: bool, id: &d [byte]) -> [] int {
+    return rewrite_with(src, table, out, true, trust, secure, id, true);
+}
+
+fn rewrite_with[&s, &t, &o, &d](src: &s [byte], table: &t [int], out: &!o [byte], keep_alive: bool, trust: bool, secure: bool, id: &d [byte], upgrade: bool) -> [] int {
     let count = http.header_count(table);
     if connection_lists(src, table, count, "content-length") || connection_lists(src, table, count, "transfer-encoding") || connection_lists(src, table, count, "host") {
         return 0 - 1;
@@ -226,6 +236,9 @@ pub fn rewrite[&s, &t, &o, &d](src: &s [byte], table: &t [int], out: &!o [byte],
         }
         if copy && is(name, "x-request-id") {
             copy = i == kept;
+        }
+        if copy && upgrade && is(name, "sec-websocket-extensions") {
+            copy = false;
         }
         if copy {
             k = out.put(out, k, name);
@@ -250,7 +263,9 @@ pub fn rewrite[&s, &t, &o, &d](src: &s [byte], table: &t [int], out: &!o [byte],
         k = out.put(out, k, id);
         k = out.put(out, k, "\r\n");
     }
-    if !keep_alive {
+    if upgrade {
+        k = out.put(out, k, "Connection: Upgrade\r\nUpgrade: websocket\r\n");
+    } else if !keep_alive {
         k = out.put(out, k, "Connection: close\r\n");
     }
     k = out.put(out, k, "\r\n");

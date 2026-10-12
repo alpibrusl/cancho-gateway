@@ -78,6 +78,7 @@ pub fn gauge_fill[&c](core: &!c shared.Core, now: int) -> [] int {
         }
         i = i + 1;
     }
+    g[metrics.ws_gauge()] = shared.tunnels(core, true);
     return 0;
 }
 

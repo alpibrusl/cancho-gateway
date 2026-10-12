@@ -1,0 +1,120 @@
+edition 5;
+
+module gateway.sha1;
+
+// Copied from cancho `examples/ocpp_ws/sha1.cho` at the pinned commit (2fcf4cd); only the module name changed (docs/websocket.md section 2).
+// Differentially tested there against `hashlib` (2,096 comparisons) and here through the handshake (tests/websocket_test.py gate 2).
+
+// `sha1` -- SHA-1 (FIPS 180-4), because RFC 6455 builds the WebSocket handshake on it.
+//
+// It is not here for security: SHA-1 is broken for anything that needs a collision-resistant hash, and the handshake only needs
+// "a value the client can check the server really read its key". That is also why it is in the example and not in `std.crypto`
+// (`docs/websocket-spike.md` section 8): the bar for `std` is two askers, and this is the first.
+//
+// Same posture as `std.crypto`'s SHA-256: 32-bit words held in `int`s confined to `[0, 0xffffffff]`, reduced at the point the
+// specification says.
+
+fn mask32(x: int) -> [] int {
+    return x & 0xffffffff;
+}
+
+fn rotl32(x: int, n: int) -> [] int {
+    return mask32(x << n | x >> 32 - n);
+}
+
+// One 64-byte block, folded into `state` (five running words).
+fn compress[&st, &b](state: &!st [int], block: &b [byte]) -> [] int {
+    region a {
+        let w = alloc_slice[a](80, 0);
+        var t = 0;
+        while t < 16 {
+            let i = t * 4;
+            w[t] = int_of(block[i]) << 24 | int_of(block[i + 1]) << 16 | int_of(block[i + 2]) << 8 | int_of(block[i + 3]);
+            t = t + 1;
+        }
+        while t < 80 {
+            w[t] = rotl32(w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16], 1);
+            t = t + 1;
+        }
+        var wa = state[0];
+        var wb = state[1];
+        var wc = state[2];
+        var wd = state[3];
+        var we = state[4];
+        t = 0;
+        while t < 80 {
+            var f = 0;
+            var k = 0;
+            if t < 20 {
+                f = wb & wc | 0xffffffff - wb & wd;
+                k = 0x5a827999;
+            } else if t < 40 {
+                f = wb ^ wc ^ wd;
+                k = 0x6ed9eba1;
+            } else if t < 60 {
+                f = wb & wc | wb & wd | wc & wd;
+                k = 0x8f1bbcdc;
+            } else {
+                f = wb ^ wc ^ wd;
+                k = 0xca62c1d6;
+            }
+            let temp = mask32(rotl32(wa, 5) + f + we + k + w[t]);
+            we = wd;
+            wd = wc;
+            wc = rotl32(wb, 30);
+            wb = wa;
+            wa = temp;
+            t = t + 1;
+        }
+        state[0] = mask32(state[0] + wa);
+        state[1] = mask32(state[1] + wb);
+        state[2] = mask32(state[2] + wc);
+        state[3] = mask32(state[3] + wd);
+        state[4] = mask32(state[4] + we);
+    }
+    return 0;
+}
+
+// `message`, hashed into `digest`, which must have room for 20 bytes. Answers 0.
+pub fn digest[&s, &o](message: &s [byte], out: &!o [byte]) -> [] int {
+    region st {
+        let state = alloc_slice[st](5, 0);
+        state[0] = 0x67452301;
+        state[1] = 0xefcdab89;
+        state[2] = 0x98badcfe;
+        state[3] = 0x10325476;
+        state[4] = 0xc3d2e1f0;
+        let total = len(message);
+        let padded_len = (total + 9 + 63) / 64 * 64;
+        region m {
+            let padded = alloc_slice[m](padded_len, byte_of(0));
+            var j = 0;
+            while j < total {
+                padded[j] = message[j];
+                j = j + 1;
+            }
+            padded[total] = byte_of(0x80);
+            let bit_len = total * 8;
+            var k = 0;
+            while k < 8 {
+                padded[padded_len - 8 + k] = byte_of(bit_len >> (7 - k) * 8 & 0xff);
+                k = k + 1;
+            }
+            var block = 0;
+            while block < padded_len {
+                compress(state, padded[block..block + 64]);
+                block = block + 64;
+            }
+        }
+        var w = 0;
+        while w < 5 {
+            let word = state[w];
+            out[w * 4] = byte_of(word >> 24 & 0xff);
+            out[w * 4 + 1] = byte_of(word >> 16 & 0xff);
+            out[w * 4 + 2] = byte_of(word >> 8 & 0xff);
+            out[w * 4 + 3] = byte_of(word & 0xff);
+            w = w + 1;
+        }
+    }
+    return 0;
+}

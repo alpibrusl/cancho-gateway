@@ -85,6 +85,12 @@ jobs:
         working-directory: gateway
         run: python3 tests/tls_test.py
 
+      - name: WebSocket (docs/websocket.md) against a client and an upstream written from RFC 6455, plain and over TLS; the mutants are run by hand (tests/websocket_mutants.py)
+        working-directory: gateway
+        run: |
+          python3 -m pip install websockets==17.2   # an implementation that is not ours, on each side of the gateway (the test skips its two interop cases without it)
+          python3 tests/websocket_test.py
+
       - name: The header policy against nginx (the table in the test says where they differ on purpose, and why)
         working-directory: gateway
         run: |

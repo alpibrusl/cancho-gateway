@@ -4,7 +4,7 @@ Status: **a working reverse proxy, with deliberate gaps.** (Upstream keep-alive 
 framing and routing (tasks #3, #4), a fresh upstream connection per request, request body forwarding (Content-Length and
 chunked), response relay, backpressure both ways, deadlines, refusals as `application/problem+json`. **Not built:** keep-alive
 on either side and the upstream pool (#6), (the header policy of #7 is built: `docs/headers.md`), authentication (#8), rate limits
-(#9), the metrics endpoint (#10; the access log is built), WebSockets (#15). Section 6 lists what is untested.
+(#9), the metrics endpoint (#10; the access log is built), WebSockets (#15; built as a byte tunnel: `docs/websocket.md`). Section 6 lists what is untested.
 
 ## 1. The flow of one request
 

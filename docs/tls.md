@@ -186,7 +186,7 @@ queue's last turn lost). A deployment without `tls_listen` has nothing to reload
 served anything.
 
 **11.2 Stop.** The first `SIGINT` or `SIGTERM` ends the loop at the end of the turn it was read in: the access-log lines of that turn are written, every connection that is up gets its TLS `close_notify` (best effort, as at the end of any session: `tlsio.end_all`), the sockets close, the
-`SignalWatch` is closed (so a **second** signal during the exit is the kernel's default and ends the process at once, which is what an operator who is impatient means), and the exit status is **0**. `gateway: stopping` is written to standard error. There is **no drain**: a request in flight is cut, as it
+`SignalWatch` is closed (so a **second** signal during the exit is the kernel's default and ends the process at once, which is what an operator who is impatient means), and the exit status is **0**. `gateway: stopping` is written to standard error. There is **no drain**: a request in flight, or a WebSocket tunnel, is cut (`tests/websocket_test.py`: the client sees its connection end, the upstream connection is closed, the status is 0; and `SIGHUP` drops no open tunnel, plain or over TLS), as it
 is when the process is killed today. A drain needs the listeners to stop accepting, and a `Listener` cannot be unwatched, only closed (`tls-server.md` section 11.2 says why for cancho's own servers), so it is a larger change and not in this slice.
 
 **11.3 Reload.** On `SIGHUP`, `tlsio.reload` reads every identity again, in order, by `tlsids.load(heap, dir, name, engine, id, now)` with `id >= 0`, which is `tls.replace_identity`: the engine checks the chain parses, the key parses, and the pair match (`tls-server-key-mismatch`) and swaps both only if all
