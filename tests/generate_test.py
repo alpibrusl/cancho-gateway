@@ -158,6 +158,31 @@ REFUSALS = [
     ("config.websocket", 2, WS + 'ws_max_tunnels = 128\n' + WSR),
     ("config.websocket", 2, WS + 'ws_max_tunnels = -1\n' + WSR),
     ("config.websocket", 2, WS + 'ws_max_tunnels = "64"\n' + WSR),
+    # --- WebSocket frames (docs/websocket-frames.md section 10): the message limit per route, and the keepalive and close keys
+    ("config.websocket", 8, UP + R + 'path_prefix = "/"\nws_max_message_bytes = 65536\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nws_max_message_bytes = 1023\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nws_max_message_bytes = 268435457\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nws_max_message_bytes = 0\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nws_max_message_bytes = -5\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nws_max_message_bytes = "64k"\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nws_max_message_bytes = true\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nws_max_message_bytes = 65536.5\n'),
+    ("config.websocket", 2, 'listen = 80\nws_ping_ms = 5000\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n' + R + 'path_prefix = "/"\n'),
+    ("config.websocket", 2, 'listen = 80\nws_close_ms = 5000\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n' + R + 'path_prefix = "/"\n'),
+    ("config.websocket", 2, 'listen = 80\nws_pong_ms = 5000\n[[upstream]]\nname="a"\naddr="10.0.0.1:1"\n' + R + 'path_prefix = "/"\n'),
+    ("config.websocket", 2, WS + 'ws_ping_ms = 999\n' + WSR),
+    ("config.websocket", 2, WS + 'ws_ping_ms = 86400001\n' + WSR),
+    ("config.websocket", 2, WS + 'ws_ping_ms = -1\n' + WSR),
+    ("config.websocket", 2, WS + 'ws_ping_ms = "30s"\n' + WSR),
+    ("config.websocket", 2, WS + 'ws_ping_ms = true\n' + WSR),
+    ("config.websocket", 2, WS + 'ws_pong_ms = 5000\n' + WSR),
+    ("config.websocket", 3, WS + 'ws_ping_ms = 5000\nws_pong_ms = 99\n' + WSR),
+    ("config.websocket", 3, WS + 'ws_ping_ms = 5000\nws_pong_ms = 600001\n' + WSR),
+    ("config.websocket", 3, WS + 'ws_ping_ms = 5000\nws_pong_ms = "10s"\n' + WSR),
+    ("config.websocket", 2, WS + 'ws_close_ms = 99\n' + WSR),
+    ("config.websocket", 2, WS + 'ws_close_ms = 60001\n' + WSR),
+    ("config.websocket", 2, WS + 'ws_close_ms = "5s"\n' + WSR),
+    ("config.websocket", 2, WS + 'ws_close_ms = false\n' + WSR),
     # --- rate limiting (docs/ratelimit.md section 4): one refusal per rule, plus the variants of each
     ("config.ratelimit", 8, UP + R + 'path_prefix = "/"\nrate_limit = 100\n'),
     ("config.ratelimit", 8, UP + R + 'path_prefix = "/"\nrate_limit = "100"\n'),
@@ -216,6 +241,13 @@ ACCEPTED = [
     UP + R + 'path_prefix = "/ocpp"\nwebsocket = true\nmethods = ["GET", "POST"]\nsubprotocols = ["ocpp1.6", "ocpp2.0.1"]\norigins = []\n',
     UP + R + 'path_prefix = "/ws"\nwebsocket = true\nsubprotocols = [%s]\norigins = [%s]\n' % (", ".join('"p%d"' % i for i in range(8)), ", ".join('"http://h%d.example:3000"' % i for i in range(16))),
     UP + R + 'path_prefix = "/ws"\nwebsocket = false\n',
+    # WebSocket frames: the message limit at both bounds, the keepalive off, at both bounds, the pong and the close wait at theirs
+    UP + R + 'path_prefix = "/ws"\nwebsocket = true\nws_max_message_bytes = 1024\n',
+    UP + R + 'path_prefix = "/ws"\nwebsocket = true\nws_max_message_bytes = 268435456\n',
+    WS + 'ws_ping_ms = 0\n' + WSR,
+    WS + 'ws_ping_ms = 1000\nws_pong_ms = 100\nws_close_ms = 100\n' + WSR,
+    WS + 'ws_ping_ms = 86400000\nws_pong_ms = 600000\nws_close_ms = 60000\n' + WSR,
+    WS + 'ws_close_ms = 5000\n' + WSR,
     # rate limiting: the shortest form, every unit, every bound, every key
     UP + R + 'path_prefix = "/"\nrate_limit = "1/s"\n',
     UP + R + 'path_prefix = "/"\nrate_limit = "10/m"\nrate_burst = 2\n',
@@ -341,6 +373,47 @@ REFUSALS += auth_cases()
 ACCEPTED += auth_accepted()
 
 
+def frames_compiled(run, failures):
+    """What the frame keys compile (docs/websocket-frames.md section 10): the route's message limit in the table, the three deployment-wide values, and what --explain says."""
+    text = (WS + 'ws_ping_ms = 30000\nws_pong_ms = 5000\nws_close_ms = 2500\n' + WSR + 'ws_max_message_bytes = 65536\n' + '[[route]]\nupstream = "a"\npath_prefix = "/b"\nwebsocket = true\n' +
+            '[[route]]\nupstream = "a"\npath_prefix = "/c"\n')
+    with tempfile.TemporaryDirectory() as tmp:
+        f = pathlib.Path(tmp) / "d.toml"
+        f.write_text(text)
+        subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(f), "--out", tmp], check=True)
+        table = (pathlib.Path(tmp) / "routes.cho").read_text()
+        deploy = (pathlib.Path(tmp) / "deploy.cho").read_text()
+        explained = run(text).stdout
+    for want in ("\\t65536\\n", "\\t1048576\\n"):
+        if want not in table:
+            print("FAIL the routes table must contain %r" % want)
+            failures += 1
+    for want in ("pub fn ws_ping_ms() -> [] int {\n    return 30000;", "pub fn ws_pong_ms() -> [] int {\n    return 5000;", "pub fn ws_close_ms() -> [] int {\n    return 2500;"):
+        if want not in deploy:
+            print("FAIL the deployment module must contain %r" % want)
+            failures += 1
+    for want in ("a silent client is pinged after 30000 ms and closed if no Pong in 5000 ms", "a Close is answered within 2500 ms", "messages up to 65536 bytes"):
+        if want not in explained:
+            print("FAIL --explain must say %r: %r" % (want, explained[:600]))
+            failures += 1
+    # the defaults: no keepalive, 10 s to answer one if it is turned on, 5 s for a Close
+    plain = WS + WSR
+    with tempfile.TemporaryDirectory() as tmp:
+        f = pathlib.Path(tmp) / "d.toml"
+        f.write_text(plain)
+        subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(f), "--out", tmp], check=True)
+        deploy = (pathlib.Path(tmp) / "deploy.cho").read_text()
+        explained = run(plain).stdout
+    for want in ("pub fn ws_ping_ms() -> [] int {\n    return 0;", "pub fn ws_pong_ms() -> [] int {\n    return 10000;", "pub fn ws_close_ms() -> [] int {\n    return 5000;"):
+        if want not in deploy:
+            print("FAIL the defaults must compile %r" % want)
+            failures += 1
+    if "no keepalive Ping" not in explained:
+        print("FAIL --explain must say there is no keepalive by default: %r" % explained[:400])
+        failures += 1
+    return failures
+
+
 def auth_compiled(run, failures):
     """What authentication compiles (docs/auth.md sections 4.1 and 6): the key table, the route's record, and what --explain says."""
     text = (TOP + ONE + K1 + K2 + AR + 'auth_header = "X-Api-Key"\nauth_keys = ["bob"]\n' + '[[route]]\nupstream = "a"\npath_prefix = "/b"\nauth = "api-key"\nrate_limit = "5/s"\nrate_key = "auth"\nrate_buckets = 8\n' +
@@ -353,9 +426,9 @@ def auth_compiled(run, failures):
         explained = run(text).stdout
     keys = '"alice\\t%s\\nbob\\t%s\\n"' % (D1, D2)
     wants = ["pub fn key_count() -> [] int {\n    return 2;", "return " + keys + ";",
-             '\\t1\\tx-api-key\\t0\\t1\\tApiKey realm=\\"cancho-gateway\\", header=\\"x-api-key\\"\\n',
-             '\\ta\\t8\\t0\\t1\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\n',
-             '\\t0\\t\\t0\\t\\t\\n']
+             '\\t1\\tx-api-key\\t0\\t1\\tApiKey realm=\\"cancho-gateway\\", header=\\"x-api-key\\"\\t1048576\\n',
+             '\\ta\\t8\\t0\\t1\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t1048576\\n',
+             '\\t0\\t\\t0\\t\\t\\t1048576\\n']
     for want in wants:
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
@@ -475,7 +548,7 @@ def main():
         subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(f), "--out", tmp], check=True)
         table = (pathlib.Path(tmp) / "routes.cho").read_text()
         explained = run(limited).stdout
-    for want in ("\\t10\\t60000\\t3\\th:x-api-key\\t64\\t0\\t0\\t\\t0\\t\\t\\n", "\\t0\\t0\\t0\\t\\t0\\t64\\t0\\t\\t0\\t\\t\\n", "\\t7\\t1000\\t7\\tx:l\\t1024\\t64\\t0\\t\\t0\\t\\t\\n", "\\t2\\t3600000\\t2\\tr\\t1\\t1088\\t0\\t\\t0\\t\\t\\n",
+    for want in ("\\t10\\t60000\\t3\\th:x-api-key\\t64\\t0\\t0\\t\\t0\\t\\t\\t1048576\\n", "\\t0\\t0\\t0\\t\\t0\\t64\\t0\\t\\t0\\t\\t\\t1048576\\n", "\\t7\\t1000\\t7\\tx:l\\t1024\\t64\\t0\\t\\t0\\t\\t\\t1048576\\n", "\\t2\\t3600000\\t2\\tr\\t1\\t1088\\t0\\t\\t0\\t\\t\\t1048576\\n",
                  "pub fn rate_buckets_total() -> [] int {\n    return 1089;"):
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
@@ -483,6 +556,7 @@ def main():
     if "limit 10 per 60000 ms, burst 3, key h:x-api-key, 64 bucket(s)" not in explained:
         print("FAIL --explain must say what a route's limit is: %r" % explained[-300:])
         failures += 1
+    failures = frames_compiled(run, failures)
     failures = auth_compiled(run, failures)
     failures = mkkey_checks(failures)
     print("%d prefix cases, %d refusal cases, %d accepted, %d failures" % (len(PREFIX), len(REFUSALS), len(ACCEPTED), failures))
