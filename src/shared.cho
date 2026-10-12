@@ -7,6 +7,7 @@ import std.conns;
 import std.http;
 import gateway.accesslog;
 import gateway.admin;
+import gateway.auth;
 import gateway.chunked;
 import gateway.deploy;
 import gateway.egress;
@@ -52,6 +53,11 @@ pub fn ws_mask() -> [] int {
 // Client slot field 42: the seconds a refusal tells the client to wait (`Retry-After`, docs/ratelimit.md section 5), 0 for none. Cleared with 40 to 47 when a client is accepted.
 pub fn retry_after() -> [] int {
     return 42;
+}
+
+// Client slot field 43: the key a request authenticated as (docs/auth.md), its index plus 1, 0 if it did not authenticate. The access log names it. Cleared with 40 to 47 when a client is accepted.
+pub fn auth_slot() -> [] int {
+    return 43;
 }
 
 // The meta area of a client: 252 bytes of the request's record (see `gateway.proxy`), then the 28-byte accept value its upgrade is waiting for.
@@ -302,6 +308,10 @@ pub fn log_end[&c](core: &!c Core, k: int) -> [] int {
     if st[p + 31] > 0 {
         upstream_name = deploy.upstream_name(st[p + 11]);
     }
+    var identity = "";
+    if st[p + auth_slot()] > 0 {
+        identity = auth.key_name(st[p + auth_slot()] - 1);
+    }
     var wait_ms = 0 - 1;
     if st[p + 26] > 0 && st[p + 25] > 0 {
         wait_ms = st[p + 26] - st[p + 25];
@@ -321,7 +331,7 @@ pub fn log_end[&c](core: &!c Core, k: int) -> [] int {
     }
     var n = 0 - 1;
     if logq_size() - at >= accesslog.max_line() {
-        n = accesslog.line(q[at..at + accesslog.max_line()], ids[2] + st[p + 24], meta_get(core, k, 4, 0), meta_get(core, k, 108, 2), meta_get(core, k, 124, 3), route_name, upstream_name, st[p + 29], meta_get(core, k, 68, 1), outcome, now - st[p + 24], upstream_ms, st[p + 28], st[p + 27], st[p + tlsio.f_mode()] != 0, st[p + ws_mode()] == 2);
+        n = accesslog.line_as(q[at..at + accesslog.max_line()], ids[2] + st[p + 24], meta_get(core, k, 4, 0), meta_get(core, k, 108, 2), meta_get(core, k, 124, 3), route_name, upstream_name, st[p + 29], meta_get(core, k, 68, 1), outcome, now - st[p + 24], upstream_ms, st[p + 28], st[p + 27], st[p + tlsio.f_mode()] != 0, st[p + ws_mode()] == 2, identity);
     }
     if n < 0 {
         ids[5] = ids[5] + 1;

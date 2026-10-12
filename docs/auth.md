@@ -13,7 +13,7 @@ contain a usable secret.**
 | wanted | found | consequence |
 |---|---|---|
 | a SHA-256 | **`std.crypto.sha256(message, digest)`** (and the streaming `sha256_init/update/final`), FIPS 180-4, in the standard library the TLS package already uses (`import std.crypto` is in `packages/tls/server.cho`); pure, no effect | the gateway stores the digest of each key and hashes the presented credential. No hash is copied into the repository (`src/sha1.cho` and `src/b64.cho` were copied because `std` has neither; this does not need that) |
-| a constant-time comparison | **none.** `grep -rniE "constant.time\|ct_eq" std/` finds constant-time scalar arithmetic (`bigmod`, `ecdh`, `ecdsa_sign`) and a byte-wise compare inside `std.ecdh`, but no exported equality for byte slices; `bytes.equal` returns at the first difference | the comparison is written here (section 4), as an OR of XORs over the whole digest, for every key, with no early exit. What that does and does not promise is section 4.3 |
+| a constant-time comparison | **none.** `grep -rniE "constant.time\|ct_eq" std/` finds constant-time scalar arithmetic and range checks (`bigmod`, `ecdh`, `ecdsa_sign`), but no exported equality for byte slices; `bytes.equal` returns at the first difference | the comparison is written here (section 4), as an OR of XORs over the whole digest, for every key, with no early exit. What that does and does not promise is section 4.3 |
 | HMAC | `std.hmac` (`sha256`, `sha384`) exists | not used in this slice; it is the verifier of the next one (section 11) |
 | base64 decoding | none (`src/b64.cho` encodes only) | not needed: keys are compared as the text the client sent (section 3) |
 | randomness, to make keys | none in the gateway, by design (`docs/headers.md` section 1) | keys are made **outside** the gateway, by `scripts/mkkey.py` (section 5), from the operating system's generator. The gateway never makes, stores or shows a key |
@@ -182,7 +182,7 @@ checks: an unauthenticated client learns nothing about the route's subprotocols 
 
     HTTP/1.1 401 Unauthorized
     Content-Type: application/problem+json
-    Content-Length: 117
+    Content-Length: 112
     WWW-Authenticate: Bearer realm="cancho-gateway"
     X-Request-Id: 19b3c2a1f00-1f90-0000002a
     Connection: close

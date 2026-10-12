@@ -208,16 +208,27 @@ pub fn put_generated_id[&o](out: &!o [byte], at: int, stamp: int, port: int, seq
 // `X-Forwarded-Host` (the Host as received) and `X-Forwarded-Proto: http` (`https` when `secure`, the client spoke TLS) are added; `Via` is appended; `X-Request-Id` is the client's
 // own where `id_choice` says it is believed, else `id` (the one the proxy fixed for the session) is added.
 pub fn rewrite[&s, &t, &o, &d](src: &s [byte], table: &t [int], out: &!o [byte], keep_alive: bool, trust: bool, secure: bool, id: &d [byte]) -> [] int {
-    return rewrite_with(src, table, out, keep_alive, trust, secure, id, false);
+    return rewrite_with(src, table, out, keep_alive, trust, secure, id, false, "");
+}
+
+// `rewrite`, for a route that authenticates (docs/auth.md section 3): the header `strip` (lowercase; empty: none), the one the gateway read the credential from, is not copied, so that a key checked here
+// is never in an upstream's logs.
+pub fn rewrite_auth[&s, &t, &o, &d, &x](src: &s [byte], table: &t [int], out: &!o [byte], keep_alive: bool, trust: bool, secure: bool, id: &d [byte], strip: &x [byte]) -> [] int {
+    return rewrite_with(src, table, out, keep_alive, trust, secure, id, false, strip);
 }
 
 // `rewrite`, for a request admitted as a WebSocket upgrade (docs/websocket.md section 5): `Sec-WebSocket-Extensions` is removed (none is offered, so none can be
 // negotiated), and the head ends with `Connection: Upgrade` and `Upgrade: websocket` in place of `Connection: close`.
 pub fn rewrite_upgrade[&s, &t, &o, &d](src: &s [byte], table: &t [int], out: &!o [byte], trust: bool, secure: bool, id: &d [byte]) -> [] int {
-    return rewrite_with(src, table, out, true, trust, secure, id, true);
+    return rewrite_with(src, table, out, true, trust, secure, id, true, "");
 }
 
-fn rewrite_with[&s, &t, &o, &d](src: &s [byte], table: &t [int], out: &!o [byte], keep_alive: bool, trust: bool, secure: bool, id: &d [byte], upgrade: bool) -> [] int {
+// `rewrite_upgrade`, removing the credential header `strip` as `rewrite_auth` does.
+pub fn rewrite_upgrade_auth[&s, &t, &o, &d, &x](src: &s [byte], table: &t [int], out: &!o [byte], trust: bool, secure: bool, id: &d [byte], strip: &x [byte]) -> [] int {
+    return rewrite_with(src, table, out, true, trust, secure, id, true, strip);
+}
+
+fn rewrite_with[&s, &t, &o, &d, &x](src: &s [byte], table: &t [int], out: &!o [byte], keep_alive: bool, trust: bool, secure: bool, id: &d [byte], upgrade: bool, strip: &x [byte]) -> [] int {
     let count = http.header_count(table);
     if connection_lists(src, table, count, "content-length") || connection_lists(src, table, count, "transfer-encoding") || connection_lists(src, table, count, "host") {
         return 0 - 1;
@@ -238,6 +249,9 @@ fn rewrite_with[&s, &t, &o, &d](src: &s [byte], table: &t [int], out: &!o [byte]
             copy = i == kept;
         }
         if copy && upgrade && is(name, "sec-websocket-extensions") {
+            copy = false;
+        }
+        if copy && len(strip) > 0 && is(name, strip) {
             copy = false;
         }
         if copy {

@@ -44,6 +44,12 @@ fn put_number[&o](out: &!o [byte], at: int, key: &static [byte], value: int) -> 
 
 // The line for one request (`secure`: its client spoke TLS; `upgrade`: it became a WebSocket tunnel), with its newline, from offset 0 of `out`; answers its length, or `0 - 1` if `out` is too small.
 pub fn line[&o, &i, &m, &p, &r, &u, &l](out: &!o [byte], t: int, id: &i [byte], method: &m [byte], path: &p [byte], route: &r [byte], upstream: &u [byte], status: int, rule: &l [byte], outcome: int, ms: int, upstream_ms: int, bytes_in: int, bytes_out: int, secure: bool, upgrade: bool) -> [] int {
+    return line_as(out, t, id, method, path, route, upstream, status, rule, outcome, ms, upstream_ms, bytes_in, bytes_out, secure, upgrade, "");
+}
+
+// `line`, for a request authenticated as `identity` (docs/auth.md): a non-empty identity (the name of the key, at most 32 bytes, escaped like every string) adds `"identity":"<name>"` as the
+// last key, after `upgrade`; an empty one adds nothing, so the line of any request that did not authenticate is the line it always was.
+pub fn line_as[&o, &i, &m, &p, &r, &u, &l, &y](out: &!o [byte], t: int, id: &i [byte], method: &m [byte], path: &p [byte], route: &r [byte], upstream: &u [byte], status: int, rule: &l [byte], outcome: int, ms: int, upstream_ms: int, bytes_in: int, bytes_out: int, secure: bool, upgrade: bool, identity: &y [byte]) -> [] int {
     var k = out.put(out, 0, "{\"t\":");
     k = out.put_int(out, k, t);
     k = put_field(out, k, "id", id, 64, 64);
@@ -70,6 +76,9 @@ pub fn line[&o, &i, &m, &p, &r, &u, &l](out: &!o [byte], t: int, id: &i [byte], 
     if upgrade {
         // Only a request that became a WebSocket tunnel carries the field, and it is last (docs/websocket.md section 11).
         k = out.put(out, k, ",\"upgrade\":\"websocket\"");
+    }
+    if len(identity) > 0 {
+        k = put_field(out, k, "identity", identity, 32, 32);
     }
     k = out.put(out, k, "}\n");
     return k;

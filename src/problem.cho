@@ -2,6 +2,7 @@ edition 5;
 
 module gateway.problem;
 
+import std.bytes;
 import gateway.out;
 
 // A response the gateway makes itself (docs/design.md section 8): `application/problem+json` (RFC 9457) carrying the rule tag,
@@ -19,6 +20,9 @@ import gateway.out;
 pub fn reason(status: int) -> [] &static [byte] {
     if status == 400 {
         return "Bad Request";
+    }
+    if status == 401 {
+        return "Unauthorized";
     }
     if status == 403 {
         return "Forbidden";
@@ -86,6 +90,12 @@ pub fn response[&o, &t, &d](out: &!o [byte], status: int, rule: &t [byte], id: &
 
 // `response`, with `Retry-After: <retry>` (whole seconds, docs/ratelimit.md section 5) between `Content-Length` and the rest when `retry` is above 0.
 pub fn response_after[&o, &t, &d](out: &!o [byte], status: int, rule: &t [byte], id: &d [byte], retry: int) -> [] int {
+    return response_challenge(out, status, rule, id, retry, "");
+}
+
+// `response_after`, and for a 401 whose `challenge` is not empty a `WWW-Authenticate` header after `Retry-After` (docs/auth.md section 7.2): the challenge, and `, error="invalid_request"` for
+// `auth.malformed` or `, error="invalid_token"` for `auth.invalid`. Any other status carries no challenge, whatever is passed.
+pub fn response_challenge[&o, &t, &d, &c](out: &!o [byte], status: int, rule: &t [byte], id: &d [byte], retry: int, challenge: &c [byte]) -> [] int {
     // The body's length is known without writing it twice: everything but the variable parts is fixed.
     let fixed = len("{\"type\":\"about:blank\",\"title\":\"") + len("\",\"status\":") + len(",\"rule\":\"") + len("\",\"request_id\":\"") + len("\"}");
     let length = fixed + len(reason(status)) + out.digits(status) + len(rule) + len(id);
@@ -98,6 +108,15 @@ pub fn response_after[&o, &t, &d](out: &!o [byte], status: int, rule: &t [byte],
     if retry > 0 {
         k = out.put(out, k, "\r\nRetry-After: ");
         k = out.put_int(out, k, retry);
+    }
+    if status == 401 && len(challenge) > 0 {
+        k = out.put(out, k, "\r\nWWW-Authenticate: ");
+        k = out.put(out, k, challenge);
+        if bytes.equal(rule, "auth.malformed") {
+            k = out.put(out, k, ", error=\"invalid_request\"");
+        } else if bytes.equal(rule, "auth.invalid") {
+            k = out.put(out, k, ", error=\"invalid_token\"");
+        }
     }
     if status == 426 {
         // RFC 6455 4.4: the versions the server speaks (docs/websocket.md section 4, row 7).

@@ -57,16 +57,23 @@ BUCKETS, BUCKETS_RANGE, BUCKETS_TOTAL = 1024, (4, 65536), 65536
 RATE_REFUSED_HEADERS = ["connection", "keep-alive", "proxy-connection", "proxy-authorization", "te", "trailer", "upgrade", "content-length", "transfer-encoding", "host"]
 RATE_CLAIM_HEADERS = ["forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port", "x-real-ip"]
 MAX_ORIGINS = 16
+# Authentication (docs/auth.md section 6): at most this many API keys in a deployment, each a short name (what the access log calls the caller) and the SHA-256
+# digest of the key as 64 lowercase hexadecimal digits; the credential header a route reads, and the headers it may not name.
+MAX_KEYS = 64
+KEY_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,31}")
+KEY_DIGEST = re.compile(r"[0-9a-f]{64}")
+AUTH_REFUSED_HEADERS = RATE_REFUSED_HEADERS + RATE_CLAIM_HEADERS + ["x-request-id"]
 TOKEN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}")
 ORIGIN = re.compile(r"[a-z][a-z0-9+.-]*://[a-z0-9.-]+(:[0-9]{1,5})?")
 METHODS = ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
 KEYS = {
     "": ["listen", "header_timeout_ms", "connect_timeout_ms", "upstream_timeout_ms", "total_timeout_ms", "idle_timeout_ms", "pool_idle_max", "circuit_threshold", "circuit_open_ms", "log_failure", "admin_listen",
            "tls_listen", "tls_dir", "tls_identities", "tls_handshakes", "tls_rate", "tls_handshake_ms",
-           "ws_idle_timeout_ms", "ws_max_lifetime_ms", "ws_max_tunnels"],
+           "ws_idle_timeout_ms", "ws_max_lifetime_ms", "ws_max_tunnels", "auth_allow_plain"],
     "upstream": ["name", "addr"],
+    "api_key": ["name", "sha256"],
     "route": ["name", "host", "path_prefix", "methods", "upstream", "max_body", "trust_forwarded", "websocket", "subprotocols", "origins",
-              "rate_limit", "rate_burst", "rate_key", "rate_buckets"],
+              "rate_limit", "rate_burst", "rate_key", "rate_buckets", "auth", "auth_header", "auth_keys", "auth_forward"],
 }
 
 
@@ -80,7 +87,7 @@ def scan(text):
     """Where each key is: {(section, index, key): line}, and where each table starts: {(section, index): line}."""
     keys, starts = {}, {}
     section, index = "", 0
-    counts = {"upstream": 0, "route": 0}
+    counts = {"upstream": 0, "route": 0, "api_key": 0}
     for number, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         m = re.fullmatch(r"\[\[([A-Za-z_][A-Za-z0-9_-]*)\]\]", line)
@@ -131,7 +138,7 @@ def valid_prefix(p):
     return not any(seg in (".", "..") for seg in p.split("/"))
 
 
-def rate_options(r, trust, refuse, i):
+def rate_options(r, trust, has_auth, refuse, i):
     """The rate-limit keys of one route (docs/ratelimit.md section 4), checked; answers the fields of its record. `refuse(rule, message, section,
     index, key)` raises."""
     none = {"rate": 0, "per_ms": 0, "burst": 0, "rate_key": "", "buckets": 0}
@@ -157,12 +164,16 @@ def rate_options(r, trust, refuse, i):
     if isinstance(spec, str):
         if spec == "route":
             key = "r"
+        elif spec == "auth":
+            key = "a"
         elif spec in ("xff:last", "xff:first"):
             key = "x:l" if spec == "xff:last" else "x:f"
         elif spec.startswith("header:") and TOKEN.fullmatch(spec[7:]):
             key = "h:" + spec[7:].lower()
     if key is None:
-        bad('rate_key must be "route", "xff:last", "xff:first" or "header:<Name>" with a header name of 1 to 64 token bytes', "rate_key")
+        bad('rate_key must be "route", "auth", "xff:last", "xff:first" or "header:<Name>" with a header name of 1 to 64 token bytes', "rate_key")
+    if key == "a" and not has_auth:
+        bad('rate_key = "auth" keys on the authenticated identity: the route needs auth (docs/auth.md section 9)', "rate_key")
     if key.startswith("h:") and key[2:] in RATE_REFUSED_HEADERS:
         bad("rate_key names %s, which the gateway removes or owns: a limit keyed on it is no limit" % spec[7:], "rate_key")
     if (key.startswith("x:") or key.startswith("h:") and key[2:] in RATE_CLAIM_HEADERS) and not trust:
@@ -176,6 +187,41 @@ def rate_options(r, trust, refuse, i):
         if not isinstance(buckets, int) or isinstance(buckets, bool) or not BUCKETS_RANGE[0] <= buckets <= BUCKETS_RANGE[1] or buckets % 4:
             bad("rate_buckets must be an integer, a multiple of 4, in %d..%d" % BUCKETS_RANGE, "rate_buckets")
     return {"rate": rate, "per_ms": per_ms, "burst": burst, "rate_key": key, "buckets": buckets}
+
+
+def auth_options(r, key_names, refuse, i):
+    """The authentication keys of one route (docs/auth.md section 6), checked; answers the fields of its record. `refuse(rule, message, section, index, key)` raises."""
+    none = {"auth": 0, "auth_header": "", "auth_forward": 0, "auth_keys": "", "challenge": ""}
+    if "auth" not in r:
+        for key in ("auth_header", "auth_keys", "auth_forward"):
+            if key in r:
+                refuse("config.auth", "%s needs auth on the same route (docs/auth.md section 6)" % key, "route", i, key)
+        return none
+
+    def bad(message, key):
+        refuse("config.auth", message, "route", i, key)
+
+    if r["auth"] != "api-key":
+        bad('auth must be "api-key": the only kind in this slice (docs/auth.md section 6)', "auth")
+    header = r.get("auth_header", "Authorization")
+    if not isinstance(header, str) or not TOKEN.fullmatch(header):
+        bad("auth_header must be a header name: a token of 1 to 64 bytes", "auth_header")
+    if header.lower() in AUTH_REFUSED_HEADERS:
+        bad("auth_header names %s, which the gateway removes, owns or replaces: it could never carry a key" % header, "auth_header")
+    allowed = r.get("auth_keys")
+    if allowed is not None:
+        if not isinstance(allowed, list) or not allowed or len(set(map(str, allowed))) != len(allowed) or not all(isinstance(n, str) and n in key_names for n in allowed):
+            bad("auth_keys must be a non-empty list of distinct [[api_key]] names" + (" (declared: %s)" % ", ".join(key_names) if key_names else ""), "auth_keys")
+    forward = r.get("auth_forward", False)
+    if not isinstance(forward, bool):
+        bad("auth_forward must be true or false (docs/auth.md section 3)", "auth_forward")
+    lower = header.lower()
+    if lower == "authorization":
+        challenge = 'Bearer realm="cancho-gateway"'
+    else:
+        challenge = 'ApiKey realm="cancho-gateway", header="%s"' % lower
+    return {"auth": 1, "auth_header": lower, "auth_forward": 1 if forward else 0,
+            "auth_keys": "*" if allowed is None else ",".join(str(key_names.index(n)) for n in allowed), "challenge": challenge}
 
 
 def load(path):
@@ -203,11 +249,11 @@ def load(path):
                        section, index, k, "did you mean %r?" % near[0] if near else "valid keys: " + ", ".join(KEYS[section]))
 
     for k, v in doc.items():
-        if k not in KEYS[""] and k not in ("upstream", "route"):
-            near = difflib.get_close_matches(k, KEYS[""] + ["upstream", "route"], n=1)
+        if k not in KEYS[""] and k not in ("upstream", "route", "api_key"):
+            near = difflib.get_close_matches(k, KEYS[""] + ["upstream", "route", "api_key"], n=1)
             raise Refusal("config.unknown-key", "unknown key or table %r" % k, line=keys.get(("", 0, k), 1), key=k,
                           hint="did you mean %r?" % near[0] if near else None)
-    unknown_keys("", 0, {k: v for k, v in doc.items() if k not in ("upstream", "route")})
+    unknown_keys("", 0, {k: v for k, v in doc.items() if k not in ("upstream", "route", "api_key")})
     # `listen` is optional so that a deployment can serve TLS only (docs/tls.md section 11): 0 means no plain listener. At least one of `listen` and
     # `tls_listen` is required (checked once `tls_listen` is read, below).
     listen = doc.get("listen", 0)
@@ -295,6 +341,23 @@ def load(path):
             refuse("config.duplicate", "upstream address %s is listed twice" % addr, "upstream", i, "addr")
         names[name] = i
         addrs.append(addr)
+    keys_in = doc.get("api_key", [])
+    if len(keys_in) > MAX_KEYS:
+        refuse("config.auth", "%d [[api_key]]; the bound is %d (docs/auth.md section 4.1)" % (len(keys_in), MAX_KEYS), "api_key", MAX_KEYS)
+    api_keys = []
+    for i, kk in enumerate(keys_in):
+        unknown_keys("api_key", i, kk)
+        kname, digest = kk.get("name"), kk.get("sha256")
+        if not isinstance(kname, str) or not KEY_NAME.fullmatch(kname):
+            refuse("config.auth", "api_key name %r must match [a-z0-9][a-z0-9._-]{0,31} (it is written into the access log)" % (kname,), "api_key", i, "name")
+        if any(kname == n for n, _ in api_keys):
+            refuse("config.auth", "api_key name %s is listed twice" % kname, "api_key", i, "name")
+        if not isinstance(digest, str) or not KEY_DIGEST.fullmatch(digest):
+            refuse("config.auth", "api_key %s: sha256 must be exactly 64 lowercase hexadecimal digits: the SHA-256 of the key (scripts/mkkey.py makes both)" % kname, "api_key", i, "sha256")
+        if any(digest == d for _, d in api_keys):
+            refuse("config.auth", "api_key %s has the same sha256 as another key: one credential cannot be two identities" % kname, "api_key", i, "sha256")
+        api_keys.append((kname, digest))
+    key_names = [n for n, _ in api_keys]
     routes_in = doc.get("route", [])
     if len(routes_in) > MAX_ROUTES:
         refuse("config.routes", "%d routes; the bound is %d" % (len(routes_in), MAX_ROUTES), "route", MAX_ROUTES)
@@ -346,9 +409,12 @@ def load(path):
                 not all(isinstance(o, str) and len(o) <= 200 and ORIGIN.fullmatch(o) for o in origins):
             refuse("config.websocket", "origins must be at most %d distinct strings of the form scheme://host[:port], lowercase, no path and no trailing slash" % MAX_ORIGINS,
                    "route", i, "origins")
-        rate = rate_options(r, trust, refuse, i)
+        auth = auth_options(r, key_names, refuse, i)
+        if auth["auth"] and not api_keys:
+            refuse("config.auth", "auth needs at least one [[api_key]]: a route nobody can enter (docs/auth.md section 6)", "route", i, "auth")
+        rate = rate_options(r, trust, bool(auth["auth"]), refuse, i)
         routes.append({"host": host, "prefix": prefix, "mask": mask, "upstream": names[up], "max_body": body,
-                       "trust": 1 if trust else 0, "name": label, "ws": 1 if ws else 0, "protocols": protocols, "origins": origins, **rate})
+                       "trust": 1 if trust else 0, "name": label, "ws": 1 if ws else 0, "protocols": protocols, "origins": origins, **rate, **auth})
     base = 0
     for j, r in enumerate(routes):
         r["base"] = base
@@ -357,6 +423,20 @@ def load(path):
             refuse("config.ratelimit", "the routes' rate-limit tables add up to more than %d buckets (a route key counts one)" % BUCKETS_TOTAL, "route", j,
                    "rate_buckets" if "rate_buckets" in routes_in[j] else "rate_limit")
     timeouts["rate_total"] = base
+    auth_routes = [j for j, r in enumerate(routes) if r["auth"]]
+    if api_keys and not auth_routes:
+        refuse("config.auth", "[[api_key]] and no route with auth: the digests would be in the binary and protect nothing", "api_key", 0)
+    plain_ok = doc.get("auth_allow_plain", False)
+    if not isinstance(plain_ok, bool):
+        refuse("config.auth", "auth_allow_plain must be true or false (docs/auth.md section 7.3)", key="auth_allow_plain")
+    if "auth_allow_plain" in doc and (not auth_routes or listen == 0):
+        refuse("config.auth", "auth_allow_plain needs a plain listen and a route with auth", key="auth_allow_plain")
+    if auth_routes and listen != 0 and not plain_ok:
+        refuse("config.auth", "route %s has auth and the deployment has a plain listen: a key would cross the network in clear. Serve TLS (tls_listen) only, or set "
+               "auth_allow_plain = true if the plain port is reachable only through a TLS-terminating front (docs/auth.md section 7.3)" % routes[auth_routes[0]]["name"],
+               "route", auth_routes[0], "auth")
+    timeouts["api_keys"] = api_keys
+    timeouts["auth_plain"] = plain_ok
     ws_keys = [k for k in ("ws_idle_timeout_ms", "ws_max_lifetime_ms", "ws_max_tunnels") if k in doc]
     if ws_keys and not any(r["ws"] for r in routes):
         refuse("config.websocket", "%s needs a route with websocket = true" % ws_keys[0], key=ws_keys[0])
@@ -493,23 +573,30 @@ def render_deploy(listen, ups, timeouts):
 def table_blob(routes):
     """One line per route: host (or *), prefix, method bitmask, upstream index, max body, trust_forwarded (0 or 1), name, websocket (0 or 1), subprotocols
     (comma-separated), origins (comma-separated), then the rate limit (docs/ratelimit.md): tokens per period (0: none), the period in ms, the burst, the key
-    (empty, `r`, `x:l`, `x:f` or `h:<lowercase name>`), the buckets, and where the route's buckets begin; tab-separated, in file order."""
-    return "".join("%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t%s\t%d\t%d\n" % (
+    (empty, `r`, `a`, `x:l`, `x:f` or `h:<lowercase name>`), the buckets, and where the route's buckets begin; then authentication (docs/auth.md): 1 if the route
+    authenticates, the lowercase header it reads, 1 if it forwards the credential, the allowed key indices (`*` for all, else comma-separated), and the
+    `WWW-Authenticate` challenge; tab-separated, in file order."""
+    return "".join("%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%s\t%d\t%s\t%s\n" % (
         r["host"] or "*", r["prefix"], r["mask"], r["upstream"], r["max_body"], r["trust"], r["name"], r["ws"], ",".join(r["protocols"]), ",".join(r["origins"]),
-        r["rate"], r["per_ms"], r["burst"], r["rate_key"], r["buckets"], r["base"]) for r in routes)
+        r["rate"], r["per_ms"], r["burst"], r["rate_key"], r["buckets"], r["base"],
+        r["auth"], r["auth_header"], r["auth_forward"], r["auth_keys"], r["challenge"]) for r in routes)
 
 
-def render_routes(routes, rate_total):
+def render_routes(routes, rate_total, api_keys):
     return "\n".join([
         "edition 5;", "", "module gateway.routes_table;", "",
         "// Generated by scripts/generate.py from a deployment file -- do not edit (docs/routes.md).",
         "// One line per route: host (`*` for any), path_prefix, method bitmask (GET 1, HEAD 2, POST 4, PUT 8, DELETE 16,",
         "// PATCH 32, OPTIONS 64), upstream index, max body, trust_forwarded (0 or 1), name, websocket (0 or 1), subprotocols and origins (comma-separated, possibly",
         "// empty; docs/websocket.md), then the rate limit (docs/ratelimit.md): tokens per period (0: none), the period in ms, the burst, the key, the buckets, and the",
-        "// first bucket of the route's table. Tab-separated, in file order; `gateway.route` reads it.", "",
+        "// first bucket of the route's table, then authentication (docs/auth.md): 1 if the route authenticates, the header it reads, 1 if it forwards the credential, the",
+        "// allowed key indices (`*`: all) and the WWW-Authenticate challenge. Tab-separated, in file order; `gateway.route` reads it.", "",
         "pub fn count() -> [] int {", "    return %d;" % len(routes), "}", "",
         "// The buckets of every route's rate-limit table, added up (docs/ratelimit.md section 6): what the table is sized to.",
         "pub fn rate_buckets_total() -> [] int {", "    return %d;" % rate_total, "}", "",
+        "// The API keys (docs/auth.md section 4.1): one line per key, `name<TAB>sha256 as 64 lowercase hex digits`, in file order. Digests only: the binary holds no key.",
+        "pub fn key_count() -> [] int {", "    return %d;" % len(api_keys), "}", "",
+        "pub fn keys_blob() -> [] &static [byte] {", "    return %s;" % literal("".join("%s\t%s\n" % k for k in api_keys)), "}", "",
         "pub fn blob() -> [] &static [byte] {", "    return %s;" % literal(table_blob(routes)), "}", ""])
 
 
@@ -535,7 +622,7 @@ def main():
         print(json.dumps({"file": args[0], "hint": r.hint, "key": r.key, "line": r.line, "message": str(r), "rule": r.rule},
                          sort_keys=True), file=sys.stderr)
         return 2
-    outputs = {"deploy.cho": render_deploy(listen, ups, timeouts), "routes.cho": render_routes(routes, timeouts["rate_total"]), "tlsfiles.cho": render_tlsfiles(timeouts["tls"])}
+    outputs = {"deploy.cho": render_deploy(listen, ups, timeouts), "routes.cho": render_routes(routes, timeouts["rate_total"], timeouts["api_keys"]), "tlsfiles.cho": render_tlsfiles(timeouts["tls"])}
     if "--explain" in flags:
         prefix = intended_prefix([a for _, a in ups])
         print("listen %s; %d upstream(s): %s" % (listen or "none (TLS only)", len(ups), ", ".join(a for _, a in ups)))
@@ -552,7 +639,10 @@ def main():
         for n, r in enumerate(routes):
             print("route %d: %s %s -> %s (max body %d%s)" % (n, r["host"] or "*", r["prefix"], ups[r["upstream"]][0], r["max_body"], ", trusts forwarding headers" if r["trust"] else "") +
                   ("; websocket, subprotocols %s, origins %s" % (r["protocols"] or "none", r["origins"] or "none") if r["ws"] else "") +
-                  ("; limit %d per %d ms, burst %d, key %s, %d bucket(s)" % (r["rate"], r["per_ms"], r["burst"], r["rate_key"], r["buckets"]) if r["rate"] else ""))
+                  ("; limit %d per %d ms, burst %d, key %s, %d bucket(s)" % (r["rate"], r["per_ms"], r["burst"], r["rate_key"], r["buckets"]) if r["rate"] else "") +
+                  ("; authenticates with the %s header, keys %s%s" % (r["auth_header"], r["auth_keys"] if r["auth_keys"] != "*" else "all", ", forwards the credential" if r["auth_forward"] else "") if r["auth"] else ""))
+        if timeouts["api_keys"]:
+            print("api keys: %s (digests only compiled in)%s" % (", ".join(n for n, _ in timeouts["api_keys"]), "; the plain listener is allowed (auth_allow_plain): keys are protected by a front" if timeouts["auth_plain"] else ""))
         return 0
     target = out_dir or ROOT / "generated"
     if "--check" in flags:
