@@ -260,8 +260,10 @@ class Upstream:
             key = h["sec-websocket-key"][0].encode()
             offered = [t.strip() for v in h.get("sec-websocket-protocol", []) for t in v.split(",") if t.strip()]
             response = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n" % wt.accept_for(key).decode()
-            if "ocpp1.6" in offered:
-                response += "Sec-WebSocket-Protocol: ocpp1.6\r\n"
+            for token in ("ocpp1.6", "ocpp2.0.1"):
+                if token in offered:
+                    response += "Sec-WebSocket-Protocol: %s\r\n" % token
+                    break
             s.sendall((response + "\r\n").encode())
             conn = Conn(s, rest, path)
             with self.lock:
