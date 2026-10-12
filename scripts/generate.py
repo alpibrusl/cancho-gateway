@@ -54,6 +54,7 @@ MAX_SUBPROTOCOLS = 8
 # WebSocket frames (docs/websocket-frames.md sections 4, 6, 7 and 10): the longest message a route carries (per route, summed over its fragments), the keepalive Ping the gateway
 # sends a silent client (0: none) and how long its Pong may take, and how long the gateway waits for a Close frame's answer (and for a frame boundary to put one at).
 WS_MESSAGE, WS_MESSAGE_RANGE = 1 << 20, (1024, 1 << 28)
+OCPP_VERSIONS = {"1.6": 1, "2.0.1": 2}      # ws_ocpp (docs/ocpp.md section 7): the bit each version has in the route table's column
 WS_PING_RANGE = (1000, 86400000)
 WS_PONG_MS, WS_PONG_RANGE = 10000, (100, 600000)
 WS_CLOSE_MS, WS_CLOSE_RANGE = 5000, (100, 60000)
@@ -89,7 +90,7 @@ KEYS = {
     "upstream": ["name", "addr"],
     "api_key": ["name", "sha256"],
     "jwt_key": ["name", "public_key"],
-    "route": ["name", "host", "path_prefix", "methods", "upstream", "max_body", "trust_forwarded", "websocket", "subprotocols", "origins", "ws_max_message_bytes",
+    "route": ["name", "host", "path_prefix", "methods", "upstream", "max_body", "trust_forwarded", "websocket", "subprotocols", "origins", "ws_max_message_bytes", "ws_ocpp",
               "rate_limit", "rate_burst", "rate_key", "rate_buckets", "auth", "auth_header", "auth_keys", "auth_forward",
               "jwt_alg", "jwt_keys", "jwt_aud", "jwt_iss", "jwt_leeway"],
 }
@@ -527,6 +528,19 @@ def load(path):
                 not all(isinstance(o, str) and len(o) <= 200 and ORIGIN.fullmatch(o) for o in origins):
             refuse("config.websocket", "origins must be at most %d distinct strings of the form scheme://host[:port], lowercase, no path and no trailing slash" % MAX_ORIGINS,
                    "route", i, "origins")
+        ocpp = 0
+        if "ws_ocpp" in r:
+            if not ws:
+                refuse("config.websocket", "ws_ocpp needs websocket = true on the same route", "route", i, "ws_ocpp")
+            want = r["ws_ocpp"]
+            want = [want] if isinstance(want, str) else want
+            if not isinstance(want, list) or not 1 <= len(want) <= len(OCPP_VERSIONS) or len(set(map(str, want))) != len(want) or \
+                    not all(isinstance(v, str) and v in OCPP_VERSIONS for v in want):
+                refuse("config.websocket", "ws_ocpp must be \"1.6\", \"2.0.1\" or a list of distinct versions of them (docs/ocpp.md section 7)", "route", i, "ws_ocpp")
+            if sorted(protocols) != sorted("ocpp" + v for v in want):
+                refuse("config.websocket", "ws_ocpp = %s needs subprotocols to be exactly %s: the handshake then admits only the versions whose frames are checked (docs/ocpp.md section 7)" % (
+                    json.dumps(want), json.dumps(sorted("ocpp" + v for v in want))), "route", i, "subprotocols" if "subprotocols" in r else "ws_ocpp")
+            ocpp = sum(OCPP_VERSIONS[v] for v in want)
         auth = auth_options(r, key_names, jwt_names, refuse, i)
         if auth["auth"] & 1 and not api_keys:
             refuse("config.auth", "auth needs at least one [[api_key]]: a route nobody can enter (docs/auth.md section 6)", "route", i, "auth")
@@ -537,7 +551,7 @@ def load(path):
             who = key_names if auth["auth_keys"] == "*" else [key_names[int(x)] for x in auth["auth_keys"].split(",") if x]
         rate = rate_options(r, trust, who, refuse, i, jwt=bool(auth["auth"] & 2))
         routes.append({"host": host, "prefix": prefix, "mask": mask, "upstream": names[up], "max_body": body,
-                       "trust": 1 if trust else 0, "name": label, "ws": 1 if ws else 0, "protocols": protocols, "origins": origins, "ws_message": ws_message, **rate, **auth})
+                       "trust": 1 if trust else 0, "name": label, "ws": 1 if ws else 0, "protocols": protocols, "origins": origins, "ws_message": ws_message, "ws_ocpp": ocpp, **rate, **auth})
     base = 0
     for j, r in enumerate(routes):
         r["base"] = base
@@ -717,11 +731,11 @@ def table_blob(routes):
     (empty, `r`, `a`, `x:l`, `x:f` or `h:<lowercase name>`), the buckets, and where the route's buckets begin; then authentication (docs/auth.md): 1 if the route
     authenticates (1 API keys, 2 JWTs, 3 both), the lowercase header it reads, 1 if it forwards the credential, the allowed key indices (`*` for all, else comma-separated), and the
     `WWW-Authenticate` challenge; then the JWT fields (docs/jwt.md): the allowed JWT key indices, the required audience and issuer (empty: none) and the leeway in seconds;
-    then the route's `ws_max_message_bytes` (docs/websocket-frames.md); tab-separated, in file order."""
-    return "".join("%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\n" % (
+    then the route's `ws_max_message_bytes` (docs/websocket-frames.md) and `ws_ocpp` (docs/ocpp.md: 1 for 1.6, 2 for 2.0.1, 3 for both, 0 for none); tab-separated, in file order."""
+    return "".join("%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\n" % (
         r["host"] or "*", r["prefix"], r["mask"], r["upstream"], r["max_body"], r["trust"], r["name"], r["ws"], ",".join(r["protocols"]), ",".join(r["origins"]),
         r["rate"], r["per_ms"], r["burst"], r["rate_key"], r["buckets"], r["base"],
-        r["auth"], r["auth_header"], r["auth_forward"], r["auth_keys"], r["challenge"], r["jwt_keys"], r["jwt_aud"], r["jwt_iss"], r["jwt_leeway"], r["ws_message"]) for r in routes)
+        r["auth"], r["auth_header"], r["auth_forward"], r["auth_keys"], r["challenge"], r["jwt_keys"], r["jwt_aud"], r["jwt_iss"], r["jwt_leeway"], r["ws_message"], r["ws_ocpp"]) for r in routes)
 
 
 def render_routes(routes, rate_total, api_keys, jwt_keys):
@@ -733,7 +747,7 @@ def render_routes(routes, rate_total, api_keys, jwt_keys):
         "// empty; docs/websocket.md), then the rate limit (docs/ratelimit.md): tokens per period (0: none), the period in ms, the burst, the key, the buckets, and the",
         "// first bucket of the route's table, then authentication (docs/auth.md): 1 if the route authenticates, the header it reads, 1 if it forwards the credential, the",
         "// allowed key indices (`*`: all) and the WWW-Authenticate challenge, then the JWT fields (docs/jwt.md): the allowed public-key indices, the required audience and issuer",
-        "// (empty: none) and the leeway in seconds, then the WebSocket message limit (docs/websocket-frames.md). Tab-separated, in file order; `gateway.route` reads it.", "",
+        "// (empty: none) and the leeway in seconds, then the WebSocket message limit (docs/websocket-frames.md) and the OCPP-J versions whose frames are validated (docs/ocpp.md). Tab-separated, in file order; `gateway.route` reads it.", "",
         "pub fn count() -> [] int {", "    return %d;" % len(routes), "}", "",
         "// The buckets of every route's rate-limit table, added up (docs/ratelimit.md section 6): what the table is sized to.",
         "pub fn rate_buckets_total() -> [] int {", "    return %d;" % rate_total, "}", "",
@@ -785,7 +799,7 @@ def main():
         print("intended egress prefix: %s" % (repr(prefix) if prefix else "none (no shared prefix)"))
         for n, r in enumerate(routes):
             print("route %d: %s %s -> %s (max body %d%s)" % (n, r["host"] or "*", r["prefix"], ups[r["upstream"]][0], r["max_body"], ", trusts forwarding headers" if r["trust"] else "") +
-                  ("; websocket, subprotocols %s, origins %s, messages up to %d bytes" % (r["protocols"] or "none", r["origins"] or "none", r["ws_message"]) if r["ws"] else "") +
+                  ("; websocket, subprotocols %s, origins %s, messages up to %d bytes%s" % (r["protocols"] or "none", r["origins"] or "none", r["ws_message"], "; validates OCPP-J frames (%s)" % ", ".join(v for v, bit in OCPP_VERSIONS.items() if r["ws_ocpp"] & bit) if r["ws_ocpp"] else "") if r["ws"] else "") +
                   ("; limit %d per %d ms, burst %d, key %s, %d bucket(s)" % (r["rate"], r["per_ms"], r["burst"], r["rate_key"], r["buckets"]) if r["rate"] else "") +
                   ("; authenticates with the %s header, %s%s" % (r["auth_header"], ("keys %s" % ("all" if r["auth_keys"] == "*" else ", ".join(timeouts["api_keys"][int(x)][0] for x in r["auth_keys"].split(",")))) if r["auth"] & 1 else "jwt only",
                                                                 ", forwards the credential" if r["auth_forward"] else "") if r["auth"] else ""))
