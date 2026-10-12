@@ -194,7 +194,32 @@ def vectors():
     v["bad_iss_array"] = tok(payload=with_(GOOD_P, iss=["https://iss.example"]))
     v["bad_payload_big"] = tok(payload=with_(GOOD_P, pad="x" * 1100))
     v["bad_token_big"] = tok(payload=with_(GOOD_P, pad="x" * 1000)) + "A" * 1000
+    v["bad_nbf_negative"] = tok(payload=with_(GOOD_P, nbf=-5))
+    # The sizes to the byte: a header of 192 bytes (256 characters) and a payload of 1,024 bytes (1,366 characters) are the largest accepted, one byte more is refused.
+    for name, seg_limit, make_json in (("header", 192, lambda pad: b'{"alg":"EdDSA","kid":"k1","pad":"%s"}' % (b"x" * pad)),
+                                       ("payload", 1024, lambda pad: b'{"exp":%d,"aud":"api","iss":"https://iss.example","pad":"%s"}' % (EXP, b"x" * pad))):
+        empty = len(make_json(0))
+        for extra, label in ((0, "ok_%s_max"), (1, "bad_%s_over")):
+            raw = make_json(seg_limit - empty + extra)
+            assert len(raw) == seg_limit + extra
+            v[label % name] = tok(raw_header=raw) if name == "header" else tok(raw_payload=raw)
+    # A small-order public key (the point of order 4, y = 0) verifies a forged signature for a message in four: R the identity, S zero. No such key can be configured (the generator refuses it,
+    # rule 19); the verifier on its own does not protect against it, which the unit test records. The message is varied until the forgery verifies.
+    zero_key = bytes(32)
+    for n in range(200):
+        header_text = b64j_({"alg": "EdDSA", "kid": "k1"})
+        payload_text = b64j_({"exp": EXP, "aud": "api", "iss": "https://iss.example", "n": n})
+        sig = bytes([1]) + bytes(31) + bytes(32)
+        if jwtkit.verify(zero_key, (header_text + "." + payload_text).encode(), sig):
+            v["forged_small_order"] = header_text + "." + payload_text + "." + jwtkit.b64u(sig)
+            break
+    else:
+        raise SystemExit("no forgery found for the small-order key")
     return v
+
+
+def b64j_(obj):
+    return jwtkit.b64u(json.dumps(obj, separators=(",", ":")).encode())
 
 
 def b64_cases():
@@ -240,6 +265,8 @@ def render():
     lines += ["pub fn now() -> [] int {", "    return %d;" % NOW, "}", ""]
     lines += ["pub fn exp() -> [] int {", "    return %d;" % EXP, "}", ""]
     lines += ["pub fn keys() -> [] &static [byte] {", "    return %s;" % lit("k1\t%s\nk2\t%s\n" % (PK1, PK2)), "}", ""]
+    lines += ["// The key of order 4 (all zero bytes) and a damaged one that decodes to 3 bytes.", "pub fn keys_small() -> [] &static [byte] {", "    return %s;" % lit("k1\t%s\n" % ("A" * 43)), "}", ""]
+    lines += ["pub fn keys_damaged() -> [] &static [byte] {", "    return %s;" % lit("k1\tAAAA\n"), "}", ""]
     for name, token in vectors().items():
         lines += ["pub fn v_%s() -> [] &static [byte] {" % name, "    return %s;" % lit(token), "}", ""]
     cases = b64_cases()

@@ -188,6 +188,25 @@ fn test_base64url_that_is_not_canonical_or_not_url_safe_is_malformed() -> [] int
     return 0;
 }
 
+fn test_the_largest_header_and_payload_are_accepted_and_one_byte_more_is_not() -> [] int {
+    test.assert(check(jwt_vectors.v_ok_header_max()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_header_over()) == 1);
+    test.assert(check(jwt_vectors.v_ok_payload_max()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_payload_over()) == 1);
+    return 0;
+}
+
+// A public key of small order (the point of order 4: all zero bytes) verifies a forged signature (R the identity, S zero) for one message in four. `jwt.verify` does not defend against
+// a key like that, and `std.ed25519.verify` accepts it: what keeps one out of the table is the generator (rule 19, `tests/generate_test.py`), and this test says so.
+fn test_a_small_order_key_would_verify_a_forgery_so_the_generator_refuses_one_and_a_damaged_key_verifies_nothing() -> [] int {
+    let now = jwt_vectors.now();
+    test.assert(jwt.verify(jwt_vectors.v_forged_small_order(), jwt_vectors.keys_small(), "*", "api", "https://iss.example", 0, now) == 1);
+    test.assert(jwt.verify(jwt_vectors.v_forged_small_order(), jwt_vectors.keys(), "*", "api", "https://iss.example", 0, now) == 0 - 11);
+    // The same table with the key damaged so that it decodes to 3 bytes: refused, not read as a zero key.
+    test.assert(jwt.verify(jwt_vectors.v_forged_small_order(), jwt_vectors.keys_damaged(), "*", "api", "https://iss.example", 0, now) == 0 - 11);
+    return 0;
+}
+
 fn test_the_size_caps_are_exact() -> [] int {
     test.assert(rule(jwt_vectors.v_bad_header_big()) == 1);
     test.assert(rule(jwt_vectors.v_bad_payload_big()) == 1);
@@ -305,6 +324,7 @@ fn test_exp_is_required_and_every_time_claim_is_a_bounded_integer() -> [] int {
     test.assert(rule(jwt_vectors.v_bad_exp_bool()) == 5);
     test.assert(rule(jwt_vectors.v_bad_exp_array()) == 5);
     test.assert(rule(jwt_vectors.v_bad_nbf_float()) == 5);
+    test.assert(rule(jwt_vectors.v_bad_nbf_negative()) == 5);
     test.assert(rule(jwt_vectors.v_bad_nbf_string()) == 5);
     test.assert(rule(jwt_vectors.v_bad_iat_string()) == 5);
     test.assert(rule(jwt_vectors.v_bad_iat_float()) == 5);

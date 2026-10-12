@@ -261,7 +261,8 @@ fn header_rule[&s, &t, &k, &a](doc: &s [byte], tape: &t [int], keys: &k [byte], 
         return 0 - 3;
     }
     let typ = json.get(doc, tape, 0, "typ");
-    if typ >= 0 && !(json.string_plain(tape, typ) && lower_equals(json.string_view(doc, tape, typ), "jwt")) {
+    // `string_view` is the text between the quotes as written: a typ spelt with an escape never equals "jwt", and a typ that is no string has an empty view.
+    if typ >= 0 && !lower_equals(json.string_view(doc, tape, typ), "jwt") {
         return 0 - 3;
     }
     let key = pick_key(doc, tape, keys, allowed);
@@ -303,11 +304,9 @@ fn claims_rule[&s, &t, &u, &i](doc: &s [byte], tape: &t [int], aud: &u [byte], i
     if l > max_leeway() {
         l = max_leeway();
     }
-    // The clock, clamped to the range of times a token can name, so that no sum below can overflow whatever the caller passes.
+    // The clock, cut at twice the largest time a token can name, so that `exp + l` and `t + l` below cannot overflow whatever the caller passes. (A negative clock needs no cut: it is
+    // below the floor and refused next.)
     var t = now;
-    if t < 0 {
-        t = 0;
-    }
     if t > 2 * json_claims.max_time() {
         t = 2 * json_claims.max_time();
     }
@@ -317,7 +316,8 @@ fn claims_rule[&s, &t, &u, &i](doc: &s [byte], tape: &t [int], aud: &u [byte], i
     if t >= exp + l {
         return 0 - 6;
     }
-    if nbf >= 0 && t + l < nbf {
+    // An absent `nbf` is `0 - 1`, which `t + l` (at least the floor) is never below.
+    if t + l < nbf {
         return 0 - 7;
     }
     if len(iss) > 0 && !json_claims.string_claim_is(doc, tape, "iss", iss) {
