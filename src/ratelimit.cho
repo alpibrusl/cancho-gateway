@@ -223,7 +223,8 @@ pub fn admit_route[&t, &k](table: &!t [int], base: int, buckets: int, key: &k [b
     if verdict != 0 || c_rate < 1 {
         return verdict;
     }
-    if ceil_at < 0 || ceil_at >= len(table) / bucket_ints() {
+    // (A negative place is `admit`'s own refusal below. This guard is for a place so large that `admit` would overflow adding the one bucket to it.)
+    if ceil_at >= len(table) / bucket_ints() {
         return route_offset() + 1;
     }
     let wait = admit(table, ceil_at, 1, "", c_rate, c_per_ms, c_burst, now);

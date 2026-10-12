@@ -1533,6 +1533,11 @@ class T:
         # 6. The trial's success closed it and forgot the count: everything goes through, and it takes three fresh failures to open it again.
         for _ in range(6):
             assert split(request(gw, GET % b"/flap/ok"))[0] == 200
+        # Closed, not merely "half open with nobody in flight": four at once are all let through (a half-open circuit would let one).
+        accepted = flap.accepted
+        results = burst(b"/flap/slow", 4)
+        assert sorted(r[0] for r in results) == [200] * 4, results
+        assert flap.accepted - accepted >= 1
         assert refusal(request(gw, GET % b"/flap/garbage"))[0] == 502
         assert refusal(request(gw, GET % b"/flap/garbage"))[0] == 502
         assert split(request(gw, GET % b"/flap/ok"))[0] == 200, "the count of failures was not forgotten when the trial succeeded"

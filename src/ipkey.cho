@@ -191,7 +191,7 @@ fn is_mapped[&b](buf: &b [byte], at: int) -> [] bool {
 // The key of the `X-Forwarded-For` element `elem` when it is an IPv6 literal (square brackets and a port allowed), written at the start of `buf`; its length. 0 if it is not one: the caller keys on the text.
 //   - an IPv4-mapped address is the dotted-decimal text of the IPv4 address it carries (so it is the same key as the address written as IPv4, and a front that talks to IPv4 clients through a dual-stack
 //     socket does not put them all in one /64);
-//   - any other is `v` and the 32 lowercase hexadecimal digits of the address with every bit after the first `prefix` bits zeroed (a `prefix` outside 1..128 is 128: no aggregation).
+//   - any other is `v` and the 32 lowercase hexadecimal digits of the address with every bit after the first `prefix` bits zeroed (a `prefix` below 1 is 128: no aggregation; one above 128 keeps every bit, which is the same).
 pub fn aggregate[&e, &b](elem: &e [byte], prefix: int, buf: &!b [byte]) -> [] int {
     if len(elem) < 2 || len(elem) > element_max() || len(buf) < scratch_len() {
         return 0;
@@ -244,7 +244,7 @@ pub fn aggregate[&e, &b](elem: &e [byte], prefix: int, buf: &!b [byte]) -> [] in
         return k;
     }
     var bits = prefix;
-    if bits < 1 || bits > 128 {
+    if bits < 1 {
         bits = 128;
     }
     var k = out.put_byte(buf, 0, 'v');
