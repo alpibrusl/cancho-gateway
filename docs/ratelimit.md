@@ -1,8 +1,9 @@
 # Rate limiting (task #9)
 
-Status: **built (2026-10-12).** Sections 1 to 11 are the design, written before the code; section 12 is what was built and measured. The gates in section 10 are fixed here
-and must be able to fail. A claim found false later is corrected in place and marked *(corrected)*. Claims about cancho are about the pinned
-compiler (`cancho.toml`, `2fcf4cd`).
+Status: **built (2026-10-12); second slice (a route-wide ceiling, IPv6 aggregation, the circuit's half-open trial) designed in section 13 before its code.** Sections 1 to 11 are the design,
+written before the code; section 12 is what was built and measured, section 13 is the second slice's design and section 14 what it built and measured. The gates in section 10 are fixed here
+and must be able to fail. A claim found false later is corrected in place and marked *(corrected)*; a claim the second slice made untrue by building what it said was not built is
+marked *(changed in slice 2)*. Claims about cancho are about the pinned compiler (`cancho.toml`, `2fcf4cd`).
 
 `docs/design.md` section 4 reserved a row for this, "rate-limit keys, 65,536, policy in #9, 429", and `docs/proxy.md` listed "rate limits (#9)"
 among what was not built. This document is the policy. Its first job is to say what a limiter built **without the client's address** can and
@@ -29,12 +30,12 @@ first element of `X-Forwarded-For` on a route that believes forwarding claims); 
 | not done | why |
 |---|---|
 | a limit per client address | impossible (section 1) |
-| a route-wide ceiling *above* per-key buckets (two limits on one route) | would close the rotation evasion of section 3.3, at the price of a second table and a second refusal rule. A header key rotated per request is unprotected until it exists (section 3.3). Recorded in section 11 as the first follow-up |
+| a route-wide ceiling *above* per-key buckets (two limits on one route) | *(changed in slice 2: built, section 13.1.)* It was not built in the first slice: it needs a second refusal rule and, as it turned out, only one more bucket per route, not a second table |
 | limits on bytes, on connection rate, on concurrent requests | this limits **requests started**, one token each |
 | a shared limit across several gateways | one process, one table |
 | a limit on the admin listener | it is bounded already (`docs/observability.md` section 7) |
 | limiting responses, or a global limit across routes | per route only: a deployment that wants a global limit puts the same upstream behind one route |
-| IPv6 prefix aggregation of an `X-Forwarded-For` key | the key is the text of the element (section 3.3) |
+| IPv6 prefix aggregation of an `X-Forwarded-For` key | *(changed in slice 2: built, section 13.2.)* In the first slice the key was the text of the element |
 
 ## 3. The key
 
@@ -87,13 +88,13 @@ For `key = "route"` there is exactly one key, so every request is in the one buc
 | key | evasion | what stays true |
 |---|---|---|
 | `route` | none: the client chooses nothing | one client can exhaust the shared budget (3.2). The limit is a ceiling for the upstream |
-| `header:<Name>` | **rotate the value per request**: each new value is a fresh bucket with a full burst. Unless something in front of the gateway or behind it validates the header, this is the end of the protection | it is a limit **per credential**, useful when the credential is checked (by the upstream, which answers `401` to a forged key without doing the real work, or by a front that signs it). A client that omits the header, repeats it or sends it empty lands in the shared absent bucket (3.1). A client that knows another client's value can spend that client's budget (inherent to any shared-secret key) |
+| `header:<Name>` | **rotate the value per request**: each new value is a fresh bucket with a full burst. Unless something in front of the gateway or behind it validates the header, this is the end of the protection of the per-key buckets. *(changed in slice 2: a route-wide ceiling, section 13.1, bounds what the rotation can reach in total, at the price of the legitimate keys sharing it.)* | it is a limit **per credential**, useful when the credential is checked (by the upstream, which answers `401` to a forged key without doing the real work, or by a front that signs it). A client that omits the header, repeats it or sends it empty lands in the shared absent bucket (3.1). A client that knows another client's value can spend that client's budget (inherent to any shared-secret key) |
 | `xff:last` | none from the client **if the gateway is reachable only through the front** and the front *appends* the peer it saw: the last element is the front's observation, not the client's claim. A client that reaches the gateway directly (a port that is not firewalled) writes any element it likes | the left of the list is the client's; only the right is the front's. With two trusted fronts in a chain, the last element is the first front's address, not the client's |
 | `xff:first` | **prepend**: if the front appends instead of replacing, the first element is whatever the client sent. Only sound where the front *replaces* the header with the one address it saw | a route that sets it believes the client's own claim in the one deployment shape where the claim is true |
-| both `xff:*` | an IPv6 client rotates inside its /64 (2^64 distinct texts); the text of the element is the key, `::1` and `0:0:0:0:0:0:0:1` are two keys | no address parsing or prefix aggregation is done (section 2) |
+| both `xff:*` | *(changed in slice 2)* in the first slice: an IPv6 client rotated inside its /64 (2^64 distinct texts); the text of the element was the key, `::1` and `0:0:0:0:0:0:0:1` were two keys, and no address was parsed. Now an element that is an IPv6 literal is keyed on its first `rate_xff_prefix` bits (default 64), so rotating inside the prefix is one bucket (section 13.2) | an element that is not a well-formed IPv6 literal (a zone id, a stray character, an IPv4 with a port) is still keyed on its text: a client that controls the text still gets a fresh bucket per spelling, and one that owns several /64s gets one bucket for each |
 | any | **fill the table with junk keys** so that new keys are refused (section 6.4): a denial of service to *new* keys of the same route, at a cost of about one request per bucket per refill window. Existing keys keep their buckets | it is a failure of availability for new keys, never of the upstream: nothing reaches the upstream that was not admitted |
 
-The honest summary: **`route` is a hard ceiling on one route; `header:` and `xff:` are fairness between keys, only as strong as the key.** Neither stops a hostile client
+The honest summary *(changed in slice 2: with `rate_route_limit` set, every key form is also under a ceiling, but the ceiling is still not fairness)*: **`route` is a hard ceiling on one route; `header:` and `xff:` are fairness between keys, only as strong as the key.** Neither stops a hostile client
 that controls its key, which is why `route` is the default and why the header forms say what they trust.
 
 ## 4. Deployment keys
@@ -108,6 +109,9 @@ Per route, in the deployment file (`scripts/generate.py`; refusal tag `config.ra
     rate_burst = 200              # the bucket's size: requests admitted at once after an idle time (default: N)
     rate_key = "header:X-Api-Key" # "route" (default), "header:<Name>", "xff:last", "xff:first"
     rate_buckets = 4096           # the table's size for this route (default 1024; not with "route")
+    rate_route_limit = "1000/s"   # slice 2 (section 13.1): a ceiling for the whole route, spent by every key that passed its own bucket
+    rate_route_burst = 2000       # the ceiling's bucket size (default: its N)
+    rate_xff_prefix = 64          # slice 2 (section 13.2): the IPv6 prefix an xff key is aggregated on (1..128, default 64; with "xff:last" and "xff:first" only)
 
 | key | value | default |
 |---|---|---|
@@ -115,6 +119,9 @@ Per route, in the deployment file (`scripts/generate.py`; refusal tag `config.ra
 | `rate_burst` | an integer in 1..1,000,000 | `N` |
 | `rate_key` | `route`, `xff:last`, `xff:first`, or `header:` and a name | `route` |
 | `rate_buckets` | an integer, a multiple of 4, in 4..65,536 | 1024 (a `route` key has one bucket and takes no `rate_buckets`) |
+| `rate_route_limit` | as `rate_limit` | none: no ceiling |
+| `rate_route_burst` | as `rate_burst` | the ceiling's `N` |
+| `rate_xff_prefix` | an integer in 1..128 | 64 with an `xff:*` key |
 
 The refusals, each `config.ratelimit` with the key and the line of the file:
 
@@ -127,9 +134,15 @@ The refusals, each `config.ratelimit` with the key and the line of the file:
 | 5 | the name is one the gateway removes or owns: `Connection`, `Keep-Alive`, `Proxy-Connection`, `Proxy-Authorization`, `TE`, `Trailer`, `Upgrade` (hop-by-hop), `Content-Length`, `Transfer-Encoding`, `Host` (framing and routing) |
 | 6 | `xff:last`, `xff:first`, or a `header:` key naming `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Forwarded-Port` or `X-Real-IP`, without `trust_forwarded = true` |
 | 7 | `rate_buckets` with `rate_key = "route"`, or not an integer that is a multiple of 4 in 4..65,536 |
-| 8 | the routes' buckets add up to more than 65,536 (`route` keys count one each) |
+| 8 | the routes' buckets add up to more than 65,536 (`route` keys count one each; *a ceiling counts one more for its route, slice 2*) |
+| 9 | `rate_route_limit` is not `N/s`, `N/m` or `N/h` with `N` in 1..1,000,000 *(slice 2)* |
+| 10 | `rate_route_burst` is not an integer in 1..1,000,000 *(slice 2)* |
+| 11 | `rate_route_burst` without `rate_route_limit`, or either without `rate_limit`, on the same route *(slice 2)* |
+| 12 | `rate_route_limit` with `rate_key = "route"`: the route's one bucket already is the ceiling *(slice 2)* |
+| 13 | `rate_xff_prefix` is not an integer in 1..128 *(slice 2)* |
+| 14 | `rate_xff_prefix` without `rate_key = "xff:last"` or `"xff:first"` *(slice 2)* |
 
-The totals fix the memory: at most **65,536 buckets of three 8-byte integers: 1.5 MiB**, allocated once at start (`design.md` section 4's row). The names are
+(The numbers in this table are the order the generator tests them in; rules 2 and 8 gain the slice-2 keys and counts in place.) The totals fix the memory: at most **65,536 buckets of three 8-byte integers: 1.5 MiB**, allocated once at start (`design.md` section 4's row). The names are
 lowercased when generated (`generated/routes.cho` carries them), so `header:X-API-Key` and `x-api-key` are one key.
 
 ## 5. The bucket (integer arithmetic only, no trap reachable)
@@ -223,7 +236,7 @@ a table that is too small (`rate_table_full` rising with `rate_limited` flat). W
 1. framing (`framing.judge`), routing (`route.select`): refusals as before; **none spends a token**;
 2. WebSocket: `websocket.judge`, then the tunnel cap `ws_max_tunnels`;
 3. the body: `limit.body` on a declared length over the route's `max_body`;
-4. **the rate limit: one token from the bucket of the route and key; `limit.rate` or `limit.rate-table`, 429**;
+4. **the rate limit: one token from the bucket of the route and key; `limit.rate` or `limit.rate-table`, 429**; *(slice 2)* then, if the route has a ceiling, one token from the ceiling: `limit.rate-route`, 429 (section 13.1);
 5. the circuit's admission (`proxy.circuit-open`) and everything after: the dial, the pool, the retry.
 
 So: **a refused request never reaches the upstream**, because the refusal is decided before the dial and the dial is not started; a request that was refused for another reason (a bad head, a body too large, no
@@ -254,6 +267,7 @@ past a limit during an outage). The limit comes **before** the circuit so that a
 |---|---|---|
 | `limit.rate` | 429 | the key's bucket holds less than one token |
 | `limit.rate-table` | 429 | the key has no bucket and its set has none to give (6.4) |
+| `limit.rate-route` | 429 | *(slice 2)* the key's bucket gave a token and the route's ceiling holds less than one (13.1) |
 
 ## 8. Per-request cost
 
@@ -267,7 +281,7 @@ and this is not in them.
   and their order are those of every other line (`docs/observability.md` section 2): this task adds no key to it. (As for every refusal after routing, `upstream` names the upstream the route *would* have used.)
 - **Metrics** (`docs/observability.md` section 6): per route, two counters, in the route's block of the stats array (slots 23 and 24 of its 32; no array grows): `rate_limited` (`limit.rate`) and `rate_table_full`
   (`limit.rate-table`). In JSON, two members at the end of each route's object, `"rate_limited"` and `"rate_table_full"`; in the Prometheus text, two families,
-  `cancho_gateway_rate_limited_total{route=...}` and `cancho_gateway_rate_table_full_total{route=...}`, before `refusals_total`. The refusals map also counts both rules by name, as for every rule. `metrics.worst_case()`
+  `cancho_gateway_rate_limited_total{route=...}` and `cancho_gateway_rate_table_full_total{route=...}`, before `refusals_total`. *(Slice 2 adds a third, `rate_route_limited` / `cancho_gateway_rate_route_limited_total`, in slot 40: section 13.1.)* The refusals map also counts both rules by name, as for every rule. `metrics.worst_case()`
   grows by the two families' lines and is tested to stay within a tenth of the largest answer (`tests/metrics_bound_test.cho`).
 
 ## 10. Gates, fixed before the code
@@ -290,9 +304,8 @@ Each must be able to fail, with a mutant shown failing it (section 12 records th
 
 ## 11. Not built, recorded
 
-- A route-wide ceiling above per-key buckets (the rotation evasion of 3.3).
+- *(changed in slice 2: the route-wide ceiling and IPv6 prefix aggregation are built, sections 13 and 14.)*
 - `rate_key = "peer"` when `conn_peer` exists.
-- IPv6 prefix aggregation for `xff:*`.
 - A cost other than one token per request (by method, by body size).
 - Sharing a table between routes, or between gateways.
 
@@ -404,3 +417,70 @@ refuses about one in five. These are the worst case: in service a bucket frees a
 | g08 | a boolean is a burst | killed | `tests/generate_test.py` |
 | g09 | rate_buckets without rate_limit is accepted | killed | `tests/generate_test.py` |
 | g10 | every route's table begins at bucket 0 | killed | `tests/generate_test.py` |
+
+## 13. The second slice, designed before its code (2026-10-12)
+
+Three changes, each closing something the first slice recorded as open: a route-wide ceiling (section 3.3's rotation evasion, section 11's first follow-up), IPv6 prefix aggregation for `xff:*` keys (section 3.3's
+last row), and a test of the circuit's half-open trial (`docs/health.md`). The claims in this section are what the gates of 13.4 must show; section 14 records what they showed.
+
+### 13.1 A route-wide ceiling
+
+`rate_route_limit` (and `rate_route_burst`) give a route a second token bucket, **one for the whole route, whatever the key**, applied *in addition to* the per-key bucket. Its arithmetic is section 5's, unchanged (it is
+the same `admit`, over a table of one bucket, with the empty key): so is every bound in the table of section 5, and no new product exists. Whatever many distinct keys do, **the route admits at most
+`ceiling_burst + ceiling_rate * T` requests in a window of `T` periods**, which is the claim the end-to-end test measures with 40 distinct keys against a ceiling of 5.
+
+- **Where the bucket lives.** In the one table, after the route's per-key buckets: the route's slice is `buckets + 1` buckets and the ceiling is the last of them. It counts toward the 65,536 of rule 8. It is
+  not part of any set of four, so no key can evict it, and it is never "full": it is always found. (A bucket that has refilled to its capacity is taken over by a fresh full one, which is the same bucket.)
+- **The order, and what each order costs.** The key's own bucket is consulted first; only a request it admitted asks the ceiling. So **a request refused by its own key (`limit.rate`, `limit.rate-table`) takes nothing
+  from the ceiling**: one hostile key, refused thousands of times, cannot drain the route's total and starve the others. The other order would make exactly that attack work. The price: **a request the key
+  admitted and the ceiling refused has spent its key's token**, with no refund. That fails towards limiting (the client waits for its own bucket as well as the ceiling), the arithmetic stays one-way, and a
+  refund would need the bucket's position, which the table's search does not return. The test pins this: a key's bucket after a ceiling refusal is one token lower.
+- **The refusal.** `429`, rule **`limit.rate-route`**, with `Retry-After` computed by section 5's rule on the ceiling's bucket (whole seconds, rounded up, at least 1). A refusal happens before the circuit and the dial, so it never reaches
+  the upstream and never takes the circuit's trial; a WebSocket upgrade it refuses is forgotten like a `limit.rate` one (section 7). Counted in slot 40 of the route's block (`rate_route_limited`, JSON and Prometheus as in section 9) and by name in
+  the refusals map.
+- **A ceiling is not fairness.** Many keys together can spend the whole ceiling and the legitimate keys are then answered `limit.rate-route`: the ceiling protects the **upstream**, as `rate_key = "route"` does (3.2), and says nothing
+  about who gets the budget. What it removes is the *unbounded* reach of rotated keys, not the damage they do inside the bound.
+- **`rate_key = "route"` takes none**: its single bucket already is a ceiling, and a second one on the same key would be a limit nobody could tell from the first (rule 12).
+- **Failing closed.** A ceiling position outside the table (it cannot happen with a generated table) is refused, one second, like `admit`'s own guard.
+
+### 13.2 IPv6 aggregation for `xff:*` keys
+
+An `X-Forwarded-For` element is a client's address as text. With `xff:last` and `xff:first` the key was that text (section 3.3), so a host with a /64 chose among 2^64 spellings. Now the element is **parsed** and, if it is an
+IPv6 literal, **keyed on its first `rate_xff_prefix` bits** (default 64, 1..128, rules 13 and 14): the bits after the prefix are zeroed and the key is `v` followed by the 32 lowercase hexadecimal digits of the result, so `2001:db8::1`,
+`2001:DB8:0:0::ffff` and `2001:db8:0:0:1:2:3:4` are one key under /64, and `::1` and `0:0:0:0:0:0:0:1` are one key under any prefix.
+
+- **IPv4 is unchanged**: an element that is not an IPv6 literal is keyed on its trimmed text, byte for byte as before, so every existing key, bucket and test keeps its meaning.
+- **An IPv4-mapped IPv6 address** (`::ffff:a.b.c.d`, or `::ffff:xxxx:yyyy`) is keyed as the IPv4 address it carries, in dotted-decimal text: the first 64 bits of every such address are zero, so aggregating them on /64 would put every IPv4
+  client behind a dual-stack front into **one** bucket (a denial of service by construction). It shares a bucket with the same address written as IPv4.
+- **What is an IPv6 literal here.** One text, no whitespace (the key is already trimmed), of at most 45 bytes: hexadecimal groups of 1 to 4 digits separated by `:`, at most one `::` (standing for one or more groups of zeros), eight groups in
+  all, optionally ending in a dotted-decimal IPv4 (four decimal numbers 0 to 255 with no leading zero) that counts as two groups; optionally in square brackets, with a decimal port of 1 to 5 digits after the bracket. **Anything else
+  is not one**: a zone id (`fe80::1%eth0`), a ninth group, three colons, a fifth digit, a trailing single colon, an empty text. It is keyed on its text (the previous bullet's rule for IPv4), which fails towards a bucket per spelling, not
+  towards sharing: an attacker who sends garbage gets what a garbage key always got.
+- **Where it runs.** `src/ipkey.cho` (a new pure module) is called by the loop with a 40-byte scratch buffer of `Core`, after `ratelimit.key` has found the element; `ratelimit.admit` is unchanged and sees only a key.
+  No allocation, no effect, no authority change. The work is one pass over at most 45 bytes. Every write is bounds-checked against the 16-byte address or the scratch, and a text longer than 45 bytes is refused before it is read.
+- **What stays true.** A client that controls the element (a direct connection to a gateway whose `xff:first` is believed) still chooses its key; aggregation takes away the *free* rotation inside a prefix, not the trust
+  question of 3.3. A client with several prefixes gets one bucket for each; a prefix shared by many clients (a carrier's /64 with many handsets, or a shorter `rate_xff_prefix`) is one bucket for all of them, which is the cost of the feature,
+  chosen by the operator.
+
+### 13.3 The circuit's half-open trial
+
+`docs/health.md` says that after the open period exactly one request is let through, that its success closes the circuit and its failure reopens it. The tests that exist cover pieces: one trial among five concurrent requests (and that
+one succeeds), a failed trial that reopens (the next request is refused), a recovery after the period. **What no test checked is the whole life in order, with the upstream's own count of connections**: that the open period lets *nothing* reach
+the upstream, that the trial is *one* connection (not "one 200 and four 503"), that a failed trial is refused again for a *full* period (not a shortened one) and then admits *one* more trial, and that the trial's success closes it so that the next
+requests all go through. This slice adds that test (`tests/proxy_test.py`) and **fixes whatever it finds**; section 14.3 says what it found. The gate has a mutant per transition (13.4).
+
+### 13.4 Gates, fixed before the code
+
+Numbered on from section 10.
+
+11. **The ceiling's arithmetic and order, unit tests** (`tests/ratelimit_test.cho`): the ceiling is the same bucket (a burst, then a refill, `Retry-After` as section 5); a request refused by its key spends nothing from the ceiling;
+    a request admitted by the key and refused by the ceiling has spent its key's token; the largest rate and burst at the longest period; a ceiling outside the table is refused, not read; a ceiling refusal cannot be mistaken for the other two verdicts.
+12. **The address, a unit test** (`tests/ipkey_test.cho`, `[[test]] ipkey`): the forms of 13.2 that are literals and the forms that are not (a table of texts each way); every prefix 1..128 against an independent
+    Python mask of the same bytes (the test file carries the expected keys, written by `tests/ipkey_vectors.py`, which `--check` keeps equal); IPv4-mapped is IPv4; a sweep of mutated texts neither traps nor writes
+    outside the scratch; every spelling of one address is one key.
+13. **The generator** (`tests/generate_test.py`): each of rules 9 to 14 has refusal tests with a key and a line; the accepted forms; the records of a ceiling and of a prefix; the bucket counts including the ceiling's.
+14. **End to end** (`tests/ratelimit_test.py`): 40 distinct keys against a ceiling of 5 admit exactly 5 (and the upstream's record shows 5); a key's own refusal does not spend the ceiling; the ceiling's `Retry-After` and refill; `limit.rate-route`
+    in the log and the counters; a /64 rotated through 40 addresses is one bucket and a second /64 is another; an IPv4 client and IPv4-mapped text are one key; a `rate_xff_prefix` of 128 distinguishes the addresses; garbage is keyed on its text.
+15. **The trial, end to end** (`tests/proxy_test.py`): the test of 13.3.
+16. **Mutants of the new logic** (`tests/ratelimit_mutants.py`, extended): each of the new edits is killed or explained.
+17. **Nothing else moves**: every existing refusal's bytes (`tests/problem_test.cho`), the authority report (a pure module and new pure functions only), and the whole existing suite.
