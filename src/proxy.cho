@@ -643,6 +643,7 @@ fn tunnel_pump[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, client: int,
                     if flush(tab, core, dst, now) == 1 {
                         return 1;
                     }
+                    moving = st[ps + 4] > 0;
                 }
             }
         }
