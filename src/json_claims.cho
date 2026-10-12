@@ -1,0 +1,166 @@
+edition 5;
+
+module gateway.json_claims;
+
+import std.bytes;
+import std.json;
+
+// The bounded reader of a JWT's header and claims (docs/jwt.md section 5). Pure: no effect. `std.json` does the syntax (strict RFC 8259, UTF-8, no trailing data, into a
+// tape the caller provides); this module adds what a token needs and `std.json` does not: a nesting bound the gateway chose, a bound on the members and on a name's length, **no
+// repeated name** at the root (`std.json.get` takes the first of two, another parser the last), and integers that are integers, in a range, with no float anywhere near a time.
+
+// The nesting allowed, the root being level 1; the members of the root; the longest name, decoded. Compiled constants: a unit test hits each.
+pub fn max_depth() -> [] int {
+    return 4;
+}
+
+pub fn max_members() -> [] int {
+    return 64;
+}
+
+pub fn max_name() -> [] int {
+    return 64;
+}
+
+// The largest NumericDate accepted (the end of the year 9999, RFC 7519 section 2): every sum with a leeway of at most 60 s is far from overflowing.
+pub fn max_time() -> [] int {
+    return 253402300799;
+}
+
+// The deepest nesting of `[` and `{` in `src`, outside strings. Counts brackets only; whether the document is JSON is `std.json`'s question, not this one's. It runs first, so
+// a document of a million `[` is refused by a loop and never reaches the parser's recursion.
+pub fn depth_of[&s](src: &s [byte]) -> [] int {
+    var depth = 0;
+    var deepest = 0;
+    var in_string = false;
+    var escaped = false;
+    var i = 0;
+    while i < len(src) {
+        let c = int_of(src[i]);
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+        } else if c == '"' {
+            in_string = true;
+        } else if c == '[' || c == '{' {
+            depth = depth + 1;
+            if depth > deepest {
+                deepest = depth;
+            }
+        } else if (c == ']' || c == '}') && depth > 0 {
+            depth = depth - 1;
+        }
+        i = i + 1;
+    }
+    return deepest;
+}
+
+// Are the names of the members of the object at node 0 distinct, each at most `max_name()` bytes once decoded? Compared decoded, so `"exp"` and `"exp"` are one name.
+// The names are decoded once into a slab of `max_members()` x `max_name()` bytes (4 KiB), then compared pairwise: at most 2,016 comparisons.
+fn names_distinct[&s, &t](src: &s [byte], tape: &t [int]) -> [] bool {
+    let n = json.count(tape, 0);
+    var ok = true;
+    region a {
+        let slab = alloc_slice[a](max_members() * max_name(), byte_of(0));
+        let lens = alloc_slice[a](max_members(), 0);
+        var node = 1;
+        var m = 0;
+        while m < n && ok {
+            let l = json.string_length(src, tape, node);
+            if l < 0 || l > max_name() {
+                ok = false;
+            } else {
+                lens[m] = json.string_into(src, tape, node, slab[m * max_name()..m * max_name() + max_name()]);
+                if lens[m] < 0 {
+                    ok = false;
+                }
+            }
+            node = json.skip(tape, node + 1);
+            m = m + 1;
+        }
+        var x = 0;
+        while x < n && ok {
+            var y = x + 1;
+            while y < n && ok {
+                if lens[x] == lens[y] && bytes.equal(slab[x * max_name()..x * max_name() + lens[x]], slab[y * max_name()..y * max_name() + lens[y]]) {
+                    ok = false;
+                }
+                y = y + 1;
+            }
+            x = x + 1;
+        }
+    }
+    return ok;
+}
+
+// Parse `src` into `tape` (at least `json.tape_len(src)` ints) as a JSON object with the bounds above. Answers the number of nodes (at least 1), or 0 for any refusal:
+// syntax, a root that is not an object, nesting past `max_depth()`, more members than `max_members()`, a name longer than `max_name()`, a repeated name.
+pub fn parse_object[&s, &t](src: &s [byte], tape: &!t [int]) -> [] int {
+    if len(tape) < json.tape_len(src) || depth_of(src) > max_depth() {
+        return 0;
+    }
+    let nodes = json.parse(src, tape);
+    if nodes < 1 || json.kind(tape, 0) != json.kind_object() {
+        return 0;
+    }
+    if json.count(tape, 0) > max_members() || !names_distinct(src, tape) {
+        return 0;
+    }
+    return nodes;
+}
+
+// The integer claim `name` of the object at node 0: `0 - 1` if it is absent, `0 - 2` if it is there and is not an integer (a float, `1e3`, a string, a number wider than 64
+// bits) or not in `0 ..= max_time()`, else its value.
+pub fn int_claim[&s, &t, &n](src: &s [byte], tape: &t [int], name: &n [byte]) -> [] int {
+    let at = json.get(src, tape, 0, name);
+    if at < 0 {
+        return 0 - 1;
+    }
+    if !json.fits_int(src, tape, at) {
+        return 0 - 2;
+    }
+    let v = json.to_int(src, tape, at);
+    if v < 0 || v > max_time() {
+        return 0 - 2;
+    }
+    return v;
+}
+
+// Is the claim `name` present, a string and equal (decoded) to `want`?
+pub fn string_claim_is[&s, &t, &n, &w](src: &s [byte], tape: &t [int], name: &n [byte], want: &w [byte]) -> [] bool {
+    let at = json.get(src, tape, 0, name);
+    return at >= 0 && json.string_equals(src, tape, at, want);
+}
+
+// The audience test (RFC 7519 section 4.1.3): `aud` is a string equal to `want`, or an array of at most 16 elements, all strings, one equal to `want`. A missing claim, an
+// element that is not a string, or a seventeenth element is a mismatch.
+pub fn audience_is[&s, &t, &w](src: &s [byte], tape: &t [int], want: &w [byte]) -> [] bool {
+    let at = json.get(src, tape, 0, "aud");
+    if at < 0 {
+        return false;
+    }
+    if json.is_string(tape, at) {
+        return json.string_equals(src, tape, at, want);
+    }
+    if !json.is_array(tape, at) || json.count(tape, at) > 16 {
+        return false;
+    }
+    var found = false;
+    var i = 0;
+    while i < json.count(tape, at) {
+        let e = json.at(tape, at, i);
+        if !json.is_string(tape, e) {
+            return false;
+        }
+        if json.string_equals(src, tape, e, want) {
+            found = true;
+        }
+        i = i + 1;
+    }
+    return found;
+}

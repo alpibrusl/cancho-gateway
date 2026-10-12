@@ -250,6 +250,21 @@ pub fn name_in[&b](blob: &b [byte], index: int) -> [] &b [byte] {
     return blob[0..0];
 }
 
+// Line `index` (0-based) of a table of tab-separated lines, without its newline; empty past the end. The public keys of `gateway.jwt` are read from it.
+pub fn line_in[&b](blob: &b [byte], index: int) -> [] &b [byte] {
+    var n = 0;
+    var at = 0;
+    while at < len(blob) {
+        let end = line_end(blob, at);
+        if n == index {
+            return blob[at..end];
+        }
+        n = n + 1;
+        at = end + 1;
+    }
+    return blob[0..0];
+}
+
 // Does the route's key list `keys` (`*` for all, else comma-separated indices) allow key `index`?
 pub fn allowed[&k](keys: &k [byte], index: int) -> [] bool {
     if len(keys) == 1 && int_of(keys[0]) == '*' {
