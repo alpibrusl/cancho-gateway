@@ -354,6 +354,10 @@ fn viol[&t](ws: &!t [int], b: int, rule: int, n: int, at_boundary: int) -> [] in
     ws[b + 14] = 1;
     ws[b + 15] = rule;
     ws[b + 17] = at_boundary;
+    if at_boundary == 1 {
+        // What was answered ends at a frame boundary, whatever the frame in hand had begun to do to the state.
+        ws[b] = 0;
+    }
     return n;
 }
 

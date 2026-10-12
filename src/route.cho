@@ -339,6 +339,13 @@ pub fn auth_challenge(index: int) -> [] &static [byte] {
     return bytes.field(blob[at..line_end(blob, at)], 9, 21);
 }
 
+// The longest WebSocket message route `index` carries, summed over its fragments (docs/websocket-frames.md section 4).
+pub fn ws_max_message(index: int) -> [] int {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return number(bytes.field(blob[at..line_end(blob, at)], 9, 22));
+}
+
 pub fn select[&h, &m, &p](host: &h [byte], method: &m [byte], path: &p [byte]) -> [] int {
     let name = host_name(host);
     if len(name) == 0 {

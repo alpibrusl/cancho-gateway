@@ -7,7 +7,7 @@ module gateway.routes_table;
 // PATCH 32, OPTIONS 64), upstream index, max body, trust_forwarded (0 or 1), name, websocket (0 or 1), subprotocols and origins (comma-separated, possibly
 // empty; docs/websocket.md), then the rate limit (docs/ratelimit.md): tokens per period (0: none), the period in ms, the burst, the key, the buckets, and the
 // first bucket of the route's table, then authentication (docs/auth.md): 1 if the route authenticates, the header it reads, 1 if it forwards the credential, the
-// allowed key indices (`*`: all) and the WWW-Authenticate challenge. Tab-separated, in file order; `gateway.route` reads it.
+// allowed key indices (`*`: all) and the WWW-Authenticate challenge, then the WebSocket message limit (docs/websocket-frames.md). Tab-separated, in file order; `gateway.route` reads it.
 
 pub fn count() -> [] int {
     return 3;
@@ -28,5 +28,5 @@ pub fn keys_blob() -> [] &static [byte] {
 }
 
 pub fn blob() -> [] &static [byte] {
-    return "api.example.com\t/\t127\t0\t1048576\t1\tapi\t0\t\t\t0\t0\t0\t\t0\t0\t0\t\t0\t\t\n*\t/static\t3\t1\t0\t0\tweb-static\t0\t\t\t0\t0\t0\t\t0\t0\t0\t\t0\t\t\n*\t/\t127\t1\t1048576\t0\tweb\t0\t\t\t0\t0\t0\t\t0\t0\t0\t\t0\t\t\n";
+    return "api.example.com\t/\t127\t0\t1048576\t1\tapi\t0\t\t\t0\t0\t0\t\t0\t0\t0\t\t0\t\t\t1048576\n*\t/static\t3\t1\t0\t0\tweb-static\t0\t\t\t0\t0\t0\t\t0\t0\t0\t\t0\t\t\t1048576\n*\t/\t127\t1\t1048576\t0\tweb\t0\t\t\t0\t0\t0\t\t0\t0\t0\t\t0\t\t\t1048576\n";
 }

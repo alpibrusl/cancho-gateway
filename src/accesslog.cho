@@ -50,6 +50,12 @@ pub fn line[&o, &i, &m, &p, &r, &u, &l](out: &!o [byte], t: int, id: &i [byte], 
 // `line`, for a request authenticated as `identity` (docs/auth.md): a non-empty identity (the name of the key, at most 32 bytes, escaped like every string) adds `"identity":"<name>"` as the
 // last key, after `upgrade`; an empty one adds nothing, so the line of any request that did not authenticate is the line it always was.
 pub fn line_as[&o, &i, &m, &p, &r, &u, &l, &y](out: &!o [byte], t: int, id: &i [byte], method: &m [byte], path: &p [byte], route: &r [byte], upstream: &u [byte], status: int, rule: &l [byte], outcome: int, ms: int, upstream_ms: int, bytes_in: int, bytes_out: int, secure: bool, upgrade: bool, identity: &y [byte]) -> [] int {
+    return line_full(out, t, id, method, path, route, upstream, status, rule, outcome, ms, upstream_ms, bytes_in, bytes_out, secure, upgrade, identity, 0);
+}
+
+// `line_as`, for a tunnel that saw a Close frame (docs/websocket-frames.md section 8): a positive `ws_close`, the code of the first Close of the tunnel, adds `"ws_close":<code>` as the very
+// last key; zero adds nothing, so every other line is the line it was.
+pub fn line_full[&o, &i, &m, &p, &r, &u, &l, &y](out: &!o [byte], t: int, id: &i [byte], method: &m [byte], path: &p [byte], route: &r [byte], upstream: &u [byte], status: int, rule: &l [byte], outcome: int, ms: int, upstream_ms: int, bytes_in: int, bytes_out: int, secure: bool, upgrade: bool, identity: &y [byte], ws_close: int) -> [] int {
     var k = out.put(out, 0, "{\"t\":");
     k = out.put_int(out, k, t);
     k = put_field(out, k, "id", id, 64, 64);
@@ -79,6 +85,9 @@ pub fn line_as[&o, &i, &m, &p, &r, &u, &l, &y](out: &!o [byte], t: int, id: &i [
     }
     if len(identity) > 0 {
         k = put_field(out, k, "identity", identity, 32, 32);
+    }
+    if ws_close > 0 {
+        k = put_number(out, k, "ws_close", ws_close);
     }
     k = out.put(out, k, "}\n");
     return k;

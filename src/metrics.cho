@@ -127,13 +127,14 @@ fn tls_base() -> [] int {
     return rule_base() + 2 * rule_cap() + 2;
 }
 
-// After the TLS counters: WebSocket upgrades relayed as tunnels (docs/websocket.md section 11).
+// After the TLS counters, twelve ints (docs/websocket.md section 11, docs/websocket-frames.md section 8): 0 WebSocket upgrades relayed as tunnels, 1 data messages, 2 Pings the gateway sent,
+// 3 tunnels closed for an unanswered Ping, 4 to 11 the code of the first Close frame of each tunnel: 1000, 1001, 1002, 1007, 1008, 1009, 1011, other.
 fn ws_base() -> [] int {
     return tls_base() + 4;
 }
 
 pub fn stats_len() -> [] int {
-    return ws_base() + 1;
+    return ws_base() + 12;
 }
 
 pub fn names_len() -> [] int {
@@ -304,6 +305,82 @@ pub fn ws_opened[&s](stats: &!s [int]) -> [] int {
     return 0;
 }
 
+// `n` data messages went by in a tunnel.
+pub fn ws_messages[&s](stats: &!s [int], n: int) -> [] int {
+    stats[ws_base() + 1] = stats[ws_base() + 1] + n;
+    return 0;
+}
+
+// The gateway sent a keepalive Ping.
+pub fn ws_pinged[&s](stats: &!s [int]) -> [] int {
+    stats[ws_base() + 2] = stats[ws_base() + 2] + 1;
+    return 0;
+}
+
+// A tunnel was closed because its client did not answer a Ping.
+pub fn ws_pong_timeout[&s](stats: &!s [int]) -> [] int {
+    stats[ws_base() + 3] = stats[ws_base() + 3] + 1;
+    return 0;
+}
+
+// The slot of a Close code among the eight: 1000, 1001, 1002, 1007, 1008, 1009, 1011, other.
+fn close_slot(code: int) -> [] int {
+    if code == 1000 {
+        return 0;
+    }
+    if code == 1001 {
+        return 1;
+    }
+    if code == 1002 {
+        return 2;
+    }
+    if code == 1007 {
+        return 3;
+    }
+    if code == 1008 {
+        return 4;
+    }
+    if code == 1009 {
+        return 5;
+    }
+    if code == 1011 {
+        return 6;
+    }
+    return 7;
+}
+
+fn close_label(i: int) -> [] &static [byte] {
+    if i == 0 {
+        return "1000";
+    }
+    if i == 1 {
+        return "1001";
+    }
+    if i == 2 {
+        return "1002";
+    }
+    if i == 3 {
+        return "1007";
+    }
+    if i == 4 {
+        return "1008";
+    }
+    if i == 5 {
+        return "1009";
+    }
+    if i == 6 {
+        return "1011";
+    }
+    return "other";
+}
+
+// A tunnel ended after a Close frame whose code was `code` (the first of the tunnel's).
+pub fn ws_closed[&s](stats: &!s [int], code: int) -> [] int {
+    let at = ws_base() + 4 + close_slot(code);
+    stats[at] = stats[at] + 1;
+    return 0;
+}
+
 // An upstream failed as the circuit counts failures.
 pub fn upstream_failed[&s](stats: &!s [int], upstream_index: int) -> [] int {
     if upstream_index >= 0 && upstream_index < upstreams() {
@@ -466,7 +543,22 @@ pub fn json[&o, &s, &n, &g](out: &!o [byte], at: int, stats: &s [int], names: &n
     k = jnum(out, k, "tunnels_total", stats[ws_base()]);
     k = out.put(out, k, ",");
     k = jnum(out, k, "tunnels_active", gauge[ws_gauge()]);
-    k = out.put(out, k, "},\"log\":{");
+    k = out.put(out, k, ",");
+    k = jnum(out, k, "messages", stats[ws_base() + 1]);
+    k = out.put(out, k, ",");
+    k = jnum(out, k, "pings", stats[ws_base() + 2]);
+    k = out.put(out, k, ",");
+    k = jnum(out, k, "pong_timeouts", stats[ws_base() + 3]);
+    k = out.put(out, k, ",\"closes\":{");
+    var c = 0;
+    while c < 8 {
+        if c > 0 {
+            k = out.put(out, k, ",");
+        }
+        k = jnum(out, k, close_label(c), stats[ws_base() + 4 + c]);
+        c = c + 1;
+    }
+    k = out.put(out, k, "}},\"log\":{");
     k = jnum(out, k, "dropped", gauge[3]);
     k = out.put(out, k, ",");
     k = jnum(out, k, "write_failures", gauge[4]);
@@ -678,6 +770,18 @@ pub fn prometheus[&o, &s, &n, &g](out: &!o [byte], at: int, stats: &s [int], nam
     k = plain(out, k, "ws_tunnels_total", stats[ws_base()]);
     k = family(out, k, "ws_tunnels_active", "gauge", "WebSocket tunnels open.");
     k = plain(out, k, "ws_tunnels_active", gauge[ws_gauge()]);
+    k = family(out, k, "ws_messages_total", "counter", "WebSocket data messages that went through a tunnel, in either direction.");
+    k = plain(out, k, "ws_messages_total", stats[ws_base() + 1]);
+    k = family(out, k, "ws_pings_total", "counter", "Keepalive Pings the gateway sent to silent WebSocket clients.");
+    k = plain(out, k, "ws_pings_total", stats[ws_base() + 2]);
+    k = family(out, k, "ws_pong_timeouts_total", "counter", "WebSocket tunnels closed because the client did not answer a Ping in time.");
+    k = plain(out, k, "ws_pong_timeouts_total", stats[ws_base() + 3]);
+    k = family(out, k, "ws_closes_total", "counter", "WebSocket tunnels by the code of their first Close frame.");
+    var cc = 0;
+    while cc < 8 {
+        k = sample(out, k, "ws_closes_total", "", "code", close_label(cc), stats[ws_base() + 4 + cc]);
+        cc = cc + 1;
+    }
     k = family(out, k, "log_dropped_total", "counter", "Access-log lines dropped because the queue was full.");
     k = plain(out, k, "log_dropped_total", gauge[3]);
     k = family(out, k, "log_write_failures_total", "counter", "Access-log writes that failed.");
@@ -767,10 +871,10 @@ pub fn frame[&o](out: &!o [byte], status: int, ctype: &static [byte], end: int) 
 
 // An upper bound on the response to a scrape, for this deployment: what the buffer is sized to, and within a tenth of the largest answer there
 // can be (the unit test checks both). In the Prometheus text, which is the larger format: the families' comments and the six plain
-// lines (3,0xx bytes with the reload and tunnel counters, rounded up), a line for each rule and one for `other` (98 bytes: the name's 40 and an 18-digit number), per route
+// lines (4,3xx bytes with the reload, tunnel and WebSocket frame counters, rounded up), a line for each rule and one for `other` (98 bytes: the name's 40 and an 18-digit number), per route
 // 28 lines (2,152 bytes and its name 28 times, the four of `auth_refused_total` among them), per upstream 21 lines (1,615 bytes and its name 21 times).
 pub fn worst_case() -> [] int {
-    var bytes = head_room() + 3072 + 384 + 512 + 160 + (rule_cap() + 1) * 98 + 64;
+    var bytes = head_room() + 4372 + 384 + 512 + 160 + (rule_cap() + 1) * 98 + 64;
     var i = 0;
     while i < routes() {
         bytes = bytes + 1836 + 316 + 130 + 30 * len(route.name(i));

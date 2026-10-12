@@ -102,6 +102,19 @@ pub fn ws_max_tunnels() -> [] int {
     return 64;
 }
 
+// WebSocket frames (docs/websocket-frames.md): the keepalive Ping to a silent client (0: none), the wait for its Pong, and the wait for a Close frame's answer.
+pub fn ws_ping_ms() -> [] int {
+    return 0;
+}
+
+pub fn ws_pong_ms() -> [] int {
+    return 10000;
+}
+
+pub fn ws_close_ms() -> [] int {
+    return 5000;
+}
+
 // The longest common prefix of the addresses, cut at a delimiter: what `narrow` would be given once
 // cancho has separate listen and connect bounds. Empty means no shared prefix.
 pub fn intended_egress_prefix() -> [] &static [byte] {
