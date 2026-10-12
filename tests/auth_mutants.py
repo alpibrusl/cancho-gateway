@@ -66,7 +66,7 @@ m("c12", A, "        if n == index {\n            return bytes.field", "        
 # ---- equivalent to the eye of a functional test: they change timing, never an answer (docs/auth.md section 4.3)
 m("e01", A, "    while i < hex_len() {\n        diff =", "    while i < hex_len() && diff == 0 {\n        diff =", "unit", "a digest comparison stops at its first difference")
 m("e02", A, "        while at < len(blob) {\n            let end = line_end(blob, at);\n            // The digest follows", "        while at < len(blob) && found == 0 {\n            let end = line_end(blob, at);\n            // The digest follows", "unit", "the keys after a match are not compared")
-EQUIVALENT |= {"e01", "e02"}
+EQUIVALENT |= {"e01", "e02", "p16"}
 m("k01", A, "        return true;\n    }\n    var v = 0;", "        return false;\n    }\n    var v = 0;", "unit", "a route that allows every key allows none")
 m("k02", A, "            if any && v == index {", "            if any && v == index + 1 {", "unit", "a route's list is shifted by one")
 m("k03", A, "        } else if bytes.is_digit(int_of(keys[i])) && v < 1000 {", "        } else if bytes.is_digit(int_of(keys[i])) {", "unit", "a huge number in a list overflows")
