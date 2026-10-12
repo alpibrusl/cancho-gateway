@@ -266,7 +266,7 @@ fn header_rule[&s, &t, &k, &a](doc: &s [byte], tape: &t [int], keys: &k [byte], 
 }
 
 fn header_check[&h, &k, &a](seg: &h [byte], keys: &k [byte], allowed: &a [byte]) -> [] int {
-    var res = 0 - 1;
+    var answer = 0 - 1;
     region r {
         let buf = alloc_slice[r](192, byte_of(0));
         let n = b64url_decode(seg, buf);
@@ -274,11 +274,11 @@ fn header_check[&h, &k, &a](seg: &h [byte], keys: &k [byte], allowed: &a [byte])
             let doc = buf[0..n];
             let tape = alloc_slice[r](json.tape_len(doc), 0);
             if json_claims.parse_object(doc, tape) > 0 {
-                res = header_rule(doc, tape, keys, allowed);
+                answer = header_rule(doc, tape, keys, allowed);
             }
         }
     }
-    return res;
+    return answer;
 }
 
 // ---- the claims ----
@@ -324,7 +324,7 @@ fn claims_rule[&s, &t, &u, &i](doc: &s [byte], tape: &t [int], aud: &u [byte], i
 }
 
 fn claims_check[&p, &u, &i](seg: &p [byte], aud: &u [byte], iss: &i [byte], leeway: int, now: int) -> [] int {
-    var res = 0 - 1;
+    var answer = 0 - 1;
     region r {
         let buf = alloc_slice[r](1024, byte_of(0));
         let n = b64url_decode(seg, buf);
@@ -332,11 +332,11 @@ fn claims_check[&p, &u, &i](seg: &p [byte], aud: &u [byte], iss: &i [byte], leew
             let doc = buf[0..n];
             let tape = alloc_slice[r](json.tape_len(doc), 0);
             if json_claims.parse_object(doc, tape) > 0 {
-                res = claims_rule(doc, tape, aud, iss, leeway, now);
+                answer = claims_rule(doc, tape, aud, iss, leeway, now);
             }
         }
     }
-    return res;
+    return answer;
 }
 
 // ---- the signature ----
@@ -367,16 +367,17 @@ pub fn verify[&c, &k, &a, &u, &i](cred: &c [byte], keys: &k [byte], allowed: &a 
     let hseg = cred[0..d1];
     let pseg = cred[d1 + 1..d2];
     let sseg = cred[d2 + 1..len(cred)];
-    if len(hseg) < 1 || len(pseg) < 1 || len(hseg) > max_header_segment() || len(pseg) > max_payload_segment() || len(sseg) != signature_segment() {
-        return 0 - 1;
-    }
-    // The signature's text is checked before anything is parsed: a token with a damaged tail is `jwt.malformed` whatever its claims say.
-    if !b64url_valid(sseg) {
+    if len(hseg) < 1 || len(pseg) < 1 || len(hseg) > max_header_segment() || len(pseg) > max_payload_segment() {
         return 0 - 1;
     }
     let key = header_check(hseg, keys, allowed);
     if key < 0 {
         return key;
+    }
+    // The signature's text is checked after the header (so that `alg: none`, whose signature is empty, and an HS256 token, whose signature is 43 characters, are `jwt.alg`, which
+    // is what the operator wants to read) and before the payload is parsed.
+    if len(sseg) != signature_segment() || !b64url_valid(sseg) {
+        return 0 - 1;
     }
     let claims = claims_check(pseg, aud, iss, leeway, now);
     if claims < 0 {

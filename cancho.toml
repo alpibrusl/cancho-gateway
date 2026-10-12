@@ -14,7 +14,7 @@ path = "packages/tls/.cancho-vcs/tls"
 
 [[bin]]
 name = "gateway"
-sources = ["generated/deploy.cho", "generated/routes.cho", "src/out.cho", "src/accesslog.cho", "src/problem.cho", "src/framing.cho", "src/chunked.cho", "src/route.cho", "src/ratelimit.cho", "src/auth.cho", "src/response.cho", "src/sha1.cho", "src/b64.cho", "src/websocket.cho", "src/forward.cho", "src/egress.cho", "src/admin.cho", "src/metrics.cho", "generated/tlsfiles.cho", "src/tlsids.cho", "src/tlsio.cho", "src/shared.cho", "src/adminloop.cho", "src/proxy.cho", "src/version.cho", "src/gateway.cho"]
+sources = ["generated/deploy.cho", "generated/routes.cho", "src/out.cho", "src/accesslog.cho", "src/problem.cho", "src/framing.cho", "src/chunked.cho", "src/route.cho", "src/ratelimit.cho", "src/auth.cho", "src/json_claims.cho", "src/jwt.cho", "src/response.cho", "src/sha1.cho", "src/b64.cho", "src/websocket.cho", "src/forward.cho", "src/egress.cho", "src/admin.cho", "src/metrics.cho", "generated/tlsfiles.cho", "src/tlsids.cho", "src/tlsio.cho", "src/shared.cho", "src/adminloop.cho", "src/proxy.cho", "src/version.cho", "src/gateway.cho"]
 std = true
 out = "build/gateway"
 
@@ -64,6 +64,11 @@ std = true
 [[test]]
 name = "auth"
 sources = ["generated/routes.cho", "src/out.cho", "src/auth.cho", "tests/auth_test.cho"]
+std = true
+
+[[test]]
+name = "jwt"
+sources = ["generated/routes.cho", "src/out.cho", "src/auth.cho", "src/json_claims.cho", "src/jwt.cho", "tests/jwt_vectors.cho", "tests/jwt_test.cho"]
 std = true
 
 [[test]]
