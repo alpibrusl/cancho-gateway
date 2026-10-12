@@ -99,7 +99,7 @@ Everything is sized at start from the config; nothing is allocated afterwards (t
 | request body (per route) | per route | `limit.body` | 413, close |
 | upstream connections per upstream | 64 | `limit.pool` | 503 |
 | route table entries | 256 | `config.routes` | startup |
-| rate-limit keys | 65,536 | `limit.rate`, `limit.rate-table` (`docs/ratelimit.md`) | 429 |
+| rate-limit keys | 65,536 (a route's ceiling is one of them) | `limit.rate`, `limit.rate-table`, `limit.rate-route` (`docs/ratelimit.md`) | 429 |
 | WebSocket message (per route, over its fragments) | 1 MiB, 1 KiB to 256 MiB | `ws.message-too-big` (`docs/websocket-frames.md`) | Close 1009, tunnel closed |
 | WebSocket frame state (per tunnel, no allocation) | 56 ints, 112 KiB for the 256 slots | `ws.frame-*` | Close 1002 / 1007 |
 

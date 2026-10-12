@@ -13,11 +13,6 @@ pub fn element_max() -> [] int {
     return 53;
 }
 
-// The longest IPv6 literal text there is (eight groups of four digits, seven colons would be 39; the mapped form with a dotted quad, 45).
-pub fn literal_max() -> [] int {
-    return 45;
-}
-
 // The scratch buffer: the key is written at its start (at most 33 bytes), the parsed address at `addr_at()` (16 bytes).
 pub fn scratch_len() -> [] int {
     return 64;
@@ -83,7 +78,7 @@ fn dotted[&t, &b](text: &t [byte], buf: &!b [byte], at: int) -> [] bool {
 // Parse the IPv6 literal `t` (no brackets) into the 16 bytes of `buf` from `at`. False, with `buf` in no state to be read, if it is not one: groups of 1 to 4 hexadecimal digits
 // separated by single colons, at most one `::` for one or more groups of zeros, eight groups in all, optionally a dotted quad last that counts as two. The caller has room for 16 bytes at `at`.
 fn parse6[&t, &b](t: &t [byte], buf: &!b [byte], at: int) -> [] bool {
-    if len(t) < 2 || len(t) > literal_max() || at < 0 || at + 16 > len(buf) {
+    if len(t) < 2 || at < 0 || at + 16 > len(buf) {
         return false;
     }
     var z = 0;

@@ -135,7 +135,7 @@ upstream = "up"
 rate_limit = "1/h"
 rate_burst = 1
 rate_key = "header:X-Api-Key"
-rate_buckets = 64
+rate_buckets = 4
 rate_route_limit = "1/h"
 rate_route_burst = 3
 

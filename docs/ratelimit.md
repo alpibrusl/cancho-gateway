@@ -457,7 +457,7 @@ IPv6 literal, **keyed on its first `rate_xff_prefix` bits** (default 64, 1..128,
   is not one**: a zone id (`fe80::1%eth0`), a ninth group, three colons, a fifth digit, a trailing single colon, an empty text. It is keyed on its text (the previous bullet's rule for IPv4), which fails towards a bucket per spelling, not
   towards sharing: an attacker who sends garbage gets what a garbage key always got.
 - **Where it runs.** `src/ipkey.cho` (a new pure module) is called by the loop with a 40-byte scratch buffer of `Core`, after `ratelimit.key` has found the element; `ratelimit.admit` is unchanged and sees only a key.
-  No allocation, no effect, no authority change. The work is one pass over at most 45 bytes. Every write is bounds-checked against the 16-byte address or the scratch, and a text longer than 45 bytes is refused before it is read.
+  No allocation, no effect, no authority change. The work is a pass over at most 53 bytes. Every write is bounds-checked against the 16-byte address or the scratch, and an element longer than 53 bytes (a bracketed 45-byte literal with a five-digit port) is refused before it is read.
 - **What stays true.** A client that controls the element (a direct connection to a gateway whose `xff:first` is believed) still chooses its key; aggregation takes away the *free* rotation inside a prefix, not the trust
   question of 3.3. A client with several prefixes gets one bucket for each; a prefix shared by many clients (a carrier's /64 with many handsets, or a shorter `rate_xff_prefix`) is one bucket for all of them, which is the cost of the feature,
   chosen by the operator.
@@ -484,3 +484,135 @@ Numbered on from section 10.
 15. **The trial, end to end** (`tests/proxy_test.py`): the test of 13.3.
 16. **Mutants of the new logic** (`tests/ratelimit_mutants.py`, extended): each of the new edits is killed or explained.
 17. **Nothing else moves**: every existing refusal's bytes (`tests/problem_test.cho`), the authority report (a pure module and new pure functions only), and the whole existing suite.
+
+## 14. The second slice, as built and measured (2026-10-12)
+
+Files: `src/ratelimit.cho` (`route_offset`, `admit_route`: 30 lines), `src/ipkey.cho` (new, pure, about 280 lines), `src/route.cho` (five accessors), `src/metrics.cho` (slot 40 and its two outputs), `src/proxy.cho`
+(`rate_limited` now 50 lines), `src/shared.cho` (`Core.rkey`, a 64-byte scratch), `scripts/generate.py` (three keys, rules 9 to 14, five more fields in each route's record), `tests/ipkey_vectors.py`.
+**The authority report does not change**: no label moves; `manifests/` differ by the names of the new pure functions and the counts, and `docs/proof.html` by the count of pure functions. No source file is near 2,000 lines (`scripts/lines.py` passes).
+
+### 14.1 What the build found false in the design
+
+- *(corrected)* Section 13.1 said the ceiling's bucket "is never full: it is always found". True, but the reason was wrong in the first draft: it is found because it is a table of one bucket (`buckets = 1`),
+  not because of the sets of four. The text now says so.
+- *(corrected)* Section 13.2 said a text longer than 45 bytes "is refused before it is read". The scan for the closing bracket reads the element up to 53 bytes, so the bound is 53 (`element_max`); the 45-byte
+  check of the literal was redundant (no valid literal is longer: its mutant survived) and was removed rather than excused.
+- Two more guards were redundant and were removed the same way: the `prefix > 128` test (a prefix above 128 keeps every bit, which is what 128 means) and the `ceil_at < 0` test (a negative place is
+  `admit`'s own refusal). The `ceil_at` upper test is not redundant: without it `admit` adds one to a place of 2^63 - 1 and overflows (the unit test builds exactly that).
+- **A test written to kill a mutant did not kill it the first time** (`e08`, the ceiling read from the wrong bucket): the ceiling and the first bucket of the key table were the same bucket, and no key
+  of the first end-to-end test happened to land in the first set. A route whose whole key table is one set of four now makes it deterministic.
+- A helper of the new unit test overflowed (`v * 10 + digit - 48` at the largest prefix: the sum exceeds 2^63 before the 48 comes off): it trapped, which is the compiler doing its job on the *test*. Fixed by
+  parenthesising; the module's own arithmetic has no such sum (an octet is at most 255).
+- **The circuit test found no bug.** Section 14.3.
+
+### 14.2 Tests
+
+| suite | result |
+|---|---|
+| `cancho test` | 15 suites, **224 tests, 0 failures**: `ratelimit` 36 (11 new: the ceiling), `ipkey` 8 (new suite: 1,293 vectors from Python's `ipaddress`, 724 literals and 569 not, every prefix 1..128 for two addresses, a byte-at-a-time sweep), `problem` 8 (1 new), `metrics` 15 (the existing test extended), the rest unchanged |
+| `python3 tests/generate_test.py` | 7 prefix cases, **414 refusal cases** (38 new, rules 9 to 14 and the ceiling's bucket in rule 8, each also checked for the key it names), 69 accepted (12 new), 0 failures |
+| `python3 tests/ratelimit_test.py` | **24 tests, 0 failures** (8 new: 40 keys against a ceiling of 5 admit exactly 5 and the upstream's record shows 5; a refused key spends nothing from the ceiling and a ceiling refusal has spent its key's token; the ceiling's `Retry-After` and refill; a limited upgrade; a /64 rotated through 41 addresses is one bucket; IPv4 and IPv4-mapped; text that is not a literal; prefixes 128 and 48) |
+| `python3 tests/proxy_test.py` | **78 tests, 0 failures** (1 new: `the_half_open_trial_has_one_life_from_open_to_closed`, 3.6 s) |
+| `admin_test.py` 16, `tls_test.py` 22, `websocket_test.py` 55, `wsframes_test.py` 25, `auth_test.py` 14, `jwt_test.py` 16 | 0 failures (the member lists of a route's metrics object in `admin_test.py` and `auth_test.py` changed: the ceiling's counter comes after `rate_table_full`) |
+| `jwt_differential.py 1500`, `jwt_vectors.py --check`, `ipkey_vectors.py --check`, `route_test.py 12 400` and `--fixed`, `tests/response/run.py`, smuggling (`--gateway`, `--prefixes` 2,815, `--chunked`, `--fuzz 1500`), `lab_corpus.py --check`, `lines.py`, `authority.py --check`, `tests/authority_test.py`, `figures.py --check`, `proof.py --check`, `check_site.py`, `generate.py --check` (the example and the long fixture), `cancho fmt --check` | all pass |
+
+`cancho fmt --check`, `cancho build` and the whole of the above ran on the pinned compiler in one pass after the last edit to the sources, apart from `authority.py`, whose recorded report had to be regenerated once more after the
+last guard was removed (the removed function is a name in the list).
+
+Not covered by a test, said once: that a rate-limited request does not take the circuit's half-open trial (still by construction, section 7); `tests/proxy_test.py` was not run under load (the new test has a
+guard that says so if the machine is too slow); and the `tests/headers/differential.py` comparison against nginx, which needs nginx and was not run here.
+
+### 14.3 The half-open trial
+
+The whole-life test found **no bug**: the circuit behaved as `docs/health.md` says in every transition it checks. What it adds is that the claim is now measured by the upstream's accepted connections: none while open, one per
+period, a reopened circuit refuses for a full period, the success closes it and forgets the count. Two shapes it does not cover and this slice did not look at: a late success of a request admitted *before* the circuit opened
+closes the circuit early (`health_ok` does not ask who the success belongs to), and a late failure of such a request reopens a half-open circuit for a full period. Both are consequences of one counter for the whole
+upstream; neither was measured.
+
+### 14.4 Mutants of the new logic (`python3 tests/ratelimit_mutants.py`)
+
+The first slice's table (section 12.4) stands; five of its edits changed text and were rewritten (`p02`, `p08`, `p09`, `p10`, `g09`) and run again. The run of all 132 edits (55 of the first slice and 77 new) first reported
+127 killed and 5 survived: `c02` was not a mutant (its edit was unreachable: removed), `v17` was a redundant guard (removed with its code), `e08` was a weak test (strengthened, now killed), and `q03` and `x08` are explained
+below. After those changes: **130 mutants, 128 killed, 0 survived, 0 invalid, 2 explained** (the changed and added ones were run again; the rest of the first slice's were not changed by this work and ran
+unchanged in the full run).
+
+| id | edit | verdict | killed first by |
+|---|---|---|---|
+| c01 | a request its own key refused asks the ceiling too, and may be admitted by it | killed | `cancho test: test_a_request_its_own_key_refuses_takes_nothing_from_the_ceiling, test_a_request_the_ceiling_refuses_has_spent_its_keys_token, test_a_full_key_table_refuses_without_touching_the_ceiling` |
+| c03 | the ceiling's refusal looks like the key's own | killed | `cancho test: test_the_ceiling_is_one_bucket_for_every_key_with_its_own_burst_and_refill, test_a_ceiling_in_minutes_names_its_wait_in_seconds, test_a_request_its_own_key_refuses_takes_nothing_from_the_ceiling` |
+| c04 | the ceiling is limited at the key's rate and burst | killed | `cancho test: test_the_ceiling_is_one_bucket_for_every_key_with_its_own_burst_and_refill, test_a_ceiling_in_minutes_names_its_wait_in_seconds, test_a_request_its_own_key_refuses_takes_nothing_from_the_ceiling` |
+| c05 | the ceiling's burst is its rate | killed | `cancho test: test_the_ceiling_is_one_bucket_for_every_key_with_its_own_burst_and_refill, test_a_ceiling_in_minutes_names_its_wait_in_seconds, test_a_request_its_own_key_refuses_takes_nothing_from_the_ceiling` |
+| c06 | the ceiling is a bucket of the key, not of the route | killed | `cancho test: test_the_ceiling_is_one_bucket_for_every_key_with_its_own_burst_and_refill, test_a_ceiling_in_minutes_names_its_wait_in_seconds, test_a_request_its_own_key_refuses_takes_nothing_from_the_ceiling` |
+| c07 | the ceiling's verdicts overlap the key's | killed | `cancho test: test_the_three_verdicts_cannot_be_mistaken_for_each_other` |
+| c08 | the ceiling's refusal names no wait | killed | `cancho test: test_a_ceiling_in_minutes_names_its_wait_in_seconds, test_the_three_verdicts_cannot_be_mistaken_for_each_other` |
+| c09 | a ceiling of 0 is a ceiling | killed | `cancho test: test_a_route_without_a_ceiling_is_the_plain_verdict` |
+| c10 | a ceiling far outside the table is read (the sum overflows) | killed | `cancho test: test_a_ceiling_outside_the_table_is_refused_not_read` |
+| c11 | a ceiling outside the table is admitted | killed | `cancho test: test_a_ceiling_outside_the_table_is_refused_not_read` |
+| c12 | a ceiling outside the table is admitted (the table's refusal is taken for a token) | killed | `cancho test: test_a_ceiling_outside_the_table_is_refused_not_read` |
+| e01 | the ceiling is never applied | killed | `e2e: forty_distinct_keys_against_a_ceiling_of_five_admit_exactly_five` |
+| e02 | a ceiling refusal is counted as the key's | killed | `e2e: forty_distinct_keys_against_a_ceiling_of_five_admit_exactly_five` |
+| e03 | a ceiling refusal is not counted | killed | `e2e: forty_distinct_keys_against_a_ceiling_of_five_admit_exactly_five` |
+| e04 | a ceiling refusal carries the key's rule | killed | `e2e: forty_distinct_keys_against_a_ceiling_of_five_admit_exactly_five` |
+| e05 | a ceiling refusal carries no Retry-After | killed | `e2e: forty_distinct_keys_against_a_ceiling_of_five_admit_exactly_five` |
+| e06 | a ceiling refusal's Retry-After keeps the offset | killed | `e2e: forty_distinct_keys_against_a_ceiling_of_five_admit_exactly_five` |
+| e07 | an upgrade the ceiling refused keeps its place among the tunnels | killed | `e2e: a_limited_upgrade_by_the_ceiling_takes_no_tunnel_place` |
+| e08 | the ceiling is the first bucket of the route's table | killed | `e2e: a_key_refused_by_its_own_bucket_takes_nothing_from_the_ceiling` (after `ceilo` was given one set of four buckets: with 64 buckets the first run survived, no key of the first test had landed in the first set) |
+| e09 | the ceiling's burst is its rate | killed | `e2e: a_key_refused_by_its_own_bucket_takes_nothing_from_the_ceiling` |
+| e10 | the ceiling's period is its burst | killed | `e2e: the_ceilings_retry_after_is_a_wait_that_works` |
+| n05 | the ceiling's counter overwrites a token counter | killed | `cancho test: test_rate_refusals_are_counted_per_route_and_shown_in_both_formats` |
+| n06 | the JSON shows the table's counter for the ceiling's | killed | `cancho test: test_rate_refusals_are_counted_per_route_and_shown_in_both_formats` |
+| n07 | Prometheus shows the key's counter for the ceiling's | killed | `cancho test: test_rate_refusals_are_counted_per_route_and_shown_in_both_formats` |
+| q03 | the scrape buffer is sized without the ceiling's counter | explained | survivor: the bound of a scrape has slack (its constants are rounded up), so one family's worth less is still above the largest answer there can be |
+| v01 | the bit before the prefix's end is not cut | killed | `cancho test: test_every_vector_has_the_key_python_gives_it, test_the_prefix_is_where_the_key_stops_telling_addresses_apart` |
+| v02 | the prefix is one bit too long | killed | `cancho test: test_every_vector_has_the_key_python_gives_it, test_every_spelling_of_one_address_is_one_key, test_the_prefix_is_where_the_key_stops_telling_addresses_apart` |
+| v03 | a byte past the prefix keeps a negative number of bits | killed | `cancho test: test_every_vector_has_the_key_python_gives_it, test_every_spelling_of_one_address_is_one_key, test_the_prefix_is_where_the_key_stops_telling_addresses_apart` |
+| v04 | an IPv4-mapped address is aggregated like any other | killed | `cancho test: test_every_vector_has_the_key_python_gives_it, test_an_ipv4_mapped_address_is_keyed_as_the_ipv4_address, test_a_text_that_is_too_long_or_a_scratch_that_is_too_small_is_refused_unread` |
+| v05 | ::ff:xx is taken for IPv4-mapped | killed | `cancho test: test_every_vector_has_the_key_python_gives_it, test_an_ipv4_mapped_address_is_keyed_as_the_ipv4_address` |
+| v06 | a nonzero ninth byte is taken for IPv4-mapped | killed | `cancho test: test_every_vector_has_the_key_python_gives_it, test_an_ipv4_mapped_address_is_keyed_as_the_ipv4_address` |
+| v07 | a group of five digits is an address | killed | `cancho test: test_every_vector_has_the_key_python_gives_it, test_what_is_not_an_ipv6_literal_is_left_to_the_caller, test_one_changed_byte_of_a_literal_never_traps_or_escapes` |
+| v08 | a ninth group is written past the address | killed | `cancho test: test_every_vector_has_the_key_python_gives_it, test_what_is_not_an_ipv6_literal_is_left_to_the_caller` |
+| v09 | a second :: is an address | killed | `cancho test: test_every_vector_has_the_key_python_gives_it, test_what_is_not_an_ipv6_literal_is_left_to_the_caller` |
+| v10 | a trailing single colon is an address | killed | `cancho test: test_every_vector_has_the_key_python_gives_it` |
+| v11 | a dotted quad may have leading zeros | killed | `cancho test: test_every_vector_has_the_key_python_gives_it` |
+| v12 | an octet may be 256 | killed | `cancho test: test_every_vector_has_the_key_python_gives_it` |
+| v13 | a dotted quad need not be last | killed | `cancho test: test_every_vector_has_the_key_python_gives_it` |
+| v14 | a port may have six digits | killed | `cancho test: test_every_vector_has_the_key_python_gives_it, test_what_is_not_an_ipv6_literal_is_left_to_the_caller, test_a_text_that_is_too_long_or_a_scratch_that_is_too_small_is_refused_unread` |
+| v15 | anything may follow the bracket | killed | `cancho test: test_every_vector_has_the_key_python_gives_it` |
+| v16 | a scratch that is too small is written | killed | `cancho test: test_a_text_that_is_too_long_or_a_scratch_that_is_too_small_is_refused_unread` |
+| v18 | a leading single colon is an address | killed | `cancho test: test_every_vector_has_the_key_python_gives_it` |
+| v19 | seven groups are an address | killed | `cancho test: test_every_vector_has_the_key_python_gives_it` |
+| v20 | a :: that stands for no group is an address | killed | `cancho test: test_every_vector_has_the_key_python_gives_it` |
+| v21 | the groups after :: are moved one byte off | killed | `cancho test: test_every_vector_has_the_key_python_gives_it, test_every_spelling_of_one_address_is_one_key, test_an_ipv4_mapped_address_is_keyed_as_the_ipv4_address` |
+| v22 | a prefix below 1 overflows (or aggregates everything) | killed | `cancho test: test_every_vector_has_the_key_python_gives_it, test_the_prefix_is_where_the_key_stops_telling_addresses_apart` |
+| v23 | the masked byte is shifted, not cut | killed | `cancho test: test_every_vector_has_the_key_python_gives_it, test_the_prefix_is_where_the_key_stops_telling_addresses_apart` |
+| v24 | brackets are not understood | killed | `cancho test: test_every_vector_has_the_key_python_gives_it, test_every_spelling_of_one_address_is_one_key, test_an_ipv4_mapped_address_is_keyed_as_the_ipv4_address` |
+| v25 | the IPv4 address of a mapped one is read one byte off | killed | `cancho test: test_every_vector_has_the_key_python_gives_it, test_an_ipv4_mapped_address_is_keyed_as_the_ipv4_address` |
+| v26 | the key is not padded: 0x0a and 0xa0 are one key | killed | `cancho test: test_every_vector_has_the_key_python_gives_it, test_every_spelling_of_one_address_is_one_key, test_the_prefix_is_where_the_key_stops_telling_addresses_apart` |
+| w01 | the prefix is never applied | killed | `e2e: an_ipv6_host_rotating_inside_its_prefix_is_one_bucket` |
+| w02 | every route aggregates on /64 | killed | `e2e: a_prefix_of_128_tells_every_address_apart_and_a_prefix_of_48_aggregates_more` |
+| w03 | the aggregated key is computed and not used | killed | `e2e: an_ipv6_host_rotating_inside_its_prefix_is_one_bucket` |
+| w04 | an element that is not a literal has the empty key | killed | `e2e: ipv4_is_keyed_as_before_and_an_ipv4_mapped_address_is_the_ipv4_address, what_is_not_an_ipv6_literal_is_keyed_on_its_text_as_before` |
+| w05 | the prefix is read from the ceiling's bucket | killed | `e2e: an_ipv6_host_rotating_inside_its_prefix_is_one_bucket` |
+| h01 | a ceiling of 1,000,001 a second is accepted | killed | `generate_test: FAIL refusal config.ratelimit at line 10: exit 2, '{"file": "/tmp/tmpdd0w8r5q.toml", "hint; FAIL rate refusal naming rate_route_limit at line 10: exit 2, '{"file": "/tmp/tmpluzxcnf0.` |
+| h02 | a boolean is a ceiling's burst | killed | `generate_test: FAIL refusal config.ratelimit at line 11: exit 0, ''; FAIL rate refusal naming rate_route_burst at line 11: exit 0, ''` |
+| h03 | rate_route_burst is accepted without rate_route_limit | killed | `generate_test: FAIL refusal config.ratelimit at line 10: exit 0, ''; FAIL rate refusal naming rate_route_burst at line 10: exit 0, ''` |
+| h04 | a route key may have a ceiling | killed | `generate_test: FAIL refusal config.ratelimit at line 9: exit 0, ''; FAIL refusal config.ratelimit at line 10: exit 0, ''; FAIL refusal config.ratelimit at line 10: exit 0, ''; FAIL rate refusal naming rate_route_lim` |
+| h05 | a prefix of 0 is accepted | killed | `generate_test: FAIL refusal config.ratelimit at line 11: exit 0, ''; FAIL rate refusal naming rate_xff_prefix at line 11: exit 0, ''` |
+| h06 | a prefix of 129 is accepted | killed | `generate_test: FAIL refusal config.ratelimit at line 11: exit 0, ''; FAIL rate refusal naming rate_xff_prefix at line 11: exit 0, ''` |
+| h07 | a prefix is accepted with a key that is not an address | killed | `generate_test: FAIL refusal config.ratelimit at line 10: exit 0, ''; FAIL refusal config.ratelimit at line 9: exit 0, ''; FAIL refusal config.ratelimit at line 10: exit 0, ''; FAIL refusal config.ratelimit at line 1` |
+| h08 | the ceiling's bucket is not counted in the table | killed | `generate_test: FAIL refusal config.ratelimit at line 18: exit 0, ''; FAIL refusal config.ratelimit at line 11: exit 0, ''; FAIL refusal config.ratelimit at line 43: exit 0, ''; FAIL rate refusal naming rate_route_li` |
+| h09 | the ceiling is the first bucket of its route | killed | `generate_test: FAIL the routes table must contain '\\t3\\t1000\\t3\\tx:f\\t8\\t1089\\t0\\t\\t0\\t\\t\\t\\` |
+| h10 | the default prefix is 128 | killed | `generate_test: FAIL the routes table must contain '\\t7\\t1000\\t7\\tx:l\\t1024\\t64\\t0\\t\\t0\\t\\t\\t\` |
+| h11 | a boolean is a prefix | killed | `generate_test: FAIL refusal config.ratelimit at line 11: exit 0, ''; FAIL rate refusal naming rate_xff_prefix at line 11: exit 0, ''` |
+| x01 | a reopened circuit stays open for a quarter of a period | killed | `proxy_test: the_half_open_trial_has_one_life_from_open_to_closed` |
+| x02 | a trial in flight does not hold the others back | killed | `proxy_test: the_half_open_trial_has_one_life_from_open_to_closed` |
+| x03 | a trial's success leaves the circuit half open | killed | `proxy_test: the_half_open_trial_has_one_life_from_open_to_closed` |
+| x04 | a trial's success does not forget the failures | killed | `proxy_test: the_half_open_trial_has_one_life_from_open_to_closed` |
+| x05 | a failed trial does not reopen the circuit | killed | `proxy_test: the_half_open_trial_has_one_life_from_open_to_closed` |
+| x06 | an open circuit admits everything | killed | `proxy_test: the_half_open_trial_has_one_life_from_open_to_closed` |
+| x07 | the trial is never recorded as in flight | killed | `proxy_test: the_half_open_trial_has_one_life_from_open_to_closed` |
+| x08 | a failed trial is never replaced by another | explained | survivor: the reset is redundant, the failed trial's session closing hands the trial back (`release_trial`) before the next period |
+| x09 | the circuit opens one failure late | killed | `proxy_test: the_half_open_trial_has_one_life_from_open_to_closed` |
+
+`q03` and `x08` are the two explained survivors, recorded with the reason in `tests/ratelimit_mutants.py` (`EXPLAINED`), and the runner exits 0 on them. Neither is a claim that the code is right where a test could
+have been written: `x08`'s reset is a second way to hand back a trial that `release_trial` already covers, and `q03`'s bound is deliberately above the worst case.

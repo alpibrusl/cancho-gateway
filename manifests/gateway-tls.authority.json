@@ -628,7 +628,6 @@
     "listen_port",
     "lists",
     "lists_token",
-    "literal_max",
     "live",
     "log_failure_exit",
     "logq_size",
@@ -1232,5 +1231,5 @@
   ],
   "folded_operators": 229,
   "folded_calls": 345,
-  "functions": 1634
+  "functions": 1633
 }
