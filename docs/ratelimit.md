@@ -1,6 +1,6 @@
 # Rate limiting (task #9)
 
-Status: **design, written before the code (2026-10-12); section 12 is filled in as the code lands.** The gates in section 10 are fixed here
+Status: **built (2026-10-12).** Sections 1 to 11 are the design, written before the code; section 12 is what was built and measured. The gates in section 10 are fixed here
 and must be able to fail. A claim found false later is corrected in place and marked *(corrected)*. Claims about cancho are about the pinned
 compiler (`cancho.toml`, `2fcf4cd`).
 
@@ -213,8 +213,8 @@ The choice, against the two others:
 - *Refuse* is what nginx's `limit_req` does when its zone is exhausted (it answers 503); the status here is 429 because the cause is the *number of distinct keys the clients sent*, which they can change, and `Retry-After` says when a slot will free.
 
 The cost, stated: an attacker who sends keys faster than they recover denies service to **new** keys on that route, as in the table of 3.3. A bucket is occupied from a request until it has refilled
-(`burst / N` periods), so the sizing rule is: **`rate_buckets` at least twice the number of distinct keys that can be active within one refill window** (`burst * P / N` ms). The counters of section 9 show
-a table that is too small (`rate_table_full` rising with `rate_limited` flat). What the load factor does is measured in section 12.
+(`burst / N` periods), so the sizing rule is: **`rate_buckets` at least three times the number of distinct keys that can be recovering within one refill window** (`burst * P / N` ms). The counters of section 9 show
+a table that is too small (`rate_table_full` rising with `rate_limited` flat). What the load factor does is measured in section 12.3.
 
 ## 7. Where in the pipeline
 
@@ -298,4 +298,109 @@ Each must be able to fail, with a mutant shown failing it (section 12 records th
 
 ## 12. As built
 
-*(filled in as the code lands)*
+Built 2026-10-12 on the pinned compiler. Files: `src/ratelimit.cho` (the module, pure, 289 lines), `src/route.cho` (six accessors of the generated record), `src/problem.cho` (`response_after`, the 429), `src/metrics.cho` (two
+counters per route), `src/proxy.cho` (`rate_limited`, 30 lines, called between the body check and the circuit's), `src/shared.cho` (the table in `Core`, slot field 42), `scripts/generate.py` (the keys, the eight rules).
+`proxy.cho` is 1,632 lines, `shared.cho` under 450: the ceiling is not near. **The authority report does not change**: no label moves (`manifests/` differ by the names of the new pure functions,
+and `docs/proof.html` by the count of them, 936 to 961).
+
+### 12.1 What the build found false in the design
+
+- *(corrected)* Section 6.4 first said the wait for a full table could be "a million hours". One request spends one token and a token takes at most an hour to come back (3,600 s); only a bucket that has
+  spent many tokens is further from whole, and the day's cut (86,400 s) is reached by a bucket 25 tokens down at `1/h`. The unit test builds exactly that.
+- *(corrected)* The first guess at how full a table can be before it refuses was ten times too hopeful (a refusal in a hundred at a quarter full). Measured, section 12.3.
+- Two guards in the arithmetic (`if have >= cap`, and `if secs < 1` after the rounding) were redundant: their mutants survived, because other lines already made them true (the cap comparison covers a damaged
+  bucket; the deficit clamp makes the wait at least one millisecond). They were removed rather than excused, and the test for the rounding order (3,001 units at 3 a millisecond is 2 s, not 1) was added.
+- The tunnel-place rule of section 7 is not hypothetical. Without the reset of the upgrade state before the refusal (`p02` below), six limited upgrades left lingering fill the cap of two and an
+  unlimited upgrade is refused `ws.limit`; with it, it is admitted. The same latent shape exists for the circuit's refusal (`proxy.circuit-open` after an upgrade was asked for), which this task does not touch.
+
+### 12.2 Tests
+
+| suite | result |
+|---|---|
+| `cancho test` | 11 suites, 114 tests, 0 failures: `ratelimit` 24, `metrics` 12 (one new), `problem` 6 (one new), the rest unchanged |
+| `python3 tests/ratelimit_test.py` | **16 tests, 0 failures** (run three times) |
+| `python3 tests/generate_test.py` | 7 prefix cases, **166 refusal cases** (41 new, 8 rules of section 4), 23 accepted (10 new), 0 failures |
+| `python3 tests/proxy_test.py` | 77 tests, 0 failures, three runs |
+| `python3 tests/admin_test.py`, `tls_test.py`, `websocket_test.py` | 16, 22, 55 (2 skipped: the `websockets` library is not installed), 0 failures |
+| smuggling (`--gateway`, `--prefixes`, `--chunked`, `--fuzz 1500`), `tests/response/run.py`, `tests/route_test.py` | 0 failures |
+
+Not covered by a test, said once: that a limited request does not take the circuit's half-open trial (the order in section 7 is by construction and by the code's comment, not by a test), and a flood that
+fills the slot table with lingering 429s.
+
+### 12.3 What the table does with load (measured, deterministic, pinned in `tests/ratelimit_test.cho`)
+
+A table of 2,048 buckets (512 sets of four) whose buckets never recover (`1/h`, burst 1: the worst case), keys sent one after the other; the number of the keys sent so far that found their set full:
+
+| keys sent | load | `key-N` keys refused | API-key-shaped keys refused |
+|---|---|---|---|
+| 512 | 25% | 0 | 1 (0.2%) |
+| 1,024 | 50% | 3 (0.3%) | 30 (2.9%) |
+| 1,536 | 75% | 62 (4.0%) | 139 (9.1%) |
+| 2,048 | 100% | 278 (13.6%) | 372 (18.2%) |
+| 3,072 | 150% | 1,034 | 1,134 |
+
+So the sizing rule of 6.4 stands in numbers: keep the distinct keys that can be recovering at once under **a third of the buckets** and fewer than 1 in 200 new keys is refused; at half, about 3 in 100; a full table
+refuses about one in five. These are the worst case: in service a bucket frees as soon as it has refilled.
+
+### 12.4 Mutants (`python3 tests/ratelimit_mutants.py`)
+
+55 single edits of the new code, each in a copy of the tree; a mutant is killed by `cancho test` (unit), by the end-to-end test (the tests named first run first, then the whole file) or by the generator's tests.
+**55 killed, 0 survived, 0 invalid** (the run listed 57; the two that survived were the redundant guards above, removed with their mutants, and the six arithmetic mutants around them were run again).
+
+| id | edit | verdict | killed first by |
+|---|---|---|---|
+| a01 | the refill is not capped at the burst | killed | `test_a_bucket_never_holds_more_than_its_burst` |
+| a02 | a huge elapsed time is not cut (the product overflows) | killed | `test_a_huge_elapsed_time_is_cut_at_thirty_days_and_overflows_nothing` |
+| a03 | a clock that goes back gains negative time | killed | `test_a_clock_that_stands_still_or_goes_back_gives_nothing` |
+| a05 | the milliseconds of a wait are rounded down | killed | `test_retry_after_is_rounded_up_and_never_zero` |
+| a06 | the seconds of a wait are rounded down | killed | `test_retry_after_is_rounded_up_and_never_zero` |
+| a08 | a bucket holding exactly one token is refused | killed | `test_a_new_key_gets_its_burst_then_the_bucket_is_empty_and_refills` |
+| a09 | a request costs nothing | killed | `test_a_new_key_gets_its_burst_then_the_bucket_is_empty_and_refills` |
+| a10 | the clock of a bucket is never brought up to date | killed | `test_a_new_key_gets_its_burst_then_the_bucket_is_empty_and_refills` |
+| a11 | a deficit of 0 or less is not clamped | killed | `test_retry_after_is_rounded_up_and_never_zero` |
+| t01 | a bucket that has refilled is never taken over | killed | `test_a_set_of_recovering_buckets_refuses_a_new_key_and_still_serves_the_old` |
+| t02 | an empty bucket is not free | killed | `test_a_new_key_gets_its_burst_then_the_bucket_is_empty_and_refills` |
+| t03 | a new key starts with an empty bucket | killed | `test_a_new_key_gets_its_burst_then_the_bucket_is_empty_and_refills` |
+| t04 | a key never finds its own bucket | killed | `test_a_new_key_gets_its_burst_then_the_bucket_is_empty_and_refills` |
+| t05 | a fingerprint can be 0, the mark of an empty bucket | killed | `test_the_hash_has_bounded_values_and_the_empty_key_is_one` |
+| t06 | the wait for a full table is not cut at a day | killed | `test_the_wait_for_a_full_table_is_at_most_a_day` |
+| t07 | a full table names the longest wait, not the shortest | killed | `test_a_set_of_recovering_buckets_refuses_a_new_key_and_still_serves_the_old` |
+| t08 | a table that does not fit is read | killed | `test_a_table_that_does_not_fit_is_refused_not_read` |
+| t09 | a route of one bucket has a set of four | killed | `test_a_routes_table_is_its_own_slice_of_the_one_table` |
+| t10 | half the sets are never used | killed | `test_the_load_a_table_carries_before_it_refuses` |
+| t11 | the first hash has too few values | killed | `test_the_load_a_table_carries_before_it_refuses` |
+| t12 | a lookup reads the next bucket | killed | `test_a_new_key_gets_its_burst_then_the_bucket_is_empty_and_refills` |
+| k01 | the first and last forwarded-for elements are swapped | killed | `test_the_last_forwarded_for_element_is_the_fronts` |
+| k02 | a repeated header is keyed on its first value | killed | `test_a_missing_empty_or_repeated_header_is_the_absent_key` |
+| k03 | the last element is cut at the first comma | killed | `test_the_last_forwarded_for_element_is_the_fronts` |
+| k04 | the last forwarded-for header is the first | killed | `test_the_last_forwarded_for_element_is_the_fronts` |
+| k05 | the last element keeps its spaces | killed | `test_the_last_forwarded_for_element_is_the_fronts` |
+| k06 | a header key is the absent key | killed | `test_a_header_key_is_the_one_headers_value` |
+| k07 | a short spec is read past its end | killed | `test_a_spec_the_generator_never_writes_is_the_absent_key` |
+| k08 | a header whose name extends the key's is the key | killed | `test_a_missing_empty_or_repeated_header_is_the_absent_key` |
+| p01 | the limit is never applied | killed | `e2e: over_the_limit_is_a_429_with_a_retry_after_and_the_upstream_never_sees_it` |
+| p02 | a limited upgrade keeps its place among the tunnels | killed | `e2e: an_upgrade_is_limited_and_a_limited_upgrade_takes_no_tunnel_place` |
+| p03 | a spent bucket is reported as a full table | killed | `e2e: over_the_limit_is_a_429_with_a_retry_after_and_the_upstream_never_sees_it` |
+| p04 | limit.rate carries no Retry-After | killed | `e2e: over_the_limit_is_a_429_with_a_retry_after_and_the_upstream_never_sees_it` |
+| p05 | a route with no limit is limited | killed | `e2e: under_the_limit_everything_passes` |
+| p06 | limit.rate is not counted | killed | `e2e: the_counters_agree_with_what_the_clients_were_told` |
+| p07 | limit.rate-table carries no Retry-After | killed | `e2e: a_full_table_refuses_a_new_key_and_still_serves_an_old_one` |
+| p08 | every route uses the first buckets of the table | killed | `e2e: a_burst_then_a_refill_after_the_wait_it_named` |
+| p09 | every request has the absent key | killed | `e2e: two_header_keys_are_limited_independently` |
+| p10 | the clock is not passed | killed | `e2e: a_burst_then_a_refill_after_the_wait_it_named` |
+| q01 | every response carries a Retry-After | killed | `test_a_404_is_exactly_this` |
+| q02 | a 429 has no reason | killed | `test_a_429_names_when_to_come_back_and_no_other_response_does` |
+| n01 | a full table is counted as a spent bucket | killed | `e2e: a_full_table_refuses_a_new_key_and_still_serves_an_old_one` |
+| n02 | the counter overwrites the sum of the durations | killed | `e2e: a_full_table_refuses_a_new_key_and_still_serves_an_old_one` |
+| n03 | a route's tables begin at its bucket count | killed | `e2e: two_header_keys_are_limited_independently` |
+| n04 | the burst is the rate | killed | `e2e: under_the_limit_everything_passes` |
+| g01 | a limit may be keyed on Host or Content-Length | killed | `tests/generate_test.py` |
+| g02 | a limit may be keyed on a forwarding claim the route does not believe | killed | `tests/generate_test.py` |
+| g03 | a table of 6 buckets is accepted | killed | `tests/generate_test.py` |
+| g04 | a deployment of exactly 65,536 buckets is refused | killed | `tests/generate_test.py` |
+| g05 | header names are not lowercased | killed | `tests/generate_test.py` |
+| g06 | rate_buckets is accepted with a route key | killed | `tests/generate_test.py` |
+| g07 | a rate of 1,000,001 a second is accepted | killed | `tests/generate_test.py` |
+| g08 | a boolean is a burst | killed | `tests/generate_test.py` |
+| g09 | rate_buckets without rate_limit is accepted | killed | `tests/generate_test.py` |
+| g10 | every route's table begins at bucket 0 | killed | `tests/generate_test.py` |
