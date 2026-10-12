@@ -651,7 +651,7 @@ fn tunnel_pump[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, client: int,
         metrics.ws_messages(contents(core.stats), w[14]);
         w[14] = 0;
     }
-    if st[ps + 14] == 1 && w[0] == 1 {
+    if st[ps + 14] == 1 && w[0] == 1 && (st[ps + 4] == 0 || w[sent_at] != 0) {
         // A side went away while the gateway was closing: it will not answer, and no Close can reach it; the other is still waited for. A direction cut off inside a frame cannot be given one either.
         w[done_at] = 1;
         var to_src = wsframe.t_sent_upstream();
@@ -665,7 +665,7 @@ fn tunnel_pump[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, client: int,
             w[sent_at] = 2;
         }
         st[ps + 4] = 0;
-    } else if st[ps + 14] == 1 && w[13] == 0 {
+    } else if st[ps + 14] == 1 && w[0] != 1 && w[13] == 0 {
         // The source has ended. Bytes the parser still holds (a header, or the start of a Pong) or a payload that was cut off make it a truncated frame; otherwise it is the ending of slice 1.
         var cut = w[b] == 1;
         if st[ps + 4] > 0 && shared.pend_size() - st[pt + 5] > 0 {
@@ -709,6 +709,13 @@ fn tunnel_pump[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, client: int,
             return 1;
         }
         if st[pu + 5] == 0 {
+            if w[0] == 1 && w[wsframe.dir_base(0) + wsframe.d_offender()] == 1 && st[pc + 3] == 6 {
+                // The client broke a rule and may still be sending: closing now would reset the connection and could destroy the Close frame it is owed, so the upstream goes and the
+                // client lingers, its input read and thrown away, as after a refusal (docs/websocket-frames.md section 7).
+                close_slot(tab, core, u);
+                st[pc + 2] = 0 - 1;
+                st[pc + 3] = 4;
+            }
             st[pc + 8] = 1;
             if flush(tab, core, client, now) == 1 {
                 return 1;

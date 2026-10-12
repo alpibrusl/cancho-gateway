@@ -519,7 +519,7 @@ upstream = "up"
 
 
 class Gateway:
-    def __init__(self, tmp, up_port, lib_port, idle=20000, lifetime=60000, max_tunnels=120, circuit=0, tls=False, pool=4, close_ms=5000):
+    def __init__(self, tmp, up_port, lib_port, idle=20000, lifetime=60000, max_tunnels=120, circuit=0, tls=False, pool=4, close_ms=5000, routes=None, extra=""):
         self.tmp = pathlib.Path(tmp)
         self.port, self.admin = pt.free_port(), pt.free_port()
         self.tls_port = pt.free_port() if tls else None
@@ -544,7 +544,7 @@ ws_idle_timeout_ms = %d
 ws_max_lifetime_ms = %d
 ws_max_tunnels = %d
 ws_close_ms = %d
-
+%s
 [[upstream]]
 name = "up"
 addr = "127.0.0.1:%d"
@@ -552,7 +552,7 @@ addr = "127.0.0.1:%d"
 [[upstream]]
 name = "lib"
 addr = "127.0.0.1:%d"
-%s""" % (self.port, self.admin, tlsconf, pool, circuit, idle, lifetime, max_tunnels, close_ms, up_port, lib_port, ROUTES))
+%s""" % (self.port, self.admin, tlsconf, pool, circuit, idle, lifetime, max_tunnels, close_ms, extra, up_port, lib_port, routes or ROUTES))
         out = self.tmp / "gen"
         subprocess.run([sys.executable, str(TREE / "scripts" / "generate.py"), str(deploy), "--out", str(out)], check=True)
         files = [str(out / n) for n in ("deploy.cho", "routes.cho", "tlsfiles.cho")] + pt.dependencies() + [str(TREE / "src" / (n + ".cho")) for n in pt.SOURCES]

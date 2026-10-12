@@ -15,7 +15,7 @@ import std.bytes;
 //     8, 9, 10 the UTF-8 automaton: continuation bytes still needed, and the range of the next byte   11 the Close code being read   12 the frame's payload length
 //     13 1 once a Close frame has gone by   14 the event the last `scan` reported (0 none, 1 violation, 2 a Close frame went by, 3 the gateway's own Pong, 4 a header or Pong is
 //     incomplete)   15 its number (the rule, the Close code, or the bytes to drop)   16 1 if the frame in hand is validated as UTF-8   17 for a violation: 1 if the bytes
-//     `scan` answered end at a frame boundary   18 1 once the direction is junk (a violation was seen: everything from it is discarded)
+//     `scan` answered end at a frame boundary   18 1 once the direction is junk (a violation was seen: everything from it is discarded)   19 1 if the direction's frames are the cause of the close
 //
 // What `scan` does to its answer: it never answers more than the bytes it was given; a header is not answered (so not forwarded) until it is whole and has been judged; a frame that
 // violates a rule is not answered, and neither is anything after it. See the document for the rules (section 3) and for why a violation in the middle of a payload cannot be undone.
@@ -120,6 +120,11 @@ pub fn d_boundary() -> [] int {
 
 pub fn d_junk() -> [] int {
     return 18;
+}
+
+// 19: 1 if this direction's frames are what the gateway is closing the tunnel for.
+pub fn d_offender() -> [] int {
+    return 19;
 }
 
 // The events `scan` reports.
@@ -271,15 +276,24 @@ pub fn begin_close[&t](ws: &!t [int], cause: int, offender: int, now: int, wait_
             ws[5] = 2;
         }
         ws[dir_base(0) + 18] = 1;
+        ws[dir_base(0) + 19] = 1;
     } else if offender == 1 {
         ws[7] = 1;
         if ws[dir_base(1) + 17] == 0 {
             ws[4] = 2;
         }
         ws[dir_base(1) + 18] = 1;
+        ws[dir_base(1) + 19] = 1;
     }
     if cause == 13 {
         ws[6] = 1;
+    }
+    // A direction that has already carried a Close frame carries no second one.
+    if ws[dir_base(0) + 13] == 1 {
+        ws[5] = 2;
+    }
+    if ws[dir_base(1) + 13] == 1 {
+        ws[4] = 2;
     }
     if ws[8] == 0 {
         ws[8] = to_client;
