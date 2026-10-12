@@ -308,6 +308,19 @@ nav a[aria-current] { color: var(--fg); font-weight: 650; }
   </ul>
 </section>
 
+<section id="websocket">
+  <h2>WebSocket frames</h2>
+  <p>The tunnel reads frames in both directions (<a href="https://github.com/alpibrusl/cancho-gateway/blob/main/docs/websocket-frames.md"><code>docs/websocket-frames.md</code></a>). What was measured, with a client and an upstream written from RFC 6455 for the tests and a recording upstream that keeps every byte the gateway sent it:</p>
+  <ul>
+    <li>The parser holds no message: a header is held until it is whole, payload is skipped by arithmetic, text is checked as it goes by. A cancho test feeds every valid stream in every split of its bytes and one byte at a time (the same state at the end), every refusal at every split (the same rule), and 4,500 random streams (none traps, none is answered more than it was given).</li>
+    <li>Forty client violations and eighteen upstream violations (reserved bits and opcodes, control frames, masking in the wrong direction, non-minimal and 64-bit lengths, fragmentation order, a message over the route&rsquo;s limit alone or over its fragments, eleven classes of invalid UTF-8, truncated frames) are each answered with the documented Close code on the right side, with the documented rule tag in the log, and the other peer&rsquo;s received bytes are <strong>equal</strong> to the valid frames before the violation plus the gateway&rsquo;s own Close: nothing of the offending frame crosses.</li>
+    <li>A timer that ends a tunnel while a 32 MiB frame is in flight, in either direction, waits for the frame: it arrives whole and intact and the Close follows it. A silent charger is Pinged and closed at the pong deadline (2.1 s with a 1 s ping and 0.8 s to answer); one that answers stays open past the idle time; the upstream never sees the Ping or its Pong.</li>
+    <li><strong>Cost</strong>, same deployment, slice 1 against slice 2, 256 MiB, median of three: binary frames 1.56 against 1.64 ms/MiB downstream and 1.84 against 1.84 upstream; <strong>text frames 1.7 against 4.5 ms/MiB downstream and 1.8 against 5.2 upstream</strong>, because the UTF-8 automaton looks at every byte. One core.</li>
+    <li>66 mutants of the new code: 66 killed (one first survived and a test was added); slice 1&rsquo;s 75 re-run on the rewritten tunnel: 72 killed, 3 argued as before. The <code>websockets</code> library (17.2) was run as a client, plain and over TLS.</li>
+    <li><strong>Not tested:</strong> a browser; latency through the parser; hundreds of tunnels with this slice; the metrics&rsquo; rule table (96 entries) can be filled by TLS engine tags, after which a new <code>ws.*</code> tag is counted under <code>other</code> (the log keeps it).</li>
+  </ul>
+</section>
+
 <section id="bench">
   <h2>The benchmark</h2>
   <p class="sub">Protocol fixed before any number (<a href="https://github.com/alpibrusl/cancho-gateway/blob/main/docs/bench.md">docs/bench.md</a>), run by <code>bench/run.py</code>, raw results in <code>bench/results/</code>.</p>
@@ -432,7 +445,7 @@ nav a[aria-current] { color: var(--fg); font-weight: 650; }
   <ul>
     <li>No soak: a long run with faults has not been done. Short-lived tests are all there is.</li>
     <li>No independent review of the parsing; the corpus is the authors&rsquo;.</li>
-    <li>Not built: HS256 and JWKS, revocation of a token, a key change without a restart, client certificates. API-key authentication (<code>docs/auth.md</code>) and EdDSA JWT verification (<code>docs/jwt.md</code>) are built per route. Rate limiting is built per route, keyed by the route, a header, an <code>X-Forwarded-For</code> element or the authenticated key, and never by client address (<code>docs/ratelimit.md</code>). TLS 1.3 is built, with certificate reload on <code>SIGHUP</code> (<code>docs/tls.md</code>); WebSocket is built as a byte tunnel, and the gateway reads no frame (<code>docs/websocket.md</code>).</li>
+    <li>Not built: HS256 and JWKS, revocation of a token, a key change without a restart, client certificates. API-key authentication (<code>docs/auth.md</code>) and EdDSA JWT verification (<code>docs/jwt.md</code>) are built per route. Rate limiting is built per route, keyed by the route, a header, an <code>X-Forwarded-For</code> element or the authenticated key, and never by client address (<code>docs/ratelimit.md</code>). TLS 1.3 is built, with certificate reload on <code>SIGHUP</code> (<code>docs/tls.md</code>); WebSocket is built, frames included (<code>docs/websocket.md</code>, <code>docs/websocket-frames.md</code>); not built there: <code>permessage-deflate</code>, OCPP-J message validation, per-message rate limits.</li>
     <li>One core, about 127 concurrent sessions, no client keep-alive.</li>
   </ul>
   <p class="note"><a href="index.html">Back to the overview</a> · <a href="https://github.com/alpibrusl/cancho-gateway/tree/main/docs">All design documents</a></p>

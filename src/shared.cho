@@ -19,6 +19,7 @@ import gateway.problem;
 import gateway.response;
 import gateway.route;
 import gateway.tlsio;
+import gateway.wsframe;
 
 // The state every part of the proxy shares (docs/proxy.md): the constants that size it, the `Core` record, the per-slot metadata and the
 // access-log line, the client's bytes (plain or through `gateway.tlsio`) and the end of a session. Split from `proxy.cho` to keep each file
@@ -186,6 +187,8 @@ pub res struct Core {
     abuf: Box[[byte]],
     // The rate limiter's buckets (docs/ratelimit.md section 6): three ints each, `routes_table.rate_buckets_total()` of them, sized at start.
     rl: Box[[int]],
+    // The frame parsers of the WebSocket tunnels, `wsframe.state_len()` ints for each client slot (docs/websocket-frames.md section 11).
+    wsf: Box[[int]],
     // TLS: the engine and the ciphertext buffers, or `Off` (docs/tls.md).
     tls: tlsio.Tls,
 }
@@ -316,6 +319,14 @@ pub fn log_end[&c](core: &!c Core, k: int) -> [] int {
     if st[p + 26] > 0 && st[p + 25] > 0 {
         wait_ms = st[p + 26] - st[p + 25];
     }
+    // The code of the first Close frame of a tunnel, if it saw one (docs/websocket-frames.md section 8): logged, and counted by code.
+    var ws_close = 0;
+    if st[p + ws_mode()] == 2 {
+        ws_close = contents(core.wsf)[k * wsframe.state_len() + wsframe.t_first_code()];
+        if ws_close > 0 {
+            metrics.ws_closed(contents(core.stats), ws_close);
+        }
+    }
     var route_index = 0 - 1;
     if st[p + 31] > 0 {
         route_index = st[p + 31] - 1;
@@ -331,7 +342,7 @@ pub fn log_end[&c](core: &!c Core, k: int) -> [] int {
     }
     var n = 0 - 1;
     if logq_size() - at >= accesslog.max_line() {
-        n = accesslog.line_as(q[at..at + accesslog.max_line()], ids[2] + st[p + 24], meta_get(core, k, 4, 0), meta_get(core, k, 108, 2), meta_get(core, k, 124, 3), route_name, upstream_name, st[p + 29], meta_get(core, k, 68, 1), outcome, now - st[p + 24], upstream_ms, st[p + 28], st[p + 27], st[p + tlsio.f_mode()] != 0, st[p + ws_mode()] == 2, identity);
+        n = accesslog.line_full(q[at..at + accesslog.max_line()], ids[2] + st[p + 24], meta_get(core, k, 4, 0), meta_get(core, k, 108, 2), meta_get(core, k, 124, 3), route_name, upstream_name, st[p + 29], meta_get(core, k, 68, 1), outcome, now - st[p + 24], upstream_ms, st[p + 28], st[p + 27], st[p + tlsio.f_mode()] != 0, st[p + ws_mode()] == 2, identity, ws_close);
     }
     if n < 0 {
         ids[5] = ids[5] + 1;

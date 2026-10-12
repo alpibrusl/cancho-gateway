@@ -459,6 +459,7 @@ ROUTES = """
 name = "v16"
 path_prefix = "/v16"
 websocket = true
+ws_max_message_bytes = 268435456
 subprotocols = ["ocpp1.6"]
 upstream = "up"
 
@@ -466,6 +467,7 @@ upstream = "up"
 name = "v201"
 path_prefix = "/v201"
 websocket = true
+ws_max_message_bytes = 268435456
 subprotocols = ["ocpp1.6", "ocpp2.0.1"]
 upstream = "up"
 
@@ -473,12 +475,14 @@ upstream = "up"
 name = "bare"
 path_prefix = "/bare"
 websocket = true
+ws_max_message_bytes = 268435456
 upstream = "up"
 
 [[route]]
 name = "browser"
 path_prefix = "/browser"
 websocket = true
+ws_max_message_bytes = 268435456
 subprotocols = ["chat"]
 origins = ["https://app.example", "http://localhost:3000"]
 upstream = "up"
@@ -487,6 +491,7 @@ upstream = "up"
 name = "bad"
 path_prefix = "/bad"
 websocket = true
+ws_max_message_bytes = 268435456
 subprotocols = ["ocpp1.6"]
 upstream = "up"
 
@@ -494,6 +499,7 @@ upstream = "up"
 name = "circ"
 path_prefix = "/circ"
 websocket = true
+ws_max_message_bytes = 268435456
 subprotocols = ["ocpp1.6"]
 upstream = "up"
 
@@ -501,6 +507,7 @@ upstream = "up"
 name = "lib"
 path_prefix = "/lib"
 websocket = true
+ws_max_message_bytes = 268435456
 subprotocols = ["ocpp1.6"]
 upstream = "lib"
 
@@ -512,7 +519,7 @@ upstream = "up"
 
 
 class Gateway:
-    def __init__(self, tmp, up_port, lib_port, idle=20000, lifetime=60000, max_tunnels=120, circuit=0, tls=False, pool=4):
+    def __init__(self, tmp, up_port, lib_port, idle=20000, lifetime=60000, max_tunnels=120, circuit=0, tls=False, pool=4, close_ms=5000, routes=None, extra=""):
         self.tmp = pathlib.Path(tmp)
         self.port, self.admin = pt.free_port(), pt.free_port()
         self.tls_port = pt.free_port() if tls else None
@@ -536,7 +543,8 @@ circuit_open_ms = 1000
 ws_idle_timeout_ms = %d
 ws_max_lifetime_ms = %d
 ws_max_tunnels = %d
-
+ws_close_ms = %d
+%s
 [[upstream]]
 name = "up"
 addr = "127.0.0.1:%d"
@@ -544,7 +552,7 @@ addr = "127.0.0.1:%d"
 [[upstream]]
 name = "lib"
 addr = "127.0.0.1:%d"
-%s""" % (self.port, self.admin, tlsconf, pool, circuit, idle, lifetime, max_tunnels, up_port, lib_port, ROUTES))
+%s""" % (self.port, self.admin, tlsconf, pool, circuit, idle, lifetime, max_tunnels, close_ms, extra, up_port, lib_port, routes or ROUTES))
         out = self.tmp / "gen"
         subprocess.run([sys.executable, str(TREE / "scripts" / "generate.py"), str(deploy), "--out", str(out)], check=True)
         files = [str(out / n) for n in ("deploy.cho", "routes.cho", "tlsfiles.cho")] + pt.dependencies() + [str(TREE / "src" / (n + ".cho")) for n in pt.SOURCES]
@@ -746,8 +754,9 @@ class Main:
         assert e["status"] == 101 and e["outcome"] == "ok" and e["rule"] == "" and e["route"] == "v16" and e["upstream"] == "up" and e["method"] == "GET", e
         assert e["bytes_in"] == ws.sent, (e["bytes_in"], ws.sent)
         assert e["bytes_out"] == ws.head_len + ws.received, (e["bytes_out"], ws.head_len, ws.received)
-        assert list(e)[-1] == "upgrade" and e["upgrade"] == "websocket" and "tls" not in e, list(e)
-        assert list(e)[:-1] == ["t", "id", "method", "path", "route", "upstream", "status", "rule", "outcome", "ms", "upstream_ms", "bytes_in", "bytes_out"], list(e)
+        # slice 2: a tunnel that saw a Close frame ends its line with the code of the first one (docs/websocket-frames.md section 8)
+        assert list(e)[-2:] == ["upgrade", "ws_close"] and e["upgrade"] == "websocket" and e["ws_close"] == 1000 and "tls" not in e, list(e)
+        assert list(e)[:-2] == ["t", "id", "method", "path", "route", "upstream", "status", "rule", "outcome", "ms", "upstream_ms", "bytes_in", "bytes_out"], list(e)
         assert e["ms"] >= 0 and e["upstream_ms"] >= 0
         # an ordinary request on the same gateway writes the line it always wrote
         n1 = len(gw.lines())
@@ -932,19 +941,29 @@ class Main:
         settle_down(gw)
         assert gw.alive()
 
-    def bytes_that_are_not_frames_cross_a_tunnel_unchanged(gw, up):
-        # The gateway does not read frames: 3 MiB of random bytes that no WebSocket peer would accept are delivered exactly, and the connection is not judged.
+    def bytes_that_are_not_frames_do_not_cross_a_tunnel(gw, up):
+        # Slice 1 carried 3 MiB of bytes that no WebSocket peer would accept, unjudged. Slice 2 reads frames: the first byte (a reserved bit set) is refused, the client is sent Close 1002, the
+        # upstream is sent Close 1001 (it did nothing wrong) and nothing else (docs/websocket-frames.md sections 3 and 7).
         n = len(up.sunk)
+        n0 = len(gw.lines())
         ws = connect_ws(gw, "/v16/rawsink", timeout=30)
-        junk = os.urandom(3 << 20)
-        ws.sock.sendall(junk)
-        ws.close()
+        junk = b"\xff" * (3 << 20)
+        try:
+            ws.sock.sendall(junk)
+        except OSError:
+            pass
+        op, payload = ws.recv()
+        assert op == 8 and struct.unpack(">H", payload[:2])[0] == 1002, (op, payload)
+        ws.send(8, struct.pack(">H", 1002))
+        ws.eof(8)
         end = time.time() + 6
         while len(up.sunk) <= n and time.time() < end:
             time.sleep(0.05)
         assert len(up.sunk) > n, "the upstream never finished reading"
         path, digest, total = up.sunk[n]
-        assert total == len(junk) and digest == hashlib.sha256(junk).hexdigest(), (total, len(junk))
+        assert total == 8 and digest == hashlib.sha256(bytes([0x88, 0x82, 0, 0, 0, 0, 0x03, 0xe9])).hexdigest(), (total, "only the Close frame of the gateway reaches the upstream")
+        e = gw.find(n0, path="/v16/rawsink")
+        assert e["rule"] == "ws.frame-rsv" and e["outcome"] == "aborted" and e["ws_close"] == 1002, e
         settle_down(gw)
 
     def hostile_upgrade_requests_leave_the_gateway_answering(gw, up):
@@ -1274,10 +1293,15 @@ class Timers:
     def an_idle_tunnel_is_closed_at_the_idle_time(gw, up):
         n0 = len(gw.lines())
         ws = connect_ws(gw, "/v16/silent")
-        took = ws.eof(6)
+        t0 = time.time()
+        op, payload = ws.recv()      # slice 2: a Close frame, 1001, at the frame boundary (the tunnel is idle), then the answer is awaited
+        took = time.time() - t0
+        assert op == 8 and struct.unpack(">H", payload[:2])[0] == 1001, (op, payload)
         assert 0.8 < took < 2.6, "closed after %.2fs" % took
+        ws.send(8, payload[:2])
+        ws.eof(6)
         e = gw.find(n0, path="/v16/silent")
-        assert e["rule"] == "ws.idle-timeout" and e["outcome"] == "aborted" and e["status"] == 101 and e["upgrade"] == "websocket", e
+        assert e["rule"] == "ws.idle-timeout" and e["outcome"] == "aborted" and e["status"] == 101 and e["upgrade"] == "websocket" and e["ws_close"] == 1001, e
         assert gw.metrics()["refusals"].get("ws.idle-timeout", 0) >= 1
         ws.close()
 
@@ -1291,7 +1315,9 @@ class Timers:
             time.sleep(0.4)
         ws.text("still here")
         ws.expect(1, b"still here")
-        took = ws.eof(6)
+        t0 = time.time()
+        ws.expect(8)
+        took = time.time() - t0
         assert 0.8 < took < 2.6, took
         e = gw.find(n0, path="/v16/CP040")
         assert e["rule"] == "ws.idle-timeout", e
@@ -1301,17 +1327,24 @@ class Timers:
         n0 = len(gw.lines())
         ws = connect_ws(gw, "/v16/CP041")
         t0 = time.time()
+        closed = None
         try:
             while time.time() - t0 < 8:
                 ws.send(9, b"k")
-                ws.expect(10, b"k")
+                op, payload = ws.recv()
+                if op == 8:
+                    closed = payload
+                    break
+                assert (op, payload) == (10, b"k"), (op, payload)
                 time.sleep(0.3)
         except (EOFError, OSError):
             pass
         took = time.time() - t0
+        assert closed is not None and struct.unpack(">H", closed[:2])[0] == 1001, closed
         assert 3.7 < took < 5.0, "closed after %.2fs" % took
+        ws.send(8, closed[:2])
         e = gw.find(n0, path="/v16/CP041")
-        assert e["rule"] == "ws.lifetime" and e["outcome"] == "aborted" and e["ms"] >= 3900, e
+        assert e["rule"] == "ws.lifetime" and e["outcome"] == "aborted" and e["ms"] >= 3900 and e["ws_close"] == 1001, e
         ws.close()
 
     def traffic_from_the_upstream_alone_keeps_a_tunnel_open(gw, up):
@@ -1436,7 +1469,7 @@ class Wss:
         ws.eof()
         e = gw.find(n0, path="/v16/CP100")
         assert e["tls"] is True and e["upgrade"] == "websocket" and e["status"] == 101 and e["outcome"] == "ok", e
-        assert list(e)[-2:] == ["tls", "upgrade"], list(e)
+        assert list(e)[-3:] == ["tls", "upgrade", "ws_close"], list(e)
         assert e["bytes_in"] == ws.sent
         ws.close()
 
@@ -1473,22 +1506,32 @@ class Wss:
     def an_idle_wss_tunnel_is_closed_and_a_busy_one_at_the_lifetime(gw, up):
         n0 = len(gw.lines())
         ws = connect_ws(gw, "/v16/silent", tls=True, host="api.example")
-        took = ws.eof(8)
+        t0 = time.time()
+        op, payload = ws.recv()
+        took = time.time() - t0
+        assert op == 8 and struct.unpack(">H", payload[:2])[0] == 1001, (op, payload)
         assert 1.2 < took < 3.5, took
+        ws.send(8, payload[:2])
         e = gw.find(n0, path="/v16/silent")
         assert e["rule"] == "ws.idle-timeout" and e["tls"] is True, e
         n1 = len(gw.lines())
         ws = connect_ws(gw, "/v16/CP103", tls=True, host="api.example")
         t0 = time.time()
+        closed = None
         try:
             while time.time() - t0 < 8:
                 ws.send(9, b"k")
-                ws.expect(10, b"k")
+                op, payload = ws.recv()
+                if op == 8:
+                    closed = payload
+                    break
+                assert (op, payload) == (10, b"k"), (op, payload)
                 time.sleep(0.4)
         except (EOFError, OSError):
             pass
         took = time.time() - t0
-        assert 3.5 < took < 5.5, took
+        assert closed is not None and 3.5 < took < 5.5, (closed, took)
+        ws.send(8, closed[:2])
         e = gw.find(n1, path="/v16/CP103")
         assert e["rule"] == "ws.lifetime" and e["tls"] is True, e
 
@@ -1561,9 +1604,9 @@ def main():
                 gws["Main"] = Gateway(t1, up.port, lib_port)
                 gws["Interop"] = gws["Main"]
             if "Timers" in needed:
-                gws["Timers"] = Gateway(t2, up.port, lib_port, idle=1000, lifetime=4000, max_tunnels=3, circuit=3)
+                gws["Timers"] = Gateway(t2, up.port, lib_port, idle=1000, lifetime=4000, max_tunnels=3, circuit=3, close_ms=500)
             if "Wss" in needed:
-                gws["Wss"] = Gateway(t3, up.port, lib_port, idle=1500, lifetime=4000, max_tunnels=100, tls=True)
+                gws["Wss"] = Gateway(t3, up.port, lib_port, idle=1500, lifetime=4000, max_tunnels=100, tls=True, close_ms=500)
             if "Stop" in needed:
                 gws["Stop"] = Gateway(t4, up.port, lib_port)
             for gname, cls, name in todo:

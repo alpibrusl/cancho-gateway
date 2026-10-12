@@ -4,6 +4,9 @@ listen = 8080
 ws_idle_timeout_ms = 600000      # a tunnel in which no byte moved for ten minutes is closed (two heartbeats at the usual 300 s)
 ws_max_lifetime_ms = 86400000    # and none lives longer than a day: chargers reconnect
 ws_max_tunnels = 64              # at most this many upgrades at once; the gateway's whole table holds 127 sessions
+ws_ping_ms = 30000               # a charger silent for 30 s is Pinged by the gateway; the back office never sees the Ping or its Pong
+ws_pong_ms = 10000               # no Pong 10 s later: the charger is gone (power, NAT), the tunnel is closed and its slot is free
+ws_close_ms = 5000               # a Close frame's answer is waited for this long, and so is a frame boundary to put one at
 
 [[upstream]]
 name = "csms"
@@ -15,6 +18,7 @@ path_prefix = "/ocpp"
 upstream = "csms"
 websocket = true
 subprotocols = ["ocpp1.6", "ocpp2.0.1"]   # a charger that offers neither is refused at the edge
+ws_max_message_bytes = 65536              # an OCPP-J message is a small JSON text: a longer one is refused with Close 1009, counted over its fragments
 # no `origins`: a browser (it always sends Origin) is refused here; a charger sends none and is admitted
 
 [[route]]

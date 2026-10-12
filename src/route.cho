@@ -339,6 +339,13 @@ pub fn auth_challenge(index: int) -> [] &static [byte] {
     return bytes.field(blob[at..line_end(blob, at)], 9, 21);
 }
 
+// The longest WebSocket message route `index` carries, summed over its fragments (docs/websocket-frames.md section 4).
+pub fn ws_max_message(index: int) -> [] int {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return number(bytes.field(blob[at..line_end(blob, at)], 9, 26));
+}
+
 // JWT acceptance of route `index` (docs/jwt.md section 8; `auth` above is 1 for API keys, 2 for JWTs, 3 for both): the public-key indices it allows (`*` for all, else comma-separated),
 // the audience and issuer a token must carry (empty: not checked) and the leeway in seconds.
 pub fn jwt_keys(index: int) -> [] &static [byte] {

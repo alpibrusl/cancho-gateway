@@ -1,0 +1,663 @@
+edition 5;
+
+module gateway.wsframe;
+
+import std.bytes;
+
+// The frame parser of a WebSocket tunnel (task #15, slice 2, docs/websocket-frames.md). Sans-io and pure: no effect, no allocation. The caller owns the bytes and a block of
+// `state_len()` ints per tunnel and calls `scan` on the bytes it is about to move; `scan` answers how many of them may go on.
+//
+// The block: ints 0 to 15 are the tunnel's (`t_*`), 16 to 35 are the client-to-upstream direction's (direction 0: frames must be masked), 36 to 55 the upstream-to-client
+// direction's (direction 1: frames must not be masked). Per direction (offsets from `dir_base(dir)`):
+//
+//     0 mode (0 at a frame boundary, 1 inside a payload)   1 payload bytes still to come   2 opcode of the frame in hand   3 its FIN bit   4 its mask key (32 bits)
+//     5 the key's phase (payload bytes seen, mod 4)   6 message in progress (0 none, 1 text, 2 binary)   7 bytes of the message so far (declared lengths)
+//     8, 9, 10 the UTF-8 automaton: continuation bytes still needed, and the range of the next byte   11 the Close code being read   12 the frame's payload length
+//     13 1 once a Close frame has gone by   14 the event the last `scan` reported (0 none, 1 violation, 2 a Close frame went by, 3 the gateway's own Pong, 4 a header or Pong is
+//     incomplete)   15 its number (the rule, the Close code, or the bytes to drop)   16 1 if the frame in hand is validated as UTF-8   17 for a violation: 1 if the bytes
+//     `scan` answered end at a frame boundary   18 1 once the direction is junk (a violation was seen: everything from it is discarded)   19 1 if the direction's frames are the cause of the close
+//
+// What `scan` does to its answer: it never answers more than the bytes it was given; a header is not answered (so not forwarded) until it is whole and has been judged; a frame that
+// violates a rule is not answered, and neither is anything after it. See the document for the rules (section 3) and for why a violation in the middle of a payload cannot be undone.
+
+pub fn state_len() -> [] int {
+    return 56;
+}
+
+pub fn dir_base(dir: int) -> [] int {
+    return 16 + 20 * dir;
+}
+
+// The tunnel's own ints.
+// 0 close state: 0 open, 1 the gateway is closing it, 2 a peer sent Close and the answer is awaited.  1 deadline of the close (ms).  2 the Close code for the client, 3 for the upstream.
+// 4 the Close to the client: 0 not yet placed, 1 placed, 2 not to be sent.  5 the same for the upstream.  6 the client is finished (its Close echo came, or it caused the close),
+// 7 the upstream is finished.  8 the code of the first Close of the tunnel (0 none).  9 a gateway Ping is outstanding.  10 its payload.  11 when it was sent.  12 when the client
+// was last heard.  13 1 once the tunnel is to end as soon as the queues are written.  14 messages seen since the counter was last taken.  15 the cause of a close by the gateway (a rule).
+pub fn t_cstate() -> [] int {
+    return 0;
+}
+
+pub fn t_deadline() -> [] int {
+    return 1;
+}
+
+pub fn t_code_client() -> [] int {
+    return 2;
+}
+
+pub fn t_code_upstream() -> [] int {
+    return 3;
+}
+
+pub fn t_sent_client() -> [] int {
+    return 4;
+}
+
+pub fn t_sent_upstream() -> [] int {
+    return 5;
+}
+
+pub fn t_done_client() -> [] int {
+    return 6;
+}
+
+pub fn t_done_upstream() -> [] int {
+    return 7;
+}
+
+pub fn t_first_code() -> [] int {
+    return 8;
+}
+
+pub fn t_ping_out() -> [] int {
+    return 9;
+}
+
+pub fn t_ping_value() -> [] int {
+    return 10;
+}
+
+pub fn t_ping_at() -> [] int {
+    return 11;
+}
+
+pub fn t_heard() -> [] int {
+    return 12;
+}
+
+pub fn t_ending() -> [] int {
+    return 13;
+}
+
+pub fn t_messages() -> [] int {
+    return 14;
+}
+
+pub fn t_cause() -> [] int {
+    return 15;
+}
+
+// The offsets inside a direction's block that the caller reads.
+pub fn d_mode() -> [] int {
+    return 0;
+}
+
+pub fn d_closed() -> [] int {
+    return 13;
+}
+
+pub fn d_event() -> [] int {
+    return 14;
+}
+
+pub fn d_number() -> [] int {
+    return 15;
+}
+
+pub fn d_boundary() -> [] int {
+    return 17;
+}
+
+pub fn d_junk() -> [] int {
+    return 18;
+}
+
+// 19: 1 if this direction's frames are what the gateway is closing the tunnel for.
+pub fn d_offender() -> [] int {
+    return 19;
+}
+
+// The events `scan` reports.
+pub fn ev_violation() -> [] int {
+    return 1;
+}
+
+pub fn ev_close() -> [] int {
+    return 2;
+}
+
+pub fn ev_pong() -> [] int {
+    return 3;
+}
+
+pub fn ev_incomplete() -> [] int {
+    return 4;
+}
+
+// The rules: a violation's number, its tag, and the Close code the offender is sent. 15 and 16 are the two timers of slice 1, 13 and 14 the new closing reasons.
+pub fn rule_rsv() -> [] int {
+    return 1;
+}
+
+pub fn rule_truncated() -> [] int {
+    return 12;
+}
+
+pub fn rule_pong_timeout() -> [] int {
+    return 13;
+}
+
+pub fn rule_close_timeout() -> [] int {
+    return 14;
+}
+
+pub fn rule_idle() -> [] int {
+    return 15;
+}
+
+pub fn rule_lifetime() -> [] int {
+    return 16;
+}
+
+pub fn rule_count() -> [] int {
+    return 16;
+}
+
+pub fn tag(rule: int) -> [] &static [byte] {
+    if rule == 1 {
+        return "ws.frame-rsv";
+    }
+    if rule == 2 {
+        return "ws.frame-opcode";
+    }
+    if rule == 3 {
+        return "ws.frame-control";
+    }
+    if rule == 4 {
+        return "ws.frame-close";
+    }
+    if rule == 5 {
+        return "ws.frame-mask";
+    }
+    if rule == 6 {
+        return "ws.frame-length";
+    }
+    if rule == 7 {
+        return "ws.frame-continuation";
+    }
+    if rule == 8 {
+        return "ws.frame-sequence";
+    }
+    if rule == 9 {
+        return "ws.frame-after-close";
+    }
+    if rule == 10 {
+        return "ws.message-too-big";
+    }
+    if rule == 11 {
+        return "ws.frame-utf8";
+    }
+    if rule == 12 {
+        return "ws.frame-truncated";
+    }
+    if rule == 13 {
+        return "ws.pong-timeout";
+    }
+    if rule == 14 {
+        return "ws.close-timeout";
+    }
+    if rule == 15 {
+        return "ws.idle-timeout";
+    }
+    if rule == 16 {
+        return "ws.lifetime";
+    }
+    return "";
+}
+
+// The Close code a peer that caused `rule` is sent (the codes of docs/websocket-frames.md section 7).
+pub fn own_code(rule: int) -> [] int {
+    if rule == 10 {
+        return 1009;
+    }
+    if rule == 11 {
+        return 1007;
+    }
+    if rule == 13 || rule == 15 || rule == 16 {
+        return 1001;
+    }
+    return 1002;
+}
+
+pub fn init[&t](ws: &!t [int], now: int) -> [] int {
+    var i = 0;
+    while i < 56 {
+        ws[i] = 0;
+        i = i + 1;
+    }
+    ws[12] = now;
+    return 0;
+}
+
+// The gateway starts closing the tunnel for `cause` (a rule); `offender` is the direction whose frames caused it (0 the client's, 1 the upstream's) or `0 - 1` for a timer or a
+// limit. Each side gets a Close with the code of section 7's table; the offender is not waited for, and a side whose stream is inside a frame that cannot be finished is sent none.
+// `wait_ms` bounds the whole close.
+pub fn begin_close[&t](ws: &!t [int], cause: int, offender: int, now: int, wait_ms: int) -> [] int {
+    var to_client = 1001;
+    var to_upstream = 1001;
+    if offender == 0 {
+        to_client = own_code(cause);
+    } else if offender == 1 {
+        to_client = 1011;
+        to_upstream = own_code(cause);
+    }
+    ws[0] = 1;
+    ws[1] = now + wait_ms;
+    ws[2] = to_client;
+    ws[3] = to_upstream;
+    ws[4] = 0;
+    ws[5] = 0;
+    ws[6] = 0;
+    ws[7] = 0;
+    ws[15] = cause;
+    if offender == 0 {
+        ws[6] = 1;
+        if ws[dir_base(0) + 17] == 0 {
+            ws[5] = 2;
+        }
+        ws[dir_base(0) + 18] = 1;
+        ws[dir_base(0) + 19] = 1;
+    } else if offender == 1 {
+        ws[7] = 1;
+        if ws[dir_base(1) + 17] == 0 {
+            ws[4] = 2;
+        }
+        ws[dir_base(1) + 18] = 1;
+        ws[dir_base(1) + 19] = 1;
+    }
+    if cause == 13 {
+        ws[6] = 1;
+    }
+    // A direction that has already carried a Close frame carries no second one.
+    if ws[dir_base(0) + 13] == 1 {
+        ws[5] = 2;
+    }
+    if ws[dir_base(1) + 13] == 1 {
+        ws[4] = 2;
+    }
+    if ws[8] == 0 {
+        ws[8] = to_client;
+    }
+    return 0;
+}
+
+// May the gateway Ping the client now (keepalive on, tunnel open, none outstanding, the client silent for `ping_ms`)?
+pub fn ping_due[&t](ws: &t [int], now: int, ping_ms: int) -> [] bool {
+    return ping_ms > 0 && ws[0] == 0 && ws[9] == 0 && now >= ws[12] + ping_ms;
+}
+
+// Has the outstanding Ping gone unanswered for `pong_ms` since the later of its time and the last byte heard from the client?
+pub fn pong_expired[&t](ws: &t [int], now: int, pong_ms: int) -> [] bool {
+    if ws[0] != 0 || ws[9] != 1 {
+        return false;
+    }
+    var since = ws[11];
+    if ws[12] > since {
+        since = ws[12];
+    }
+    return now >= since + pong_ms;
+}
+
+// The gateway's own frames. A Close with a code and no reason: 4 bytes. A Ping with an 8-byte payload: 10 bytes. Both final and unmasked (the gateway only sends to the client
+// or to the upstream, and a server frame is unmasked; toward the upstream a client frame must be masked: see `put_close_masked`).
+pub fn close_len() -> [] int {
+    return 4;
+}
+
+pub fn put_close[&o](out: &!o [byte], code: int) -> [] int {
+    out[0] = byte_of(136);
+    out[1] = byte_of(2);
+    out[2] = byte_of(code / 256 % 256);
+    out[3] = byte_of(code % 256);
+    return 4;
+}
+
+// A Close toward the upstream is a frame of a client, and must be masked (RFC 6455 5.1): 8 bytes with a fixed key of zero bytes, which masks nothing (a key may be any 32 bits).
+pub fn close_masked_len() -> [] int {
+    return 8;
+}
+
+pub fn put_close_masked[&o](out: &!o [byte], code: int) -> [] int {
+    out[0] = byte_of(136);
+    out[1] = byte_of(130);
+    out[2] = byte_of(0);
+    out[3] = byte_of(0);
+    out[4] = byte_of(0);
+    out[5] = byte_of(0);
+    out[6] = byte_of(code / 256 % 256);
+    out[7] = byte_of(code % 256);
+    return 8;
+}
+
+pub fn ping_len() -> [] int {
+    return 10;
+}
+
+pub fn put_ping[&o](out: &!o [byte], value: int) -> [] int {
+    out[0] = byte_of(137);
+    out[1] = byte_of(8);
+    var i = 0;
+    while i < 8 {
+        out[2 + i] = byte_of(value >> 8 * (7 - i) & 255);
+        i = i + 1;
+    }
+    return 10;
+}
+
+fn viol[&t](ws: &!t [int], b: int, rule: int, n: int, at_boundary: int) -> [] int {
+    ws[b + 14] = 1;
+    ws[b + 15] = rule;
+    ws[b + 17] = at_boundary;
+    if at_boundary == 1 {
+        // What was answered ends at a frame boundary, whatever the frame in hand had begun to do to the state.
+        ws[b] = 0;
+    }
+    return n;
+}
+
+// Look at `data`, the bytes about to be moved on in direction `dir`, and answer how many of them may be: the state advances exactly through those. `maxmsg` is the route's message limit.
+// `stop`: stop at the first frame boundary, answering the bytes up to it (a boundary already reached answers 0). `pongs`: a Pong that answers the gateway's outstanding Ping is
+// not answered but reported (event 3, its 14 bytes at the front of `data`, to be dropped by the caller).
+//
+// The answer is less than `len(data)` only for a reason: a header that is not yet whole (the bytes stay), a Pong that cannot yet be told from another (event 4), `stop`, a
+// violation (event 1, its rule in `d_number`: the bytes of the frame that broke it are not answered), or a Close frame that went by (event 2, the answer ends with it).
+pub fn scan[&t, &s](ws: &!t [int], dir: int, data: &s [byte], maxmsg: int, stop: bool, pongs: bool) -> [] int {
+    let b = 16 + 20 * dir;
+    ws[b + 14] = 0;
+    ws[b + 15] = 0;
+    var at = 0;
+    // Where the frame in hand began in `data`; `0 - 1` if it began in an earlier call (its header has been forwarded).
+    var fstart = 0 - 1;
+    var going = true;
+    while going {
+        if ws[b] == 1 {
+            let rem = ws[b + 1];
+            var take = len(data) - at;
+            if take > rem {
+                take = rem;
+            }
+            let op = ws[b + 2];
+            let uon = ws[b + 16];
+            if take > 0 && (uon == 1 || op == 8) {
+                var need = ws[b + 8];
+                var lo = ws[b + 9];
+                var hi = ws[b + 10];
+                let key = ws[b + 4];
+                let ph = ws[b + 5];
+                let done_before = ws[b + 12] - rem;
+                var i = 0;
+                while i < take {
+                    var c = int_of(data[at + i]);
+                    if dir == 0 {
+                        c = c ^ key >> 8 * (3 - (ph + i) % 4) & 255;
+                    }
+                    if uon == 1 {
+                        if need == 0 {
+                            if c < 128 {
+                            } else if c < 194 {
+                                return viol(ws, b, 11, fstart_or_zero(fstart), boundary_flag(fstart));
+                            } else if c < 224 {
+                                need = 1;
+                                lo = 128;
+                                hi = 191;
+                            } else if c == 224 {
+                                need = 2;
+                                lo = 160;
+                                hi = 191;
+                            } else if c < 237 {
+                                need = 2;
+                                lo = 128;
+                                hi = 191;
+                            } else if c == 237 {
+                                need = 2;
+                                lo = 128;
+                                hi = 159;
+                            } else if c < 240 {
+                                need = 2;
+                                lo = 128;
+                                hi = 191;
+                            } else if c == 240 {
+                                need = 3;
+                                lo = 144;
+                                hi = 191;
+                            } else if c < 244 {
+                                need = 3;
+                                lo = 128;
+                                hi = 191;
+                            } else if c == 244 {
+                                need = 3;
+                                lo = 128;
+                                hi = 143;
+                            } else {
+                                return viol(ws, b, 11, fstart_or_zero(fstart), boundary_flag(fstart));
+                            }
+                        } else {
+                            if c < lo || c > hi {
+                                return viol(ws, b, 11, fstart_or_zero(fstart), boundary_flag(fstart));
+                            }
+                            need = need - 1;
+                            lo = 128;
+                            hi = 191;
+                        }
+                    }
+                    if op == 8 && done_before + i < 2 {
+                        ws[b + 11] = ws[b + 11] * 256 + c;
+                    }
+                    i = i + 1;
+                }
+                ws[b + 8] = need;
+                ws[b + 9] = lo;
+                ws[b + 10] = hi;
+            }
+            at = at + take;
+            ws[b + 1] = rem - take;
+            ws[b + 5] = (ws[b + 5] + take) % 4;
+            if rem == take {
+                if uon == 1 && ws[b + 3] == 1 && ws[b + 8] != 0 {
+                    // The message ends inside a character.
+                    return viol(ws, b, 11, fstart_or_zero(fstart), boundary_flag(fstart));
+                }
+                ws[b] = 0;
+                if op == 8 {
+                    ws[b + 13] = 1;
+                    ws[b + 14] = 2;
+                    if ws[b + 12] >= 2 {
+                        ws[b + 15] = ws[b + 11];
+                    } else {
+                        ws[b + 15] = 1005;
+                    }
+                    return at;
+                }
+            } else {
+                // The data ran out inside the payload.
+                going = false;
+            }
+        } else {
+            if stop {
+                return at;
+            }
+            if at >= len(data) {
+                going = false;
+            } else {
+                let avail = len(data) - at;
+                let b0 = int_of(data[at]);
+                fstart = at;
+                if pongs && b0 & 143 == 138 && ws[9] == 1 {
+                    // A Pong while the gateway's Ping is outstanding: decided only at the front of the data, so the bytes before it go first.
+                    if at > 0 {
+                        return at;
+                    }
+                    if avail < 2 {
+                        ws[b + 14] = 4;
+                        return 0;
+                    }
+                    if int_of(data[1]) == 136 {
+                        if avail < 14 {
+                            ws[b + 14] = 4;
+                            return 0;
+                        }
+                        let v = ws[10];
+                        var same = true;
+                        var j = 0;
+                        while j < 8 {
+                            let got = int_of(data[6 + j]) ^ int_of(data[2 + j % 4]);
+                            if got != v >> 8 * (7 - j) & 255 {
+                                same = false;
+                            }
+                            j = j + 1;
+                        }
+                        if same {
+                            ws[b + 14] = 3;
+                            ws[b + 15] = 14;
+                            return 0;
+                        }
+                    }
+                }
+                if b0 / 16 % 8 != 0 {
+                    return viol(ws, b, 1, at, 1);
+                }
+                let op = b0 & 15;
+                if op > 2 && op < 8 || op > 10 {
+                    return viol(ws, b, 2, at, 1);
+                }
+                let fin = b0 / 128;
+                if op >= 8 && fin == 0 {
+                    return viol(ws, b, 3, at, 1);
+                }
+                if avail < 2 {
+                    return at;
+                }
+                let b1 = int_of(data[at + 1]);
+                var want_mask = 0;
+                if dir == 0 {
+                    want_mask = 1;
+                }
+                if b1 / 128 != want_mask {
+                    return viol(ws, b, 5, at, 1);
+                }
+                let l7 = b1 & 127;
+                if op >= 8 && l7 > 125 {
+                    return viol(ws, b, 3, at, 1);
+                }
+                if op == 8 && l7 == 1 {
+                    return viol(ws, b, 4, at, 1);
+                }
+                var ext = 0;
+                if l7 == 126 {
+                    ext = 2;
+                } else if l7 == 127 {
+                    ext = 8;
+                }
+                if avail < 2 + ext {
+                    return at;
+                }
+                var length = l7;
+                if l7 == 126 {
+                    length = int_of(data[at + 2]) * 256 + int_of(data[at + 3]);
+                    if length < 126 {
+                        return viol(ws, b, 6, at, 1);
+                    }
+                } else if l7 == 127 {
+                    if int_of(data[at + 2]) >= 128 {
+                        return viol(ws, b, 6, at, 1);
+                    }
+                    length = 0;
+                    var q = 0;
+                    while q < 8 {
+                        length = length * 256 + int_of(data[at + 2 + q]);
+                        q = q + 1;
+                    }
+                    if length < 65536 {
+                        return viol(ws, b, 6, at, 1);
+                    }
+                }
+                let hdr = 2 + ext + 4 * want_mask;
+                if avail < hdr {
+                    return at;
+                }
+                if op == 0 && ws[b + 6] == 0 {
+                    return viol(ws, b, 7, at, 1);
+                }
+                if op > 0 && op < 8 && ws[b + 6] != 0 {
+                    return viol(ws, b, 8, at, 1);
+                }
+                if ws[b + 13] == 1 {
+                    return viol(ws, b, 9, at, 1);
+                }
+                if op < 8 && length > maxmsg - ws[b + 7] {
+                    return viol(ws, b, 10, at, 1);
+                }
+                var key = 0;
+                if want_mask == 1 {
+                    key = int_of(data[at + hdr - 4]) * 16777216 + int_of(data[at + hdr - 3]) * 65536 + int_of(data[at + hdr - 2]) * 256 + int_of(data[at + hdr - 1]);
+                }
+                var uon = 0;
+                if op == 1 {
+                    uon = 1;
+                    ws[b + 8] = 0;
+                    ws[b + 9] = 128;
+                    ws[b + 10] = 191;
+                } else if op == 0 && ws[b + 6] == 1 {
+                    uon = 1;
+                }
+                if op < 8 {
+                    if fin == 1 {
+                        ws[b + 6] = 0;
+                        ws[b + 7] = 0;
+                        ws[14] = ws[14] + 1;
+                    } else {
+                        if op != 0 {
+                            ws[b + 6] = op;
+                        }
+                        ws[b + 7] = ws[b + 7] + length;
+                    }
+                }
+                ws[b + 2] = op;
+                ws[b + 3] = fin;
+                ws[b + 4] = key;
+                ws[b + 5] = 0;
+                ws[b + 11] = 0;
+                ws[b + 12] = length;
+                ws[b + 16] = uon;
+                ws[b + 1] = length;
+                ws[b] = 1;
+                at = at + hdr;
+            }
+        }
+    }
+    return at;
+}
+
+fn fstart_or_zero(fstart: int) -> [] int {
+    if fstart < 0 {
+        return 0;
+    }
+    return fstart;
+}
+
+fn boundary_flag(fstart: int) -> [] int {
+    if fstart < 0 {
+        return 0;
+    }
+    return 1;
+}

@@ -51,6 +51,12 @@ WS_IDLE_MS, WS_IDLE_RANGE = 600000, (100, 86400000)
 WS_LIFETIME_MS, WS_LIFETIME_RANGE = 86400000, (100, 2592000000)
 WS_MAX_TUNNELS, WS_TUNNELS_RANGE = 64, (1, 127)
 MAX_SUBPROTOCOLS = 8
+# WebSocket frames (docs/websocket-frames.md sections 4, 6, 7 and 10): the longest message a route carries (per route, summed over its fragments), the keepalive Ping the gateway
+# sends a silent client (0: none) and how long its Pong may take, and how long the gateway waits for a Close frame's answer (and for a frame boundary to put one at).
+WS_MESSAGE, WS_MESSAGE_RANGE = 1 << 20, (1024, 1 << 28)
+WS_PING_RANGE = (1000, 86400000)
+WS_PONG_MS, WS_PONG_RANGE = 10000, (100, 600000)
+WS_CLOSE_MS, WS_CLOSE_RANGE = 5000, (100, 60000)
 # Rate limiting (docs/ratelimit.md section 4): tokens per period (N/s, N/m, N/h), bucket size, buckets per route and in all (three 8-byte ints each: at most 1.5 MiB).
 RATE_MAX, BURST_MAX = 1000000, 1000000
 RATE_PERIODS = {"s": 1000, "m": 60000, "h": 3600000}
@@ -79,11 +85,11 @@ METHODS = ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
 KEYS = {
     "": ["listen", "header_timeout_ms", "connect_timeout_ms", "upstream_timeout_ms", "total_timeout_ms", "idle_timeout_ms", "pool_idle_max", "circuit_threshold", "circuit_open_ms", "log_failure", "admin_listen",
            "tls_listen", "tls_dir", "tls_identities", "tls_handshakes", "tls_rate", "tls_handshake_ms",
-           "ws_idle_timeout_ms", "ws_max_lifetime_ms", "ws_max_tunnels", "auth_allow_plain"],
+           "ws_idle_timeout_ms", "ws_max_lifetime_ms", "ws_max_tunnels", "ws_ping_ms", "ws_pong_ms", "ws_close_ms", "auth_allow_plain"],
     "upstream": ["name", "addr"],
     "api_key": ["name", "sha256"],
     "jwt_key": ["name", "public_key"],
-    "route": ["name", "host", "path_prefix", "methods", "upstream", "max_body", "trust_forwarded", "websocket", "subprotocols", "origins",
+    "route": ["name", "host", "path_prefix", "methods", "upstream", "max_body", "trust_forwarded", "websocket", "subprotocols", "origins", "ws_max_message_bytes",
               "rate_limit", "rate_burst", "rate_key", "rate_buckets", "auth", "auth_header", "auth_keys", "auth_forward",
               "jwt_alg", "jwt_keys", "jwt_aud", "jwt_iss", "jwt_leeway"],
 }
@@ -508,6 +514,11 @@ def load(path):
                 refuse("config.websocket", "%s needs websocket = true on the same route" % key, "route", i, key)
         if ws and not mask & 1:
             refuse("config.websocket", "a websocket route must allow GET: an upgrade is a GET", "route", i, "methods")
+        if "ws_max_message_bytes" in r and not ws:
+            refuse("config.websocket", "ws_max_message_bytes needs websocket = true on the same route", "route", i, "ws_max_message_bytes")
+        ws_message = r.get("ws_max_message_bytes", WS_MESSAGE)
+        if not isinstance(ws_message, int) or isinstance(ws_message, bool) or not WS_MESSAGE_RANGE[0] <= ws_message <= WS_MESSAGE_RANGE[1]:
+            refuse("config.websocket", "ws_max_message_bytes must be an integer in %d..%d (docs/websocket-frames.md section 4)" % WS_MESSAGE_RANGE, "route", i, "ws_max_message_bytes")
         if not isinstance(protocols, list) or len(protocols) > MAX_SUBPROTOCOLS or len(set(map(str, protocols))) != len(protocols) or \
                 not all(isinstance(t, str) and TOKEN.fullmatch(t) for t in protocols):
             refuse("config.websocket", "subprotocols must be at most %d distinct tokens of at most 64 bytes (letters, digits and !#$%%&'*+.^_`|~-)" % MAX_SUBPROTOCOLS,
@@ -526,7 +537,7 @@ def load(path):
             who = key_names if auth["auth_keys"] == "*" else [key_names[int(x)] for x in auth["auth_keys"].split(",") if x]
         rate = rate_options(r, trust, who, refuse, i, jwt=bool(auth["auth"] & 2))
         routes.append({"host": host, "prefix": prefix, "mask": mask, "upstream": names[up], "max_body": body,
-                       "trust": 1 if trust else 0, "name": label, "ws": 1 if ws else 0, "protocols": protocols, "origins": origins, **rate, **auth})
+                       "trust": 1 if trust else 0, "name": label, "ws": 1 if ws else 0, "protocols": protocols, "origins": origins, "ws_message": ws_message, **rate, **auth})
     base = 0
     for j, r in enumerate(routes):
         r["base"] = base
@@ -552,7 +563,7 @@ def load(path):
     timeouts["api_keys"] = api_keys
     timeouts["jwt_keys"] = jwt_keys
     timeouts["auth_plain"] = plain_ok
-    ws_keys = [k for k in ("ws_idle_timeout_ms", "ws_max_lifetime_ms", "ws_max_tunnels") if k in doc]
+    ws_keys = [k for k in ("ws_idle_timeout_ms", "ws_max_lifetime_ms", "ws_max_tunnels", "ws_ping_ms", "ws_pong_ms", "ws_close_ms") if k in doc]
     if ws_keys and not any(r["ws"] for r in routes):
         refuse("config.websocket", "%s needs a route with websocket = true" % ws_keys[0], key=ws_keys[0])
     wsopts = {}
@@ -562,6 +573,17 @@ def load(path):
         if not isinstance(v, int) or isinstance(v, bool) or not bounds[0] <= v <= bounds[1]:
             refuse("config.websocket", "%s must be an integer in %d..%d" % ((key,) + bounds), key=key)
         wsopts[name] = v
+    ping = doc.get("ws_ping_ms", 0)
+    if not isinstance(ping, int) or isinstance(ping, bool) or not (ping == 0 or WS_PING_RANGE[0] <= ping <= WS_PING_RANGE[1]):
+        refuse("config.websocket", "ws_ping_ms must be 0 (no keepalive) or an integer in %d..%d (docs/websocket-frames.md section 6)" % WS_PING_RANGE, key="ws_ping_ms")
+    if "ws_pong_ms" in doc and ping == 0:
+        refuse("config.websocket", "ws_pong_ms needs ws_ping_ms: there is no Ping to wait for an answer to", key="ws_pong_ms")
+    for key, name, default, bounds in (("ws_pong_ms", "pong_ms", WS_PONG_MS, WS_PONG_RANGE), ("ws_close_ms", "close_ms", WS_CLOSE_MS, WS_CLOSE_RANGE)):
+        v = doc.get(key, default)
+        if not isinstance(v, int) or isinstance(v, bool) or not bounds[0] <= v <= bounds[1]:
+            refuse("config.websocket", "%s must be an integer in %d..%d" % ((key,) + bounds), key=key)
+        wsopts[name] = v
+    wsopts["ping_ms"] = ping
     timeouts["ws"] = wsopts
     for j, b in enumerate(routes):
         for i, a in enumerate(routes[:j]):
@@ -670,6 +692,10 @@ def render_deploy(listen, ups, timeouts):
         "pub fn ws_idle_ms() -> [] int {", "    return %d;" % timeouts["ws"]["idle_ms"], "}", "",
         "pub fn ws_lifetime_ms() -> [] int {", "    return %d;" % timeouts["ws"]["lifetime_ms"], "}", "",
         "pub fn ws_max_tunnels() -> [] int {", "    return %d;" % timeouts["ws"]["max_tunnels"], "}", "",
+        "// WebSocket frames (docs/websocket-frames.md): the keepalive Ping to a silent client (0: none), the wait for its Pong, and the wait for a Close frame's answer.",
+        "pub fn ws_ping_ms() -> [] int {", "    return %d;" % timeouts["ws"]["ping_ms"], "}", "",
+        "pub fn ws_pong_ms() -> [] int {", "    return %d;" % timeouts["ws"]["pong_ms"], "}", "",
+        "pub fn ws_close_ms() -> [] int {", "    return %d;" % timeouts["ws"]["close_ms"], "}", "",
         "// The longest common prefix of the addresses, cut at a delimiter: what `narrow` would be given once",
         "// cancho has separate listen and connect bounds. Empty means no shared prefix.",
         "pub fn intended_egress_prefix() -> [] &static [byte] {", "    return %s;" % literal(prefix), "}", "",
@@ -691,11 +717,11 @@ def table_blob(routes):
     (empty, `r`, `a`, `x:l`, `x:f` or `h:<lowercase name>`), the buckets, and where the route's buckets begin; then authentication (docs/auth.md): 1 if the route
     authenticates (1 API keys, 2 JWTs, 3 both), the lowercase header it reads, 1 if it forwards the credential, the allowed key indices (`*` for all, else comma-separated), and the
     `WWW-Authenticate` challenge; then the JWT fields (docs/jwt.md): the allowed JWT key indices, the required audience and issuer (empty: none) and the leeway in seconds;
-    tab-separated, in file order."""
-    return "".join("%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\n" % (
+    then the route's `ws_max_message_bytes` (docs/websocket-frames.md); tab-separated, in file order."""
+    return "".join("%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\n" % (
         r["host"] or "*", r["prefix"], r["mask"], r["upstream"], r["max_body"], r["trust"], r["name"], r["ws"], ",".join(r["protocols"]), ",".join(r["origins"]),
         r["rate"], r["per_ms"], r["burst"], r["rate_key"], r["buckets"], r["base"],
-        r["auth"], r["auth_header"], r["auth_forward"], r["auth_keys"], r["challenge"], r["jwt_keys"], r["jwt_aud"], r["jwt_iss"], r["jwt_leeway"]) for r in routes)
+        r["auth"], r["auth_header"], r["auth_forward"], r["auth_keys"], r["challenge"], r["jwt_keys"], r["jwt_aud"], r["jwt_iss"], r["jwt_leeway"], r["ws_message"]) for r in routes)
 
 
 def render_routes(routes, rate_total, api_keys, jwt_keys):
@@ -707,7 +733,7 @@ def render_routes(routes, rate_total, api_keys, jwt_keys):
         "// empty; docs/websocket.md), then the rate limit (docs/ratelimit.md): tokens per period (0: none), the period in ms, the burst, the key, the buckets, and the",
         "// first bucket of the route's table, then authentication (docs/auth.md): 1 if the route authenticates, the header it reads, 1 if it forwards the credential, the",
         "// allowed key indices (`*`: all) and the WWW-Authenticate challenge, then the JWT fields (docs/jwt.md): the allowed public-key indices, the required audience and issuer",
-        "// (empty: none) and the leeway in seconds. Tab-separated, in file order; `gateway.route` reads it.", "",
+        "// (empty: none) and the leeway in seconds, then the WebSocket message limit (docs/websocket-frames.md). Tab-separated, in file order; `gateway.route` reads it.", "",
         "pub fn count() -> [] int {", "    return %d;" % len(routes), "}", "",
         "// The buckets of every route's rate-limit table, added up (docs/ratelimit.md section 6): what the table is sized to.",
         "pub fn rate_buckets_total() -> [] int {", "    return %d;" % rate_total, "}", "",
@@ -754,11 +780,12 @@ def main():
                 t["port"], t["dir"], ", ".join(i or "(the directory itself)" for i in t["identities"]), ENTROPY_FILE, t["handshakes"], t["rate"], t["handshake_ms"]))
         if any(r["ws"] for r in routes):
             w = timeouts["ws"]
-            print("websocket: tunnels close after %d ms idle or %d ms; at most %d at once" % (w["idle_ms"], w["lifetime_ms"], w["max_tunnels"]))
+            print("websocket: tunnels close after %d ms idle or %d ms; at most %d at once; %s; a Close is answered within %d ms" % (
+                w["idle_ms"], w["lifetime_ms"], w["max_tunnels"], "a silent client is pinged after %d ms and closed if no Pong in %d ms" % (w["ping_ms"], w["pong_ms"]) if w["ping_ms"] else "no keepalive Ping", w["close_ms"]))
         print("intended egress prefix: %s" % (repr(prefix) if prefix else "none (no shared prefix)"))
         for n, r in enumerate(routes):
             print("route %d: %s %s -> %s (max body %d%s)" % (n, r["host"] or "*", r["prefix"], ups[r["upstream"]][0], r["max_body"], ", trusts forwarding headers" if r["trust"] else "") +
-                  ("; websocket, subprotocols %s, origins %s" % (r["protocols"] or "none", r["origins"] or "none") if r["ws"] else "") +
+                  ("; websocket, subprotocols %s, origins %s, messages up to %d bytes" % (r["protocols"] or "none", r["origins"] or "none", r["ws_message"]) if r["ws"] else "") +
                   ("; limit %d per %d ms, burst %d, key %s, %d bucket(s)" % (r["rate"], r["per_ms"], r["burst"], r["rate_key"], r["buckets"]) if r["rate"] else "") +
                   ("; authenticates with the %s header, %s%s" % (r["auth_header"], ("keys %s" % ("all" if r["auth_keys"] == "*" else ", ".join(timeouts["api_keys"][int(x)][0] for x in r["auth_keys"].split(",")))) if r["auth"] & 1 else "jwt only",
                                                                 ", forwards the credential" if r["auth_forward"] else "") if r["auth"] else ""))

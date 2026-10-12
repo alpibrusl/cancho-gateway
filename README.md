@@ -29,14 +29,20 @@ size and time limits; per-route rate limiting from the clock (built: `docs/ratel
 primitives, but HMAC needs a secret the binary must not hold); upstream connection reuse; health checks; an access log. HTTP/1.1, over plain TCP or TLS 1.3 from the client side.
 
 Not in v1: HTTP/2 and gRPC, TLS to the upstreams, client certificates, caching, response rewriting, dynamic upstream
-discovery, clustering. WebSocket frames are not interpreted (below).
+discovery, clustering. WebSocket compression and OCPP message validation are not done (below).
 
 **WebSocket, built 2026-10-08 (slice 1).** A route with `websocket = true` (and `subprotocols`, `origins`) admits an RFC 6455 opening handshake after the
 checks of `docs/websocket.md` section 4, forwards it on a fresh connection without extensions, checks the upstream's `101` (including the
 `Sec-WebSocket-Accept` value), and then carries the connection as a **byte tunnel**: the same back-pressure buffers, an idle timeout, a maximum lifetime,
 a bound on concurrent tunnels, over plain TCP or the TLS listener (`wss`). The use case is OCPP-J (`ocpp1.6`, `ocpp2.0.1`) between EV chargers and a back office.
-**Not done:** reading frames (no ping/pong policy, no close handshake, no message-size limit, no UTF-8 check), compression, a gateway-originated keepalive, TLS to the
-upstream, and more than 127 concurrent tunnels (the slot table's size).
+
+**WebSocket frames, built 2026-10-12 (slice 2).** The tunnel now reads frames in both directions with a parser that holds no message (`docs/websocket-frames.md`): RFC 6455 section 5
+is enforced (reserved bits and opcodes, control frames, masking in the right direction, minimal lengths, fragmentation order), a message longer than the route's `ws_max_message_bytes`
+(default 1 MiB, counted over its fragments) and invalid UTF-8 in a text message are refused, and a violation never reaches the other side. The gateway now sends **Close frames** of its own at
+frame boundaries (1001 for a timer, 1002/1007/1009 for the client's fault, 1011 to a client whose upstream broke the rules), waits a bounded time for the echo (`ws_close_ms`) and passes a
+peer's Close through. An optional **keepalive** (`ws_ping_ms`, `ws_pong_ms`) Pings a silent charger and closes it when the Pong does not come, so a charger whose NAT mapping died frees its slot in
+seconds instead of at the idle timeout; the upstream never sees the gateway's Ping or its Pong. **Not done:** `permessage-deflate` (stripped), OCPP-J message validation, per-message rate limits,
+TLS to the upstream, and more than 127 concurrent tunnels (the slot table's size).
 
 **TLS, built 2026-10-08 (slice 1), reload and TLS-only the same day (slice 2).** This file used to say TLS "needs foreign code and would make the authority report unbounded". That
 reason stopped holding when cancho shipped a TLS 1.3 server written in cancho (`packages/tls`; cancho's own notes say it has not been

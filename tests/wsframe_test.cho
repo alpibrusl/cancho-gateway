@@ -1,0 +1,1175 @@
+edition 5;
+
+import std.bytes;
+import std.test;
+import gateway.wsframe;
+
+// The frame parser of docs/websocket-frames.md, case by case, in every split, and on random streams (gate 1). `drive` feeds a stream to `scan` the way the tunnel does:
+// in pieces, with the bytes `scan` does not answer (a header that is not whole yet) carried to the next piece.
+
+fn put[&b](buf: &!b [byte], at: int, v: int) -> [] int {
+    buf[at] = byte_of(v);
+    return at + 1;
+}
+
+// A frame of `len(payload)` bytes (the length class follows from it), masked with `key` if `masked`.
+fn frame[&b, &p](buf: &!b [byte], at: int, fin: int, op: int, masked: bool, key: int, payload: &p [byte]) -> [] int {
+    var a = at;
+    var m = 0;
+    if masked {
+        m = 128;
+    }
+    a = put(buf, a, fin * 128 + op);
+    let n = len(payload);
+    if n < 126 {
+        a = put(buf, a, m + n);
+    } else if n < 65536 {
+        a = put(buf, a, m + 126);
+        a = put(buf, a, n / 256);
+        a = put(buf, a, n % 256);
+    } else {
+        a = put(buf, a, m + 127);
+        var i = 0;
+        while i < 8 {
+            a = put(buf, a, n >> 8 * (7 - i) & 255);
+            i = i + 1;
+        }
+    }
+    if masked {
+        a = put(buf, a, key / 16777216 % 256);
+        a = put(buf, a, key / 65536 % 256);
+        a = put(buf, a, key / 256 % 256);
+        a = put(buf, a, key % 256);
+    }
+    var j = 0;
+    while j < n {
+        var c = int_of(payload[j]);
+        if masked {
+            c = c ^ key >> 8 * (3 - j % 4) & 255;
+        }
+        a = put(buf, a, c);
+        j = j + 1;
+    }
+    return a;
+}
+
+// Feed `data` to direction `dir` in three pieces cut at `c1` and `c2`. Answers (bytes forwarded, the rule of a violation or 0, bytes left waiting, the event of the last scan).
+fn drive[&t, &w, &d](ws: &!t [int], work: &!w [byte], data: &d [byte], dir: int, c1: int, c2: int, maxmsg: int) -> [] (int, int, int, int) {
+    var have = 0;
+    var forwarded = 0;
+    var piece = 0;
+    let b = wsframe.dir_base(dir);
+    while piece < 3 {
+        var lo = 0;
+        var hi = c1;
+        if piece == 1 {
+            lo = c1;
+            hi = c2;
+        } else if piece == 2 {
+            lo = c2;
+            hi = len(data);
+        }
+        copy_into(work[have..have + hi - lo], data[lo..hi]);
+        have = have + hi - lo;
+        var again = true;
+        while again {
+            again = false;
+            let n = wsframe.scan(ws, dir, work[0..have], maxmsg, false, false);
+            test.assert(n >= 0 && n <= have);
+            let ev = ws[b + 14];
+            copy_into(work[0..have - n], work[n..have]);
+            have = have - n;
+            forwarded = forwarded + n;
+            if ev == 1 {
+                return (forwarded, ws[b + 15], have, ev);
+            }
+            if n > 0 {
+                again = true;
+            } else {
+                // Not answering anything is allowed only for a header that is not whole yet.
+                test.assert(have < 14);
+            }
+        }
+        piece = piece + 1;
+    }
+    return (forwarded, 0, have, 0);
+}
+
+fn fresh[&t](ws: &!t [int]) -> [] int {
+    return wsframe.init(ws, 0);
+}
+
+// A valid stream is forwarded whole, and the state at its end is the same however it was cut.
+fn valid[&t, &r, &w, &d](ws: &!t [int], refst: &!r [int], work: &!w [byte], data: &d [byte], dir: int, exhaustive: bool) -> [] int {
+    fresh(refst);
+    let whole = drive(refst, work, data, dir, len(data), len(data), 1048576);
+    let (f0, r0, h0, e0) = whole;
+    test.assert_eq(f0, len(data));
+    test.assert_eq(r0, 0);
+    test.assert_eq(h0, 0);
+    var c1 = 0;
+    while c1 <= len(data) {
+        var c2 = c1;
+        while c2 <= len(data) {
+            fresh(ws);
+            let (f, r, h, e) = drive(ws, work, data, dir, c1, c2, 1048576);
+            test.assert_eq(f, len(data));
+            test.assert_eq(r, 0);
+            test.assert_eq(h, 0);
+            var k = 0;
+            while k < 56 {
+                if k != 15 + wsframe.dir_base(dir) && k != 14 + wsframe.dir_base(dir) {
+                    test.assert_eq(ws[k], refst[k]);
+                }
+                k = k + 1;
+            }
+            if exhaustive {
+                c2 = c2 + 1;
+            } else {
+                c2 = c2 + 7;
+            }
+        }
+        if exhaustive {
+            c1 = c1 + 1;
+        } else {
+            c1 = c1 + 5;
+        }
+    }
+    return 0;
+}
+
+// One byte at a time.
+fn bytewise[&t, &w, &d](ws: &!t [int], work: &!w [byte], data: &d [byte], dir: int) -> [] int {
+    fresh(ws);
+    var have = 0;
+    var forwarded = 0;
+    var i = 0;
+    while i < len(data) {
+        work[have] = data[i];
+        have = have + 1;
+        i = i + 1;
+        var again = true;
+        while again {
+            again = false;
+            let n = wsframe.scan(ws, dir, work[0..have], 1048576, false, false);
+            test.assert_eq(ws[wsframe.dir_base(dir) + 14], 0);
+            copy_into(work[0..have - n], work[n..have]);
+            have = have - n;
+            forwarded = forwarded + n;
+            if n > 0 {
+                again = true;
+            }
+        }
+    }
+    test.assert_eq(forwarded, len(data));
+    test.assert_eq(have, 0);
+    return 0;
+}
+
+fn test_valid_streams_are_forwarded_whole_at_every_split() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let refst = alloc_slice[a](56, 0);
+        let work = alloc_slice[a](2048, byte_of(0));
+        let buf = alloc_slice[a](2048, byte_of(0));
+        let big = alloc_slice[a](300, byte_of(66));
+        var dir = 0;
+        while dir < 2 {
+            let masked = dir == 0;
+            // a text frame, an empty binary frame, an empty text frame
+            var n = frame(buf, 0, 1, 1, masked, 305419896, "hello");
+            n = frame(buf, n, 1, 2, masked, 1, "");
+            n = frame(buf, n, 1, 1, masked, 2, "");
+            valid(ws, refst, work, buf[0..n], dir, true);
+            bytewise(ws, work, buf[0..n], dir);
+            // lengths of 125, 126 and 300
+            n = frame(buf, 0, 1, 2, masked, 4294967295, big[0..125]);
+            n = frame(buf, n, 1, 2, masked, 0, big[0..126]);
+            n = frame(buf, n, 1, 2, masked, 77, big[0..300]);
+            valid(ws, refst, work, buf[0..n], dir, false);
+            bytewise(ws, work, buf[0..n], dir);
+            // a fragmented text message with a ping between the fragments, and a pong
+            n = frame(buf, 0, 0, 1, masked, 9, "he");
+            n = frame(buf, n, 1, 9, masked, 10, "p");
+            n = frame(buf, n, 0, 0, masked, 11, "l");
+            n = frame(buf, n, 1, 10, masked, 12, "");
+            n = frame(buf, n, 1, 0, masked, 13, "lo");
+            valid(ws, refst, work, buf[0..n], dir, true);
+            bytewise(ws, work, buf[0..n], dir);
+            dir = dir + 1;
+        }
+    }
+    return 0;
+}
+
+fn test_multibyte_text_is_carried_across_reads_and_fragments() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let refst = alloc_slice[a](56, 0);
+        let work = alloc_slice[a](2048, byte_of(0));
+        let buf = alloc_slice[a](2048, byte_of(0));
+        let p = alloc_slice[a](16, byte_of(0));
+        // "é€😀" in one frame
+        p[0] = byte_of(195);
+        p[1] = byte_of(169);
+        p[2] = byte_of(226);
+        p[3] = byte_of(130);
+        p[4] = byte_of(172);
+        p[5] = byte_of(240);
+        p[6] = byte_of(159);
+        p[7] = byte_of(152);
+        p[8] = byte_of(128);
+        var n = frame(buf, 0, 1, 1, true, 123456789, p[0..9]);
+        valid(ws, refst, work, buf[0..n], 0, true);
+        bytewise(ws, work, buf[0..n], 0);
+        // the same text cut into fragments at every byte, a ping between each
+        var cut = 1;
+        while cut < 9 {
+            n = frame(buf, 0, 0, 1, true, 5, p[0..cut]);
+            n = frame(buf, n, 1, 9, true, 6, "");
+            n = frame(buf, n, 1, 0, true, 7, p[cut..9]);
+            valid(ws, refst, work, buf[0..n], 0, false);
+            bytewise(ws, work, buf[0..n], 0);
+            // fragments of one byte each
+            cut = cut + 1;
+        }
+        n = 0;
+        var i = 0;
+        while i < 9 {
+            var fin = 0;
+            var op = 0;
+            if i == 0 {
+                op = 1;
+            }
+            if i == 8 {
+                fin = 1;
+            }
+            n = frame(buf, n, fin, op, false, 0, p[i..i + 1]);
+            i = i + 1;
+        }
+        valid(ws, refst, work, buf[0..n], 1, false);
+    }
+    return 0;
+}
+
+// `data` is invalid with rule `rule` however it is cut; fed whole, `forwarded` bytes (those before the offending frame) are answered.
+fn invalid[&t, &w, &d](ws: &!t [int], work: &!w [byte], data: &d [byte], dir: int, rule: int, forwarded: int, maxmsg: int) -> [] int {
+    fresh(ws);
+    let (f, r, h, e) = drive(ws, work, data, dir, len(data), len(data), maxmsg);
+    test.assert_eq(r, rule);
+    test.assert_eq(f, forwarded);
+    test.assert_eq(e, 1);
+    var c1 = 0;
+    while c1 <= len(data) {
+        var c2 = c1;
+        while c2 <= len(data) {
+            fresh(ws);
+            let (f2, r2, h2, e2) = drive(ws, work, data, dir, c1, c2, maxmsg);
+            test.assert_eq(r2, rule);
+            // Never more than was valid, and for a rule that needs no payload, exactly the valid prefstix.
+            test.assert(f2 <= len(data));
+            if rule != 11 {
+                test.assert_eq(f2, forwarded);
+            }
+            c2 = c2 + 1;
+        }
+        c1 = c1 + 1;
+    }
+    return 0;
+}
+
+fn test_rule_rsv_is_refused_at_every_split() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let work = alloc_slice[a](2048, byte_of(0));
+        let buf = alloc_slice[a](2048, byte_of(0));
+        // A good frame goes first in each stream: it is forwarded, the offending frame is not.
+        var good = frame(buf, 0, 1, 1, true, 99, "ok");
+        // rsv1, rsv2, rsv3
+        var rsv = 1;
+        while rsv < 8 {
+            var n = good;
+            n = put(buf, n, 128 + rsv * 16 + 1);
+            n = put(buf, n, 128 + 2);
+            n = put(buf, n, 1);
+            n = put(buf, n, 2);
+            n = put(buf, n, 3);
+            n = put(buf, n, 4);
+            n = put(buf, n, 5);
+            n = put(buf, n, 6);
+            invalid(ws, work, buf[0..n], 0, 1, good, 1048576);
+            rsv = rsv + 1;
+        }
+    }
+    return 0;
+}
+
+fn test_rule_reserved_opcodes_is_refused_at_every_split() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let work = alloc_slice[a](2048, byte_of(0));
+        let buf = alloc_slice[a](2048, byte_of(0));
+        // A good frame goes first in each stream: it is forwarded, the offending frame is not.
+        var good = frame(buf, 0, 1, 1, true, 99, "ok");
+        // reserved opcodes 3 to 7 and 11 to 15
+        var op = 3;
+        while op < 16 {
+            if op < 8 || op > 10 {
+                var n = good;
+                n = put(buf, n, 128 + op);
+                n = put(buf, n, 128);
+                n = put(buf, n, 0);
+                n = put(buf, n, 0);
+                n = put(buf, n, 0);
+                n = put(buf, n, 0);
+                invalid(ws, work, buf[0..n], 0, 2, good, 1048576);
+            }
+            op = op + 1;
+        }
+    }
+    return 0;
+}
+
+fn test_rule_control_frames_is_refused_at_every_split() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let work = alloc_slice[a](2048, byte_of(0));
+        let buf = alloc_slice[a](2048, byte_of(0));
+        // A good frame goes first in each stream: it is forwarded, the offending frame is not.
+        var good = frame(buf, 0, 1, 1, true, 99, "ok");
+        // a fragmented ping, close and pong; a control frame of 126 bytes (7-bit length 126) and of 127
+        var op = 8;
+        while op < 11 {
+            var n = good;
+            n = put(buf, n, op);
+            n = put(buf, n, 128);
+            n = put(buf, n, 0);
+            n = put(buf, n, 0);
+            n = put(buf, n, 0);
+            n = put(buf, n, 0);
+            invalid(ws, work, buf[0..n], 0, 3, good, 1048576);
+            n = good;
+            n = put(buf, n, 128 + op);
+            n = put(buf, n, 128 + 126);
+            invalid(ws, work, buf[0..n], 0, 3, good, 1048576);
+            n = good;
+            n = put(buf, n, 128 + op);
+            n = put(buf, n, 128 + 127);
+            invalid(ws, work, buf[0..n], 0, 3, good, 1048576);
+            op = op + 1;
+        }
+    }
+    return 0;
+}
+
+fn test_rule_close_of_one_byte_is_refused_at_every_split() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let work = alloc_slice[a](2048, byte_of(0));
+        let buf = alloc_slice[a](2048, byte_of(0));
+        // A good frame goes first in each stream: it is forwarded, the offending frame is not.
+        var good = frame(buf, 0, 1, 1, true, 99, "ok");
+        var n = good;
+        n = put(buf, n, 136);
+        n = put(buf, n, 128 + 1);
+        n = put(buf, n, 0);
+        n = put(buf, n, 0);
+        n = put(buf, n, 0);
+        n = put(buf, n, 0);
+        n = put(buf, n, 7);
+        invalid(ws, work, buf[0..n], 0, 4, good, 1048576);
+    }
+    return 0;
+}
+
+fn test_rule_masking_is_refused_at_every_split() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let work = alloc_slice[a](2048, byte_of(0));
+        let buf = alloc_slice[a](2048, byte_of(0));
+        // A good frame goes first in each stream: it is forwarded, the offending frame is not.
+        var good = frame(buf, 0, 1, 1, true, 99, "ok");
+        var n = 0;
+        // masking: an unmasked client frame, a masked server frame
+        n = good;
+        n = put(buf, n, 129);
+        n = put(buf, n, 2);
+        n = put(buf, n, 65);
+        n = put(buf, n, 66);
+        invalid(ws, work, buf[0..n], 0, 5, good, 1048576);
+        var sgood = frame(buf, 0, 1, 1, false, 0, "ok");
+        n = sgood;
+        n = put(buf, n, 129);
+        n = put(buf, n, 128 + 2);
+        n = put(buf, n, 1);
+        n = put(buf, n, 2);
+        n = put(buf, n, 3);
+        n = put(buf, n, 4);
+        n = put(buf, n, 65);
+        n = put(buf, n, 66);
+        invalid(ws, work, buf[0..n], 1, 5, sgood, 1048576);
+    }
+    return 0;
+}
+
+fn test_rule_non_minimal_lengths_is_refused_at_every_split() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let work = alloc_slice[a](2048, byte_of(0));
+        let buf = alloc_slice[a](2048, byte_of(0));
+        // A good frame goes first in each stream: it is forwarded, the offending frame is not.
+        var good = frame(buf, 0, 1, 1, true, 99, "ok");
+        var n = 0;
+        // non-minimal lengths: 126 with a value under 126; 127 with a value under 65536; 127 with the top bit set
+        n = good;
+        n = put(buf, n, 130);
+        n = put(buf, n, 128 + 126);
+        n = put(buf, n, 0);
+        n = put(buf, n, 100);
+        invalid(ws, work, buf[0..n], 0, 6, good, 1048576);
+        n = good;
+        n = put(buf, n, 130);
+        n = put(buf, n, 128 + 126);
+        n = put(buf, n, 0);
+        n = put(buf, n, 125);
+        invalid(ws, work, buf[0..n], 0, 6, good, 1048576);
+        n = good;
+        n = put(buf, n, 130);
+        n = put(buf, n, 128 + 127);
+        var z = 0;
+        while z < 6 {
+            n = put(buf, n, 0);
+            z = z + 1;
+        }
+        n = put(buf, n, 255);
+        n = put(buf, n, 255);
+        invalid(ws, work, buf[0..n], 0, 6, good, 1048576);
+        n = good;
+        n = put(buf, n, 130);
+        n = put(buf, n, 128 + 127);
+        n = put(buf, n, 128);
+        z = 0;
+        while z < 7 {
+            n = put(buf, n, 0);
+            z = z + 1;
+        }
+        invalid(ws, work, buf[0..n], 0, 6, good, 1048576);
+        n = good;
+        n = put(buf, n, 130);
+        n = put(buf, n, 128 + 127);
+        n = put(buf, n, 255);
+        z = 0;
+        while z < 7 {
+            n = put(buf, n, 255);
+            z = z + 1;
+        }
+        invalid(ws, work, buf[0..n], 0, 6, good, 1048576);
+    }
+    return 0;
+}
+
+fn test_rule_fragmentation_sequence_is_refused_at_every_split() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let work = alloc_slice[a](2048, byte_of(0));
+        let buf = alloc_slice[a](2048, byte_of(0));
+        // A good frame goes first in each stream: it is forwarded, the offending frame is not.
+        var good = frame(buf, 0, 1, 1, true, 99, "ok");
+        var n = 0;
+        // a continuation with no message; a new data frame in the middle of one
+        n = good;
+        n = frame(buf, n, 1, 0, true, 5, "x");
+        invalid(ws, work, buf[0..n], 0, 7, good, 1048576);
+        n = frame(buf, 0, 0, 1, true, 5, "x");
+        let started = n;
+        n = frame(buf, n, 1, 1, true, 5, "y");
+        invalid(ws, work, buf[0..n], 0, 8, started, 1048576);
+        n = frame(buf, 0, 0, 2, true, 5, "x");
+        let started2 = n;
+        n = frame(buf, n, 0, 2, true, 5, "y");
+        invalid(ws, work, buf[0..n], 0, 8, started2, 1048576);
+    }
+    return 0;
+}
+
+fn test_rule_frames_after_close_is_refused_at_every_split() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let work = alloc_slice[a](2048, byte_of(0));
+        let buf = alloc_slice[a](2048, byte_of(0));
+        // A good frame goes first in each stream: it is forwarded, the offending frame is not.
+        var good = frame(buf, 0, 1, 1, true, 99, "ok");
+        var n = 0;
+        // a frame after a Close, from the same direction (a Close frame answers: the answer ends with it)
+        n = frame(buf, 0, 1, 8, true, 5, "");
+        let closed = n;
+        n = frame(buf, n, 1, 2, true, 5, "x");
+        fresh(ws);
+        let first = wsframe.scan(ws, 0, buf[0..n], 1048576, false, false);
+        test.assert_eq(first, closed);
+        test.assert_eq(ws[16 + 14], 2);
+        test.assert_eq(ws[16 + 15], 1005);
+        test.assert_eq(ws[16 + 13], 1);
+        let second = wsframe.scan(ws, 0, buf[closed..n], 1048576, false, false);
+        test.assert_eq(second, 0);
+        test.assert_eq(ws[16 + 14], 1);
+        test.assert_eq(ws[16 + 15], 9);
+    }
+    return 0;
+}
+
+fn test_the_message_limit_counts_fragments_and_is_judged_at_the_header() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let work = alloc_slice[a](2048, byte_of(0));
+        let buf = alloc_slice[a](2048, byte_of(0));
+        let sixty = alloc_slice[a](100, byte_of(65));
+        // 100 is the limit: a frame of 100 passes, of 101 does not (the header is judged, no payload is needed)
+        var n = frame(buf, 0, 1, 2, true, 5, sixty[0..100]);
+        fresh(ws);
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..n], 100, false, false), n);
+        test.assert_eq(ws[16 + 14], 0);
+        n = put(buf, 0, 130);
+        n = put(buf, n, 128 + 101);
+        n = put(buf, n, 0);
+        n = put(buf, n, 0);
+        n = put(buf, n, 0);
+        n = put(buf, n, 0);
+        fresh(ws);
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..n], 100, false, false), 0);
+        test.assert_eq(ws[16 + 14], 1);
+        test.assert_eq(ws[16 + 15], 10);
+        // fragments: 60 + 40 pass, 60 + 41 does not, and the first fragment is forwarded
+        n = frame(buf, 0, 0, 2, true, 5, sixty[0..60]);
+        let first = n;
+        n = frame(buf, n, 1, 0, true, 5, sixty[0..40]);
+        fresh(ws);
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..n], 100, false, false), n);
+        n = frame(buf, 0, 0, 2, true, 5, sixty[0..60]);
+        n = frame(buf, n, 1, 0, true, 5, sixty[0..41]);
+        fresh(ws);
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..n], 100, false, false), first);
+        test.assert_eq(ws[16 + 15], 10);
+        // a message ends the count: two whole messages of 100 pass
+        n = frame(buf, 0, 1, 2, true, 5, sixty[0..100]);
+        n = frame(buf, n, 1, 2, true, 5, sixty[0..100]);
+        fresh(ws);
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..n], 100, false, false), n);
+        test.assert_eq(ws[14], 2);
+        // a control frame between fragments is not counted
+        n = frame(buf, 0, 0, 2, true, 5, sixty[0..60]);
+        n = frame(buf, n, 1, 9, true, 5, sixty[0..30]);
+        n = frame(buf, n, 1, 0, true, 5, sixty[0..40]);
+        fresh(ws);
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..n], 100, false, false), n);
+        // the largest length of all: 2^63 - 1 is a size violation, not an overflow
+        n = put(buf, 0, 130);
+        n = put(buf, n, 128 + 127);
+        n = put(buf, n, 127);
+        var z = 0;
+        while z < 7 {
+            n = put(buf, n, 255);
+            z = z + 1;
+        }
+        n = put(buf, n, 0);
+        n = put(buf, n, 0);
+        n = put(buf, n, 0);
+        n = put(buf, n, 0);
+        fresh(ws);
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..n], 268435456, false, false), 0);
+        test.assert_eq(ws[16 + 15], 10);
+        // and with a message already at the limit minus one byte
+        n = frame(buf, 0, 0, 2, true, 5, sixty[0..99]);
+        let one = n;
+        n = frame(buf, n, 1, 0, true, 5, sixty[0..2]);
+        fresh(ws);
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..n], 100, false, false), one);
+        test.assert_eq(ws[16 + 15], 10);
+    }
+    return 0;
+}
+
+fn bad_utf8[&t, &w, &b, &q](ws: &!t [int], work: &!w [byte], buf: &!b [byte], p: &q [byte], cnt: int) -> [] int {
+    var n = frame(buf, 0, 1, 1, true, 424242, p[0..cnt]);
+    invalid(ws, work, buf[0..n], 0, 11, 0, 1048576);
+    // the same in the first of two fragments, and in the last
+    n = frame(buf, 0, 0, 1, true, 5, p[0..cnt]);
+    n = frame(buf, n, 1, 0, true, 5, "z");
+    invalid(ws, work, buf[0..n], 0, 11, 0, 1048576);
+    n = frame(buf, 0, 0, 1, true, 5, "a");
+    let first = n;
+    n = frame(buf, n, 1, 0, true, 5, p[0..cnt]);
+    invalid(ws, work, buf[0..n], 0, 11, first, 1048576);
+    return 0;
+}
+
+fn test_invalid_utf8_is_refused_in_every_class() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let work = alloc_slice[a](2048, byte_of(0));
+        let buf = alloc_slice[a](2048, byte_of(0));
+        let p = alloc_slice[a](8, byte_of(0));
+        // overlong 2-byte (c0 80, c1 bf)
+        p[0] = byte_of(192);
+        p[1] = byte_of(128);
+        bad_utf8(ws, work, buf, p, 2);
+        p[0] = byte_of(193);
+        p[1] = byte_of(191);
+        bad_utf8(ws, work, buf, p, 2);
+        // overlong 3-byte (e0 9f bf) and 4-byte (f0 8f bf bf)
+        p[0] = byte_of(224);
+        p[1] = byte_of(159);
+        p[2] = byte_of(191);
+        bad_utf8(ws, work, buf, p, 3);
+        p[0] = byte_of(240);
+        p[1] = byte_of(143);
+        p[2] = byte_of(191);
+        p[3] = byte_of(191);
+        bad_utf8(ws, work, buf, p, 4);
+        // a surrogate (ed a0 80)
+        p[0] = byte_of(237);
+        p[1] = byte_of(160);
+        p[2] = byte_of(128);
+        bad_utf8(ws, work, buf, p, 3);
+        // above U+10FFFF (f4 90 80 80) and the lead bytes f5 to ff
+        p[0] = byte_of(244);
+        p[1] = byte_of(144);
+        p[2] = byte_of(128);
+        p[3] = byte_of(128);
+        bad_utf8(ws, work, buf, p, 4);
+        p[0] = byte_of(245);
+        p[1] = byte_of(128);
+        bad_utf8(ws, work, buf, p, 2);
+        p[0] = byte_of(255);
+        bad_utf8(ws, work, buf, p, 1);
+        // the lead bytes F5 and FF with all the continuation bytes they would need
+        p[0] = byte_of(245);
+        p[1] = byte_of(128);
+        p[2] = byte_of(128);
+        p[3] = byte_of(128);
+        bad_utf8(ws, work, buf, p, 4);
+        p[0] = byte_of(255);
+        bad_utf8(ws, work, buf, p, 4);
+        // a stray continuation byte
+        p[0] = byte_of(128);
+        bad_utf8(ws, work, buf, p, 1);
+        p[0] = byte_of(191);
+        bad_utf8(ws, work, buf, p, 1);
+        // a lead byte followed by a non-continuation
+        p[0] = byte_of(195);
+        p[1] = byte_of(65);
+        bad_utf8(ws, work, buf, p, 2);
+        // a message ending inside a character, as one frame
+        p[0] = byte_of(226);
+        p[1] = byte_of(130);
+        var n = frame(buf, 0, 1, 1, true, 7, p[0..2]);
+        invalid(ws, work, buf[0..n], 0, 11, 0, 1048576);
+        // ending inside a character after a non-final fragment that was complete, with an empty last fragment
+        n = frame(buf, 0, 0, 1, true, 7, p[0..2]);
+        let nonfinal = n;
+        n = frame(buf, n, 1, 0, true, 7, "");
+        invalid(ws, work, buf[0..n], 0, 11, nonfinal, 1048576);
+        // a character split across fragments is fine, even with a Pong between
+        p[2] = byte_of(172);
+        n = frame(buf, 0, 0, 1, true, 7, p[0..2]);
+        n = frame(buf, n, 1, 10, true, 7, "");
+        n = frame(buf, n, 1, 0, true, 7, p[2..3]);
+        fresh(ws);
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..n], 1048576, false, false), n);
+        test.assert_eq(ws[16 + 14], 0);
+        // binary payload is not looked at
+        p[0] = byte_of(255);
+        p[1] = byte_of(254);
+        n = frame(buf, 0, 1, 2, true, 7, p[0..2]);
+        fresh(ws);
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..n], 1048576, false, false), n);
+        // the server direction is validated too, and unmasked
+        n = frame(buf, 0, 1, 1, false, 0, p[0..2]);
+        invalid(ws, work, buf[0..n], 1, 11, 0, 1048576);
+    }
+    return 0;
+}
+
+fn test_a_utf8_error_in_a_payload_that_began_earlier_is_not_at_a_boundary() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let buf = alloc_slice[a](256, byte_of(0));
+        let p = alloc_slice[a](8, byte_of(65));
+        p[5] = byte_of(255);
+        var n = frame(buf, 0, 1, 1, false, 0, p[0..6]);
+        // header and three bytes in one call, the rest in the next: the error is in the second, mid-frame
+        fresh(ws);
+        let first = wsframe.scan(ws, 1, buf[0..5], 1048576, false, false);
+        test.assert_eq(first, 5);
+        let second = wsframe.scan(ws, 1, buf[5..n], 1048576, false, false);
+        test.assert_eq(second, 0);
+        test.assert_eq(ws[36 + 14], 1);
+        test.assert_eq(ws[36 + 15], 11);
+        test.assert_eq(ws[36 + 17], 0);
+        // in one call, it is at a boundary
+        fresh(ws);
+        test.assert_eq(wsframe.scan(ws, 1, buf[0..n], 1048576, false, false), 0);
+        test.assert_eq(ws[36 + 17], 1);
+    }
+    return 0;
+}
+
+fn test_a_header_is_held_until_it_is_whole_and_a_violation_is_seen_early() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let buf = alloc_slice[a](64, byte_of(0));
+        // text with a 16-bit length: one, two and three bytes of its header are not answered
+        var n = put(buf, 0, 129);
+        n = put(buf, n, 128 + 126);
+        n = put(buf, n, 1);
+        n = put(buf, n, 0);
+        fresh(ws);
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..1], 1048576, false, false), 0);
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..2], 1048576, false, false), 0);
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..3], 1048576, false, false), 0);
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..4], 1048576, false, false), 0);
+        test.assert_eq(ws[16 + 14], 0);
+        // the key is the last part of a masked header
+        n = put(buf, n, 1);
+        n = put(buf, n, 2);
+        n = put(buf, n, 3);
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..7], 1048576, false, false), 0);
+        n = put(buf, n, 4);
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..8], 1048576, false, false), 8);
+        // a reserved bit is seen at the first byte, a missing mask at the second, with nothing else sent
+        fresh(ws);
+        buf[0] = byte_of(193);
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..1], 1048576, false, false), 0);
+        test.assert_eq(ws[16 + 14], 1);
+        fresh(ws);
+        buf[0] = byte_of(129);
+        buf[1] = byte_of(5);
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..2], 1048576, false, false), 0);
+        test.assert_eq(ws[16 + 15], 5);
+    }
+    return 0;
+}
+
+fn test_stop_answers_the_bytes_up_to_the_next_boundary() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let buf = alloc_slice[a](512, byte_of(0));
+        let big = alloc_slice[a](200, byte_of(70));
+        var n = frame(buf, 0, 1, 2, false, 0, big[0..200]);
+        let one = n;
+        n = frame(buf, n, 1, 2, false, 0, big[0..10]);
+        // at a boundary, stop answers 0
+        fresh(ws);
+        test.assert_eq(wsframe.scan(ws, 1, buf[0..n], 1048576, true, false), 0);
+        // inside the first frame (after 50 bytes of it) stop answers the rest of it and no more
+        fresh(ws);
+        test.assert_eq(wsframe.scan(ws, 1, buf[0..50], 1048576, false, false), 50);
+        test.assert_eq(ws[36], 1);
+        test.assert_eq(wsframe.scan(ws, 1, buf[50..n], 1048576, true, false), one - 50);
+        test.assert_eq(ws[36], 0);
+    }
+    return 0;
+}
+
+fn test_the_gateways_own_pong_is_reported_and_no_other() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let buf = alloc_slice[a](128, byte_of(0));
+        let pl = alloc_slice[a](8, byte_of(0));
+        // the Ping's value: 0x0102030405060708
+        let v = 72623859790382856;
+        var i = 0;
+        while i < 8 {
+            pl[i] = byte_of(v >> 8 * (7 - i) & 255);
+            i = i + 1;
+        }
+        var n = frame(buf, 0, 1, 1, true, 9, "a");
+        let user = n;
+        n = frame(buf, n, 1, 10, true, 3735928559, pl[0..8]);
+        let total = n;
+        fresh(ws);
+        ws[9] = 1;
+        ws[10] = v;
+        // the user frame goes first, then the Pong is at the front of the data and reported
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..total], 1048576, false, true), user);
+        test.assert_eq(ws[16 + 14], 0);
+        test.assert_eq(wsframe.scan(ws, 0, buf[user..total], 1048576, false, true), 0);
+        test.assert_eq(ws[16 + 14], 3);
+        test.assert_eq(ws[16 + 15], 14);
+        // a Pong cut short is incomplete, at every length
+        var cut = 0;
+        while cut < 14 {
+            fresh(ws);
+            ws[9] = 1;
+            ws[10] = v;
+            test.assert_eq(wsframe.scan(ws, 0, buf[user..user + cut], 1048576, false, true), 0);
+            if cut > 0 {
+                test.assert_eq(ws[16 + 14], 4);
+            }
+            cut = cut + 1;
+        }
+        // with no Ping outstanding, or with pongs not asked for, it is an ordinary frame
+        fresh(ws);
+        test.assert_eq(wsframe.scan(ws, 0, buf[user..total], 1048576, false, true), total - user);
+        fresh(ws);
+        ws[9] = 1;
+        ws[10] = v;
+        test.assert_eq(wsframe.scan(ws, 0, buf[user..total], 1048576, false, false), total - user);
+        // a different payload is an ordinary frame; so is a Pong with another length
+        pl[7] = byte_of(9);
+        n = frame(buf, 0, 1, 10, true, 3735928559, pl[0..8]);
+        fresh(ws);
+        ws[9] = 1;
+        ws[10] = v;
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..n], 1048576, false, true), n);
+        test.assert_eq(ws[16 + 14], 0);
+        n = frame(buf, 0, 1, 10, true, 3735928559, pl[0..4]);
+        fresh(ws);
+        ws[9] = 1;
+        ws[10] = v;
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..n], 1048576, false, true), n);
+    }
+    return 0;
+}
+
+fn test_the_close_plan_and_the_gateways_frames() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let out = alloc_slice[a](16, byte_of(0));
+        // a timer: 1001 to both, the first close is the client's
+        fresh(ws);
+        wsframe.begin_close(ws, 15, 0 - 1, 1000, 5000);
+        test.assert_eq(ws[0], 1);
+        test.assert_eq(ws[1], 6000);
+        test.assert_eq(ws[2], 1001);
+        test.assert_eq(ws[3], 1001);
+        test.assert_eq(ws[8], 1001);
+        test.assert_eq(ws[6], 0);
+        test.assert_eq(ws[7], 0);
+        // the client's violation: its code to it, 1001 to the upstream, the client not waited for
+        fresh(ws);
+        ws[16 + 17] = 1;
+        wsframe.begin_close(ws, 5, 0, 0, 100);
+        test.assert_eq(ws[2], 1002);
+        test.assert_eq(ws[3], 1001);
+        test.assert_eq(ws[6], 1);
+        test.assert_eq(ws[5], 0);
+        // ... mid-frame: the upstream is sent none
+        fresh(ws);
+        wsframe.begin_close(ws, 11, 0, 0, 100);
+        test.assert_eq(ws[2], 1007);
+        test.assert_eq(ws[5], 2);
+        // the upstream's violation: 1011 to the client, its own code to the upstream
+        fresh(ws);
+        ws[36 + 17] = 1;
+        wsframe.begin_close(ws, 10, 1, 0, 100);
+        test.assert_eq(ws[2], 1011);
+        test.assert_eq(ws[3], 1009);
+        test.assert_eq(ws[7], 1);
+        test.assert_eq(ws[4], 0);
+        // the dead client is not waited for
+        fresh(ws);
+        wsframe.begin_close(ws, 13, 0 - 1, 0, 100);
+        test.assert_eq(ws[6], 1);
+        test.assert_eq(ws[2], 1001);
+        // the frames
+        test.assert_eq(wsframe.put_close(out, 1001), 4);
+        test.assert_eq(int_of(out[0]), 136);
+        test.assert_eq(int_of(out[1]), 2);
+        test.assert_eq(int_of(out[2]), 3);
+        test.assert_eq(int_of(out[3]), 233);
+        test.assert_eq(wsframe.put_close_masked(out, 1009), 8);
+        test.assert_eq(int_of(out[1]), 130);
+        test.assert_eq(int_of(out[6]), 3);
+        test.assert_eq(int_of(out[7]), 241);
+        test.assert_eq(wsframe.put_ping(out, 72623859790382856), 10);
+        test.assert_eq(int_of(out[0]), 137);
+        test.assert_eq(int_of(out[1]), 8);
+        test.assert_eq(int_of(out[2]), 1);
+        test.assert_eq(int_of(out[9]), 8);
+        // the keepalive clock
+        fresh(ws);
+        ws[12] = 1000;
+        test.assert(!wsframe.ping_due(ws, 1999, 1000));
+        test.assert(wsframe.ping_due(ws, 2000, 1000));
+        test.assert(!wsframe.ping_due(ws, 5000, 0));
+        ws[9] = 1;
+        ws[11] = 2000;
+        test.assert(!wsframe.ping_due(ws, 5000, 1000));
+        test.assert(!wsframe.pong_expired(ws, 2999, 1000));
+        test.assert(wsframe.pong_expired(ws, 3000, 1000));
+        ws[12] = 2500;
+        test.assert(!wsframe.pong_expired(ws, 3000, 1000));
+        test.assert(wsframe.pong_expired(ws, 3500, 1000));
+    }
+    return 0;
+}
+
+// A small generator with a fixed seed: 31-bit values.
+fn next(seed: int) -> [] int {
+    return (seed * 1103515245 + 12345) % 2147483648;
+}
+
+// Random streams: structured (frames with random fields, some of them invalid) and plain bytes. Each is fed whole, in three pieces, and byte by byte; none may trap, the answer
+// is never more than the bytes given, and an answer short of the data has a reason.
+fn test_random_streams_never_trap_and_always_have_a_reason() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let work = alloc_slice[a](1024, byte_of(0));
+        let buf = alloc_slice[a](1024, byte_of(0));
+        var seed = 20261012;
+        var round = 0;
+        while round < 3000 {
+            seed = next(seed);
+            var n = 0;
+            let kind = seed / 65536 % 4;
+            if kind == 0 {
+                // plain random bytes
+                var i = 0;
+                seed = next(seed);
+                let want = 1 + seed / 65536 % 60;
+                while i < want {
+                    seed = next(seed);
+                    n = put(buf, n, seed / 65536 % 256);
+                    i = i + 1;
+                }
+            } else {
+                // frames with random fields
+                var frames = 1 + seed / 4096 % 5;
+                while frames > 0 {
+                    seed = next(seed);
+                    let r = seed / 65536;
+                    var b0 = r % 256;
+                    if r % 7 > 1 {
+                        b0 = b0 % 16 + 128 * (r / 256 % 2);
+                    }
+                    n = put(buf, n, b0);
+                    seed = next(seed);
+                    let r2 = seed / 65536;
+                    var l7 = r2 % 10;
+                    if r2 % 11 == 0 {
+                        l7 = 126 + r2 / 16 % 2;
+                    }
+                    var b1 = l7 + 128 * (r2 / 256 % 2);
+                    if r2 % 13 == 0 {
+                        b1 = r2 / 4096 % 256;
+                    }
+                    n = put(buf, n, b1);
+                    var extra = 4;
+                    if b1 % 128 == 126 {
+                        extra = extra + 2;
+                    } else if b1 % 128 == 127 {
+                        extra = extra + 8;
+                    }
+                    var e = 0;
+                    while e < extra + b1 % 16 {
+                        seed = next(seed);
+                        var v = seed / 65536 % 256;
+                        if seed / 16 % 3 > 0 {
+                            v = v % 130;
+                        }
+                        n = put(buf, n, v);
+                        e = e + 1;
+                    }
+                    frames = frames - 1;
+                }
+            }
+            var dir = 0;
+            while dir < 2 {
+                fresh(ws);
+                let (fw, rw, hw, ew) = drive(ws, work, buf[0..n], dir, n, n, 200);
+                test.assert(fw >= 0 && fw <= n);
+                test.assert(hw >= 0);
+                seed = next(seed);
+                var c1 = 0;
+                if n > 0 {
+                    c1 = seed / 65536 % (n + 1);
+                }
+                seed = next(seed);
+                var c2 = c1;
+                if n > c1 {
+                    c2 = c1 + seed / 65536 % (n - c1 + 1);
+                }
+                fresh(ws);
+                let (fp, rp, hp, ep) = drive(ws, work, buf[0..n], dir, c1, c2, 200);
+                test.assert(fp >= 0 && fp <= n);
+                // Cut anywhere, the rule is the same (the UTF-8 rule may be found a read later but never differently).
+                test.assert_eq(rp, rw);
+                if rw == 0 {
+                    test.assert_eq(fp, fw);
+                    test.assert_eq(hp, hw);
+                }
+                dir = dir + 1;
+            }
+            round = round + 1;
+        }
+    }
+    return 0;
+}
+
+// Valid random streams, built from the rules: fragmented binary and text messages (the text from a pool of one-, two-, three- and four-byte characters, cut anywhere, even inside
+// a character), ping, pong and empty frames between fragments, every length class that fits. Cut at random into three pieces, each is forwarded whole and leaves nothing waiting.
+fn test_random_valid_streams_are_forwarded_whole() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let work = alloc_slice[a](8192, byte_of(0));
+        let buf = alloc_slice[a](8192, byte_of(0));
+        let text = alloc_slice[a](600, byte_of(0));
+        let pool = alloc_slice[a](64, byte_of(0));
+        let junk = alloc_slice[a](300, byte_of(7));
+        // "a", "é" (c3 a9), "€" (e2 82 ac), "😀" (f0 9f 98 80)
+        pool[0] = byte_of(97);
+        pool[1] = byte_of(195);
+        pool[2] = byte_of(169);
+        pool[3] = byte_of(226);
+        pool[4] = byte_of(130);
+        pool[5] = byte_of(172);
+        pool[6] = byte_of(240);
+        pool[7] = byte_of(159);
+        pool[8] = byte_of(152);
+        pool[9] = byte_of(128);
+        var seed = 777;
+        var round = 0;
+        while round < 1500 {
+            var dir = round % 2;
+            var tl = 0;
+            seed = next(seed);
+            var chars = seed / 65536 % 40;
+            while chars > 0 {
+                seed = next(seed);
+                let k = seed / 65536 % 4;
+                if k == 0 {
+                    text[tl] = pool[0];
+                    tl = tl + 1;
+                } else if k == 1 {
+                    text[tl] = pool[1];
+                    text[tl + 1] = pool[2];
+                    tl = tl + 2;
+                } else if k == 2 {
+                    text[tl] = pool[3];
+                    text[tl + 1] = pool[4];
+                    text[tl + 2] = pool[5];
+                    tl = tl + 3;
+                } else {
+                    text[tl] = pool[6];
+                    text[tl + 1] = pool[7];
+                    text[tl + 2] = pool[8];
+                    text[tl + 3] = pool[9];
+                    tl = tl + 4;
+                }
+                chars = chars - 1;
+            }
+            var n = 0;
+            var pos = 0;
+            var first = true;
+            var more = true;
+            seed = next(seed);
+            let istext = seed / 65536 % 2 == 0;
+            while more {
+                seed = next(seed);
+                var take = tl - pos;
+                if seed / 65536 % 3 > 0 && take > 0 {
+                    seed = next(seed);
+                    take = 1 + seed / 65536 % take;
+                }
+                let last = pos + take == tl;
+                var op = 0;
+                if first {
+                    op = 2;
+                    if istext {
+                        op = 1;
+                    }
+                }
+                var fin = 0;
+                if last {
+                    fin = 1;
+                }
+                if istext {
+                    n = frame(buf, n, fin, op, dir == 0, seed, text[pos..pos + take]);
+                } else {
+                    n = frame(buf, n, fin, op, dir == 0, seed, junk[0..take % 300]);
+                }
+                first = false;
+                pos = pos + take;
+                if last {
+                    more = false;
+                }
+                seed = next(seed);
+                let c = seed / 65536 % 6;
+                if c == 0 {
+                    n = frame(buf, n, 1, 9, dir == 0, seed, junk[0..seed / 4096 % 126]);
+                } else if c == 1 {
+                    n = frame(buf, n, 1, 10, dir == 0, seed, "");
+                }
+            }
+            seed = next(seed);
+            var c1 = seed / 65536 % (n + 1);
+            seed = next(seed);
+            var c2 = c1 + seed / 65536 % (n - c1 + 1);
+            fresh(ws);
+            let (f, r, h, e) = drive(ws, work, buf[0..n], dir, c1, c2, 1048576);
+            test.assert_eq(r, 0);
+            test.assert_eq(f, n);
+            test.assert_eq(h, 0);
+            round = round + 1;
+        }
+    }
+    return 0;
+}
+
+fn test_a_direction_that_has_carried_a_close_carries_no_second_one() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        // the client's Close went by (direction 0), then the gateway has to close for a timer: none is placed toward the upstream, one toward the client
+        fresh(ws);
+        ws[16 + 13] = 1;
+        wsframe.begin_close(ws, 16, 0 - 1, 0, 100);
+        test.assert_eq(ws[5], 2);
+        test.assert_eq(ws[4], 0);
+        // the upstream's Close went by: the other way round
+        fresh(ws);
+        ws[36 + 13] = 1;
+        wsframe.begin_close(ws, 16, 0 - 1, 0, 100);
+        test.assert_eq(ws[4], 2);
+        test.assert_eq(ws[5], 0);
+        // the offender is marked
+        fresh(ws);
+        wsframe.begin_close(ws, 5, 1, 0, 100);
+        test.assert_eq(ws[36 + 19], 1);
+        test.assert_eq(ws[16 + 19], 0);
+        test.assert_eq(ws[36 + 18], 1);
+    }
+    return 0;
+}
+
+fn test_a_close_frame_reports_its_code_whole_and_split() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        let work = alloc_slice[a](128, byte_of(0));
+        let buf = alloc_slice[a](128, byte_of(0));
+        let pl = alloc_slice[a](5, byte_of(98));
+        pl[0] = byte_of(3);
+        pl[1] = byte_of(232);
+        var n = frame(buf, 0, 1, 8, true, 77, pl[0..5]);
+        var dir = 0;
+        fresh(ws);
+        test.assert_eq(wsframe.scan(ws, 0, buf[0..n], 1048576, false, false), n);
+        test.assert_eq(ws[16 + 14], 2);
+        test.assert_eq(ws[16 + 15], 1000);
+        // the same cut after every byte
+        var cut = 0;
+        while cut <= n {
+            fresh(ws);
+            let (f, r, h, e) = drive(ws, work, buf[0..n], 0, cut, cut, 1048576);
+            test.assert_eq(f, n);
+            test.assert_eq(ws[16 + 11], 1000);
+            cut = cut + 1;
+        }
+        dir = 1;
+        n = frame(buf, 0, 1, 8, false, 0, "");
+        fresh(ws);
+        test.assert_eq(wsframe.scan(ws, dir, buf[0..n], 1048576, false, false), n);
+        test.assert_eq(ws[36 + 15], 1005);
+    }
+    return 0;
+}
