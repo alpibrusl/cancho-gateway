@@ -834,10 +834,16 @@ class Main:
         ws.close()
 
     def an_upstream_that_reads_late_receives_thirty_two_mebibytes_intact(gw, up):
+        n0 = len(gw.lines())
         ws = connect_ws(gw, "/v16/slowsink", timeout=60)
         payload = os.urandom(32 << 20)
         t0 = time.time()
-        ws.send(2, payload)        # blocks until the upstream, which sleeps 1.5 s, starts to read: the gateway's queues and the kernel's are full by then
+        try:
+            ws.send(2, payload)        # blocks until the upstream, which sleeps 1.5 s, starts to read: the gateway's queues and the kernel's are full by then
+        except OSError as e:
+            # One CI run saw a reset here that did not reproduce in 14 runs, loaded or not. Say who ended the tunnel, so that the next one can be traced.
+            time.sleep(0.5)
+            raise AssertionError("%r after %.1f s; the gateway's lines since: %s; what the upstream noted: %s" % (e, time.time() - t0, gw.lines()[n0:][-2:], up.ended[-3:]))
         assert time.time() - t0 > 1.0, "the send finished at once: nothing pushed back"
         ack = ws.expect(1)
         assert ack == hashlib.sha256(payload).hexdigest().encode(), ack
