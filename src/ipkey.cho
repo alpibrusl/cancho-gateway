@@ -1,0 +1,275 @@
+edition 5;
+
+module gateway.ipkey;
+
+import gateway.out;
+
+// The key of an IPv6 client (docs/ratelimit.md section 13.2). An `X-Forwarded-For` element that is an IPv6 literal is keyed on its first `prefix` bits, so a host that rotates the
+// rest of its address stays in one bucket; anything else is not this module's business (`aggregate` answers 0 and the caller keys on the element's text, as before). Pure: no
+// effect, no allocation; the caller owns the scratch buffer (`scratch_len()` bytes) and every write below is checked against it.
+
+// The longest element read at all: a bracketed 45-byte literal, a colon and a five-digit port. A longer text is not an address.
+pub fn element_max() -> [] int {
+    return 53;
+}
+
+// The longest IPv6 literal text there is (eight groups of four digits, seven colons would be 39; the mapped form with a dotted quad, 45).
+pub fn literal_max() -> [] int {
+    return 45;
+}
+
+// The scratch buffer: the key is written at its start (at most 33 bytes), the parsed address at `addr_at()` (16 bytes).
+pub fn scratch_len() -> [] int {
+    return 64;
+}
+
+pub fn addr_at() -> [] int {
+    return 40;
+}
+
+fn hex_value(c: int) -> [] int {
+    if c >= '0' && c <= '9' {
+        return c - '0';
+    }
+    if c >= 'a' && c <= 'f' {
+        return c - 'a' + 10;
+    }
+    if c >= 'A' && c <= 'F' {
+        return c - 'A' + 10;
+    }
+    return 0 - 1;
+}
+
+// Four decimal numbers 0 to 255, no leading zero, separated by dots and nothing else: written into `buf[at..at + 4]` (the caller has room). False for any other text.
+fn dotted[&t, &b](text: &t [byte], buf: &!b [byte], at: int) -> [] bool {
+    var octet = 0;
+    var digits = 0;
+    var parts = 0;
+    var i = 0;
+    while i <= len(text) {
+        var c = 0 - 1;
+        if i < len(text) {
+            c = int_of(text[i]);
+        }
+        if c >= '0' && c <= '9' {
+            if digits > 0 && octet == 0 {
+                return false;
+            }
+            octet = octet * 10 + c - '0';
+            digits = digits + 1;
+            if digits > 3 || octet > 255 {
+                return false;
+            }
+        } else {
+            if c != '.' && c >= 0 {
+                return false;
+            }
+            if digits == 0 || parts >= 4 {
+                return false;
+            }
+            buf[at + parts] = byte_of(octet);
+            parts = parts + 1;
+            octet = 0;
+            digits = 0;
+            if c < 0 {
+                return parts == 4;
+            }
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+// Parse the IPv6 literal `t` (no brackets) into the 16 bytes of `buf` from `at`. False, with `buf` in no state to be read, if it is not one: groups of 1 to 4 hexadecimal digits
+// separated by single colons, at most one `::` for one or more groups of zeros, eight groups in all, optionally a dotted quad last that counts as two. The caller has room for 16 bytes at `at`.
+fn parse6[&t, &b](t: &t [byte], buf: &!b [byte], at: int) -> [] bool {
+    if len(t) < 2 || len(t) > literal_max() || at < 0 || at + 16 > len(buf) {
+        return false;
+    }
+    var z = 0;
+    while z < 16 {
+        buf[at + z] = byte_of(0);
+        z = z + 1;
+    }
+    var i = 0;
+    var n = 0;
+    var gap = 0 - 1;
+    if int_of(t[0]) == ':' {
+        if int_of(t[1]) != ':' {
+            return false;
+        }
+        gap = 0;
+        i = 2;
+    }
+    while i < len(t) {
+        var j = i;
+        var dots = false;
+        while j < len(t) && int_of(t[j]) != ':' {
+            if int_of(t[j]) == '.' {
+                dots = true;
+            }
+            j = j + 1;
+        }
+        if j == i {
+            return false;
+        }
+        if dots {
+            if j != len(t) || n > 6 {
+                return false;
+            }
+            if !dotted(t[i..j], buf, at + n * 2) {
+                return false;
+            }
+            n = n + 2;
+        } else {
+            if j - i > 4 || n >= 8 {
+                return false;
+            }
+            var v = 0;
+            var k = i;
+            while k < j {
+                let h = hex_value(int_of(t[k]));
+                if h < 0 {
+                    return false;
+                }
+                v = v * 16 + h;
+                k = k + 1;
+            }
+            buf[at + n * 2] = byte_of(v / 256);
+            buf[at + n * 2 + 1] = byte_of(v % 256);
+            n = n + 1;
+        }
+        i = j;
+        if i < len(t) {
+            if i + 1 < len(t) && int_of(t[i + 1]) == ':' {
+                if gap >= 0 {
+                    return false;
+                }
+                gap = n;
+                i = i + 2;
+            } else {
+                i = i + 1;
+                if i >= len(t) {
+                    return false;
+                }
+            }
+        }
+    }
+    if gap < 0 {
+        return n == 8;
+    }
+    if n > 7 {
+        return false;
+    }
+    // The groups after the `::` go to the end, last byte first (the destination is never before the source), and the gap is zeros.
+    let tail = (n - gap) * 2;
+    var m = 0;
+    while m < tail {
+        buf[at + 15 - m] = buf[at + gap * 2 + tail - 1 - m];
+        m = m + 1;
+    }
+    var q = gap * 2;
+    while q < 16 - tail {
+        buf[at + q] = byte_of(0);
+        q = q + 1;
+    }
+    return true;
+}
+
+// `buf[at..at + 16]` is `::ffff:a.b.c.d`: ten zero bytes, two 0xff, then an IPv4 address.
+fn is_mapped[&b](buf: &b [byte], at: int) -> [] bool {
+    var i = 0;
+    while i < 10 {
+        if int_of(buf[at + i]) != 0 {
+            return false;
+        }
+        i = i + 1;
+    }
+    return int_of(buf[at + 10]) == 255 && int_of(buf[at + 11]) == 255;
+}
+
+// The key of the `X-Forwarded-For` element `elem` when it is an IPv6 literal (square brackets and a port allowed), written at the start of `buf`; its length. 0 if it is not one: the caller keys on the text.
+//   - an IPv4-mapped address is the dotted-decimal text of the IPv4 address it carries (so it is the same key as the address written as IPv4, and a front that talks to IPv4 clients through a dual-stack
+//     socket does not put them all in one /64);
+//   - any other is `v` and the 32 lowercase hexadecimal digits of the address with every bit after the first `prefix` bits zeroed (a `prefix` outside 1..128 is 128: no aggregation).
+pub fn aggregate[&e, &b](elem: &e [byte], prefix: int, buf: &!b [byte]) -> [] int {
+    if len(elem) < 2 || len(elem) > element_max() || len(buf) < scratch_len() {
+        return 0;
+    }
+    var from = 0;
+    var to = len(elem);
+    if int_of(elem[0]) == '[' {
+        var close = 0 - 1;
+        var i = 1;
+        while i < len(elem) && close < 0 {
+            if int_of(elem[i]) == ']' {
+                close = i;
+            }
+            i = i + 1;
+        }
+        if close < 0 {
+            return 0;
+        }
+        if close + 1 < len(elem) {
+            // Only a port may follow the bracket: a colon and one to five digits.
+            let digits = len(elem) - close - 2;
+            if int_of(elem[close + 1]) != ':' || digits < 1 || digits > 5 {
+                return 0;
+            }
+            var d = close + 2;
+            while d < len(elem) {
+                if int_of(elem[d]) < '0' || int_of(elem[d]) > '9' {
+                    return 0;
+                }
+                d = d + 1;
+            }
+        }
+        from = 1;
+        to = close;
+    }
+    let at = addr_at();
+    if !parse6(elem[from..to], buf, at) {
+        return 0;
+    }
+    if is_mapped(buf, at) {
+        var k = 0;
+        var m = 0;
+        while m < 4 {
+            k = out.put_int(buf, k, int_of(buf[at + 12 + m]));
+            if m < 3 {
+                k = out.put_byte(buf, k, '.');
+            }
+            m = m + 1;
+        }
+        return k;
+    }
+    var bits = prefix;
+    if bits < 1 || bits > 128 {
+        bits = 128;
+    }
+    var k = out.put_byte(buf, 0, 'v');
+    var m = 0;
+    while m < 16 {
+        var keep = bits - m * 8;
+        if keep < 0 {
+            keep = 0;
+        }
+        if keep > 8 {
+            keep = 8;
+        }
+        let bv = int_of(buf[at + m]);
+        var v = bv;
+        if keep < 8 {
+            var unit = 1;
+            var s = 0;
+            while s < 8 - keep {
+                unit = unit * 2;
+                s = s + 1;
+            }
+            v = bv / unit * unit;
+        }
+        k = out.put_hex(buf, k, v, 2);
+        m = m + 1;
+    }
+    return k;
+}
