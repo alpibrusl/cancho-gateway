@@ -62,6 +62,7 @@ jobs:
           python3 tests/smuggling/run.py --prefixes
           python3 tests/smuggling/run.py --chunked
           python3 tests/smuggling/run.py --fuzz 1500
+          python3 scripts/lab_corpus.py --check
 
       - name: Upstream response heads against the corpus, split delivery and mutated heads
         working-directory: gateway
@@ -116,4 +117,5 @@ jobs:
         working-directory: gateway
         run: |
           python3 scripts/figures.py --check
+          python3 scripts/proof.py --check
           python3 scripts/check_site.py
