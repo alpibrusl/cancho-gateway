@@ -1108,3 +1108,28 @@ fn test_random_valid_streams_are_forwarded_whole() -> [] int {
     }
     return 0;
 }
+
+fn test_a_direction_that_has_carried_a_close_carries_no_second_one() -> [] int {
+    region a {
+        let ws = alloc_slice[a](56, 0);
+        // the client's Close went by (direction 0), then the gateway has to close for a timer: none is placed toward the upstream, one toward the client
+        fresh(ws);
+        ws[16 + 13] = 1;
+        wsframe.begin_close(ws, 16, 0 - 1, 0, 100);
+        test.assert_eq(ws[5], 2);
+        test.assert_eq(ws[4], 0);
+        // the upstream's Close went by: the other way round
+        fresh(ws);
+        ws[36 + 13] = 1;
+        wsframe.begin_close(ws, 16, 0 - 1, 0, 100);
+        test.assert_eq(ws[4], 2);
+        test.assert_eq(ws[5], 0);
+        // the offender is marked
+        fresh(ws);
+        wsframe.begin_close(ws, 5, 1, 0, 100);
+        test.assert_eq(ws[36 + 19], 1);
+        test.assert_eq(ws[16 + 19], 0);
+        test.assert_eq(ws[36 + 18], 1);
+    }
+    return 0;
+}

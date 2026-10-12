@@ -42,7 +42,7 @@ One JSON object per request, one line, written when the request ends, in this ke
 
 **Escaping, so that a hostile request cannot make a line unparseable or longer than its bound:** in every string, `"` and `\` are backslash-escaped, every
 byte below 0x20 and 0x7f and every byte from 0x80 up is written as `\u00XX` (the byte read as Latin-1: always valid JSON, never invalid UTF-8). The path is cut at 128 input bytes **and** its escaped form at 256 output bytes (never in the middle of an escape), after which `"path_truncated":true` follows. A line is at most
-**768 bytes** by construction: the fixed keys and numbers, an id of at most 64 bytes, a method cut at 16, route and upstream names of at most 32 and a rule tag of at most 40, and the path's 256; the test
+**784 bytes** by construction: the fixed keys and numbers, an id of at most 64 bytes, a method cut at 16, route and upstream names of at most 32 and a rule tag of at most 40, and the path's 256; the test
 sends the worst bytes and measures.
 
 ## 3. The queue, and what happens when stdout is slow

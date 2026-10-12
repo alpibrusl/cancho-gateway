@@ -314,3 +314,37 @@ fn test_auth_refusals_are_counted_per_route_and_kind_and_shown_in_both_formats()
     }
     return 0;
 }
+
+fn test_the_frame_counters_and_the_close_codes_are_counted_and_shown_in_both_formats() -> [] int {
+    region a {
+        let stats = alloc_slice[a](metrics.stats_len(), 0);
+        let names = alloc_slice[a](metrics.names_len(), byte_of(0));
+        let g = alloc_slice[a](metrics.gauge_len(), 0);
+        metrics.ws_messages(stats, 3);
+        metrics.ws_messages(stats, 4);
+        metrics.ws_pinged(stats);
+        metrics.ws_pinged(stats);
+        metrics.ws_pong_timeout(stats);
+        metrics.ws_closed(stats, 1000);
+        metrics.ws_closed(stats, 1000);
+        metrics.ws_closed(stats, 1001);
+        metrics.ws_closed(stats, 1002);
+        metrics.ws_closed(stats, 1007);
+        metrics.ws_closed(stats, 1008);
+        metrics.ws_closed(stats, 1009);
+        metrics.ws_closed(stats, 1011);
+        metrics.ws_closed(stats, 1005);
+        metrics.ws_closed(stats, 4000);
+        let out = alloc_slice[a](metrics.worst_case(), byte_of(0));
+        let n = metrics.prometheus(out, 0, stats, names, g);
+        test.assert(contains(out[0..n], "cancho_gateway_ws_messages_total 7\n"));
+        test.assert(contains(out[0..n], "cancho_gateway_ws_pings_total 2\n"));
+        test.assert(contains(out[0..n], "cancho_gateway_ws_pong_timeouts_total 1\n"));
+        test.assert(contains(out[0..n], "cancho_gateway_ws_closes_total{code=\"1000\"} 2\n"));
+        test.assert(contains(out[0..n], "cancho_gateway_ws_closes_total{code=\"1011\"} 1\n"));
+        test.assert(contains(out[0..n], "cancho_gateway_ws_closes_total{code=\"other\"} 2\n"));
+        let j = metrics.json(out, 0, stats, names, g);
+        test.assert(contains(out[0..j], "\"messages\":7,\"pings\":2,\"pong_timeouts\":1,\"closes\":{\"1000\":2,\"1001\":1,\"1002\":1,\"1007\":1,\"1008\":1,\"1009\":1,\"1011\":1,\"other\":2}}"));
+    }
+    return 0;
+}

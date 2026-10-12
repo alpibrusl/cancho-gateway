@@ -12,7 +12,7 @@ import gateway.out;
 // come from sets the gateway itself controls (the generator's name pattern, the rule tables, the id format).
 
 pub fn max_line() -> [] int {
-    return 768;
+    return 784;
 }
 
 // `outcome`: 0 ok (the response was relayed whole), 1 refused (the gateway answered; `rule` says why), 2 aborted (a side went away, or
