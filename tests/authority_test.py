@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import authority  # noqa: E402
 
 
-def report(tmp, mutate=None):
+def report(tmp, mutate=None, source=None):
     subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(ROOT / "deploy/examples/tls.toml"), "--out", tmp], check=True, capture_output=True)
     f = pathlib.Path(tmp) / "tlsfiles.cho"
     if mutate:
@@ -25,6 +25,12 @@ def report(tmp, mutate=None):
     with open(ROOT / "cancho.toml", "rb") as fh:
         sources = [s for e in tomllib.load(fh)["bin"] if e["name"] == "gateway" for s in e["sources"]]
     files = [str(pathlib.Path(tmp) / pathlib.Path(s).name) if s.startswith("generated/") else str(ROOT / s) for s in sources]
+    if source:
+        # A copy of one source file with an edit, standing in for the real one: (path relative to the repository, function of its text).
+        name, edit = source
+        copy = pathlib.Path(tmp) / ("mutant_" + pathlib.Path(name).name)
+        copy.write_text(edit((ROOT / name).read_text()))
+        files[files.index(str(ROOT / name))] = str(copy)
     return authority.derive(authority.dependencies(files) + files)
 
 
@@ -40,6 +46,17 @@ def main():
         wide = authority.problems_for("gateway-tls", report(tmp, lambda t: t.replace('"/etc/cancho-gateway/tls"', '"/etc"')), allow)
         print("%-4s a widened directory is refused: %s" % ("ok" if wide else "FAIL", wide))
         failures += not wide
+    with tempfile.TemporaryDirectory() as tmp:
+        labels = sorted(authority.label_text(l) for l in report(tmp)["labels"] if l["name"].startswith("signals"))
+        ok = labels == ['signals("HUP,INT,TERM")', "signals_read"]
+        print("%-4s the report names exactly the three signals the gateway claims: %s" % ("ok" if ok else "FAIL", labels))
+        failures += not ok
+    with tempfile.TemporaryDirectory() as tmp:
+        # A claim of one more signal (USR1) in the program: the compiler's report prints it and the ceiling refuses it.
+        more = authority.problems_for("gateway-tls", report(tmp, source=("src/gateway.cho", lambda t: t.replace('"HUP,INT,TERM"', '"HUP,INT,TERM,USR1"').replace('Signals("HUP,INT,TERM")', 'Signals("HUP,INT,TERM,USR1")'))), allow)
+        refused = any("signals" in m for m in more)
+        print("%-4s claiming another signal is refused: %s" % ("ok" if refused else "FAIL", more))
+        failures += not refused
     with tempfile.TemporaryDirectory() as tmp:
         try:
             report(tmp, lambda t: t.replace('"/etc/cancho-gateway/tls"', '"/"'))

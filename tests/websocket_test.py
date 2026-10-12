@@ -17,6 +17,7 @@ import os
 import pathlib
 import random
 import re
+import signal
 import socket
 import ssl
 import struct
@@ -833,10 +834,16 @@ class Main:
         ws.close()
 
     def an_upstream_that_reads_late_receives_thirty_two_mebibytes_intact(gw, up):
+        n0 = len(gw.lines())
         ws = connect_ws(gw, "/v16/slowsink", timeout=60)
         payload = os.urandom(32 << 20)
         t0 = time.time()
-        ws.send(2, payload)        # blocks until the upstream, which sleeps 1.5 s, starts to read: the gateway's queues and the kernel's are full by then
+        try:
+            ws.send(2, payload)        # blocks until the upstream, which sleeps 1.5 s, starts to read: the gateway's queues and the kernel's are full by then
+        except OSError as e:
+            # One CI run saw a reset here that did not reproduce in 14 runs, loaded or not. Say who ended the tunnel, so that the next one can be traced.
+            time.sleep(0.5)
+            raise AssertionError("%r after %.1f s; the gateway's lines since: %s; what the upstream noted: %s" % (e, time.time() - t0, gw.lines()[n0:][-2:], up.ended[-3:]))
         assert time.time() - t0 > 1.0, "the send finished at once: nothing pushed back"
         ack = ws.expect(1)
         assert ack == hashlib.sha256(payload).hexdigest().encode(), ack
@@ -1394,6 +1401,25 @@ class Timers:
 class Wss:
     """On the gateway with `tls_listen`: the same routes over TLS (idle 1.5 s, lifetime 4 s)."""
 
+    def sighup_reloads_the_certificates_and_does_not_drop_an_open_tunnel(gw, up):
+        ws = connect_ws(gw, "/v16/CP110", tls=True, host="api.example")
+        echo_roundtrip(ws)
+        gw.wait_active(1)
+        before = gw.metrics()["tls"]
+        os.kill(gw.proc.pid, signal.SIGHUP)
+        end = time.time() + 5
+        while gw.metrics()["tls"]["reloads"] == before["reloads"] and time.time() < end:
+            time.sleep(0.05)
+        after = gw.metrics()
+        assert after["tls"]["reloads"] == before["reloads"] + 1 and after["tls"]["reload_failures"] == before["reload_failures"], (before, after["tls"])
+        assert after["ws"]["tunnels_active"] == 1
+        echo_roundtrip(ws)  # the tunnel that was open keeps working
+        other = connect_ws(gw, "/v16/CP111", tls=True, host="api.example")  # and a new one is served after the reload
+        echo_roundtrip(other)
+        other.close()
+        ws.close()
+        settle_down(gw)
+
     def a_wss_handshake_and_every_frame_type(gw, up):
         n0 = len(gw.lines())
         ws = connect_ws(gw, "/v16/CP100", tls=True, host="api.example")
@@ -1476,8 +1502,36 @@ class Wss:
 # ---------------------------------------------------------------------------------------------------------------------- the runner
 
 
+class Stop:
+    """On a plain gateway of its own: the signals with a tunnel open. The tests run in this order and the last ends the process."""
+
+    def sighup_with_a_tunnel_open_is_ignored_and_does_not_drop_it(gw, up):
+        ws = connect_ws(gw, "/v16/CP120")
+        echo_roundtrip(ws)
+        gw.wait_active(1)
+        os.kill(gw.proc.pid, signal.SIGHUP)
+        time.sleep(0.5)
+        assert gw.alive() and gw.metrics()["ws"]["tunnels_active"] == 1
+        echo_roundtrip(ws)
+        ws.close()
+        settle_down(gw)
+
+    def sigterm_with_a_tunnel_open_closes_it_and_exits_with_status_0(gw, up):
+        n = len(up.ended)
+        ws = connect_ws(gw, "/v16/CP121")
+        echo_roundtrip(ws)
+        gw.wait_active(1)
+        os.kill(gw.proc.pid, signal.SIGTERM)
+        assert gw.proc.wait(5) == 0, gw.proc.returncode
+        assert ws.eof(3) < 3  # the client sees its connection end
+        ended = up.wait_ended(n + 1)
+        assert len(ended) > n, "the upstream connection was not closed"
+        assert gw.proc.stderr.read().endswith(b"gateway: stopping\n")
+        ws.close()
+
+
 def main():
-    groups = {"Main": Main, "Timers": Timers, "Wss": Wss, "Interop": Interop}
+    groups = {"Main": Main, "Timers": Timers, "Wss": Wss, "Interop": Interop, "Stop": Stop}
     wanted = sys.argv[1:]
     todo = []
     for gname, cls in groups.items():
@@ -1492,7 +1546,7 @@ def main():
         return 2
     failures = 0
     skipped = 0
-    with tempfile.TemporaryDirectory() as t1, tempfile.TemporaryDirectory() as t2, tempfile.TemporaryDirectory() as t3:
+    with tempfile.TemporaryDirectory() as t1, tempfile.TemporaryDirectory() as t2, tempfile.TemporaryDirectory() as t3, tempfile.TemporaryDirectory() as t4:
         up = WsUpstream(pt.free_port())
         lib_port = pt.free_port()
         lib = None
@@ -1510,12 +1564,14 @@ def main():
                 gws["Timers"] = Gateway(t2, up.port, lib_port, idle=1000, lifetime=4000, max_tunnels=3, circuit=3)
             if "Wss" in needed:
                 gws["Wss"] = Gateway(t3, up.port, lib_port, idle=1500, lifetime=4000, max_tunnels=100, tls=True)
+            if "Stop" in needed:
+                gws["Stop"] = Gateway(t4, up.port, lib_port)
             for gname, cls, name in todo:
                 gw = gws[gname]
                 t0 = time.time()
                 try:
                     getattr(cls, name)(gw, up)
-                    if not gw.alive():
+                    if not gw.alive() and gname != "Stop":
                         raise AssertionError("the gateway died")
                     print("ok    %-70s %.1fs" % (name, time.time() - t0))
                 except Skip as e:

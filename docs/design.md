@@ -76,6 +76,7 @@ cancho change; it is not obviously possible.
 `net_out("")` (section 2.1: the compiler cannot carry the set), `conn_accept`, `conn_read`, `conn_write`, `poll`, `clock`, `io_write` (log to stdout,
 stderr only for startup refusals), **no `fs_*`, no `ffi`**. CI fails if a derived label is outside the committed ceiling
 file (task #11) and if `fs`/`ffi` ever appear.
+*(Widened since: `dir_read`, `file_read` and two `fs_read` paths for TLS, `err_write` for a reload's log line, and `signals("HUP,INT,TERM")` with `signals_read`; `authority.toml` and `docs/tls.md` sections 4, 10 and 11 give each reason. The row above is the v1 row.)*
 
 - **Secrets without files:** keys arrive in `argv`/environment at start. `args` is the effect; the open question is whether
   the environment is reachable without a new effect. **To settle in #8's first commit** by probe; if not, keys come in
@@ -126,7 +127,7 @@ connection. Nothing else, ever.
 
 Recorded one by one in #16. TLS (**corrected 2026-10-07:** the reason first recorded here, that TLS needs foreign code and would make the
 authority report unbounded, no longer holds: cancho has a TLS 1.3 server in pure cancho, `packages/tls`, cancho #338 and #339, example #346.
-**Built 2026-10-08** as a second listener (`tls_listen`), adding file reads (one certificate directory, `/dev/urandom`) to the report; the decision, the data path, the numbers, the gates and what was measured are `docs/tls.md`),
+**Built 2026-10-08** as a second listener (`tls_listen`), adding file reads (one certificate directory, `/dev/urandom`) to the report, and then (slice 2) certificate reload on `SIGHUP` and a clean stop on `SIGINT`/`SIGTERM`, which add `signals("HUP,INT,TERM")` and `signals_read`; the decision, the data path, the numbers, the gates and what was measured are `docs/tls.md`),
 HTTP/2/gRPC, caching, response rewriting, dynamic discovery, clustering. Dynamic
 discovery additionally contradicts section 2 (a mutable set cannot be bounded by a compile-time literal).
 

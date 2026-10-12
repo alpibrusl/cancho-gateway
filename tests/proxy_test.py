@@ -14,6 +14,7 @@ import os
 import pathlib
 import random
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -939,6 +940,22 @@ class T:
             time.sleep(0.1)
         assert gw.alive()
 
+    def sigterm_a_plain_gateway_ignores_sighup_and_stops_on_sigterm_with_status_0(gw, up):
+        # SIGHUP reloads TLS certificates; a deployment without tls_listen has none, so it is a no-op (not the default action, which would end the process).
+        assert split(request(gw, GET % b"/x"))[0] == 200
+        os.kill(gw.proc.pid, signal.SIGHUP)
+        time.sleep(0.3)
+        assert gw.alive() and split(request(gw, GET % b"/x"))[0] == 200
+        os.kill(gw.proc.pid, signal.SIGTERM)
+        assert gw.proc.wait(3) == 0, gw.proc.returncode
+        assert gw.proc.stderr.read() == b"gateway: stopping\n"
+
+    def sigint_a_plain_gateway_stops_on_sigint_with_status_0(gw, up):
+        assert split(request(gw, GET % b"/x"))[0] == 200
+        os.kill(gw.proc.pid, signal.SIGINT)
+        assert gw.proc.wait(3) == 0, gw.proc.returncode
+        assert gw.proc.stderr.read() == b"gateway: stopping\n"
+
     def chunked_body_echo(gw, up):
         parts = [os.urandom(random.randint(1, 20000)) for _ in range(12)]
         raw = b"".join(b"%x\r\n" % len(p) + p + b"\r\n" for p in parts) + b"0\r\n\r\n"
@@ -1025,7 +1042,7 @@ class T:
                 assert got_rule == rule, (raw, got_rule)
 
     def refusals_never_reach_the_upstream(gw, up):
-        before = up.connections
+        before = settled_connections(up)
         request(gw, b"GET /a/../b HTTP/1.1\r\nHost: a\r\n\r\n")
         request(gw, b"POST /x HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n")
         time.sleep(0.2)
@@ -1081,7 +1098,7 @@ class T:
         assert status == 200 and body == b"y" * 10, (status, body)
 
     def client_leaves_mid_body(gw, up):
-        fds = gw.fds()
+        fds = settled_fds(gw)
         s = socket.create_connection(("127.0.0.1", gw.port))
         s.sendall(b"POST /sink HTTP/1.1\r\nHost: a\r\nContent-Length: 100000\r\n\r\n" + b"a" * 5000)
         time.sleep(0.4)
@@ -1091,7 +1108,7 @@ class T:
         assert gw.fds() == fds, ("file descriptors", fds, gw.fds())
 
     def client_leaves_mid_response(gw, up):
-        fds = gw.fds()
+        fds = settled_fds(gw)
         s = socket.create_connection(("127.0.0.1", gw.port))
         s.sendall(GET % b"/trickle")
         s.recv(1000)
@@ -1589,6 +1606,31 @@ def heal(gw):
     raise AssertionError("the circuit did not close")
 
 
+def settled_fds(gw):
+    """The gateway's descriptor count once it has stopped changing (two readings 0.7 s apart agree): the previous test's lingering refusals and
+    closing sessions are gone, so that a count taken before a test and one taken after it differ only by what the test left."""
+    last = gw.fds()
+    for _ in range(12):
+        time.sleep(0.7)
+        now = gw.fds()
+        if now == last:
+            return now
+        last = now
+    return last
+
+
+def settled_connections(up):
+    """The upstream's connection count once no connection has arrived for 0.7 s (a late dial of the previous test would otherwise be counted by this one)."""
+    last = up.connections
+    for _ in range(12):
+        time.sleep(0.7)
+        now = up.connections
+        if now == last:
+            return now
+        last = now
+    return last
+
+
 def quiesce(gw):
     """Let every idle pooled connection expire, so a test starts with an empty pool."""
     time.sleep(0.75)
@@ -1613,7 +1655,7 @@ def main():
         gw0 = None
         extra = {}
         for prefix, kw in (("smallq_", dict(logq=1600)), ("pipe_", dict(read=False)), ("fullstdout_", dict(stdout=open("/dev/full", "wb"))),
-                           ("continueonfail_", dict(stdout=open("/dev/full", "wb"), log_failure="continue"))):
+                           ("continueonfail_", dict(stdout=open("/dev/full", "wb"), log_failure="continue")), ("sigterm_", dict()), ("sigint_", dict())):
             if any(n.startswith(prefix) for n in names):
                 extra[prefix] = Gateway(tempfile.mkdtemp(prefix="gwx"), free_port(), up_port, dead, ka_port, flap_port, **kw)
                 extra[prefix].ka = ka
@@ -1628,7 +1670,7 @@ def main():
                 g = gw0 if name.startswith("nopool_") else next((x for p, x in extra.items() if name.startswith(p)), gw)
                 try:
                     getattr(T, name)(g, up)
-                    if not g.alive() and not name.startswith("fullstdout_"):  # that one is about the gateway stopping
+                    if not g.alive() and not name.startswith(("fullstdout_", "sigterm_", "sigint_")):  # those are about the gateway stopping
                         raise AssertionError("the gateway died")
                     print("ok    %-52s %.1fs" % (name, time.time() - t0))
                 except (AssertionError, OSError) as e:

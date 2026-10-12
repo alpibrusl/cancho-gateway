@@ -35,6 +35,8 @@ MEANINGS = {
     "net_in(\"\")": "listening: the network bound is shared with connecting and <strong>not narrowed</strong>",
     "net_out(\"\")": "connecting: the upstream set is enforced in code and tested, not proved by the compiler",
     "poll": "the poller: one thread, one loop",
+    "signals(\"HUP,INT,TERM\")": "claiming exactly three signals: SIGHUP reloads the TLS certificates, SIGINT and SIGTERM stop the gateway",
+    "signals_read": "reading those three signals from the poller",
     "fs_read(\"/dev/urandom\")": "random bytes for TLS handshakes, exactly this device",
     "fs_read(\"/etc/cancho-gateway/tls\")": "the certificate directory compiled into the binary, exactly this path",
 }
@@ -93,7 +95,7 @@ def fragment():
     parts += table("gateway", "The gateway, a build without TLS",
                    "The ceiling a person reviews is [gateway] in authority.toml; what the compiler derives may be smaller, never larger. This table is the derived set.")
     parts += table("gateway-tls", "The same program, built for deploy/examples/tls.toml",
-                   "Exactly two named paths are added, and scripts/authority.py fails on any other fs_read. The generated modules replace the example's, so this is the TLS deployment's own report.")
+                   "Two named paths are added to the filesystem authority, and scripts/authority.py fails on any other fs_read. The generated modules replace the example's, so this is the TLS deployment's own report.")
     parts.append("  <p>Never in any build: <code>" + "</code>, <code>".join(NEVER) + "</code>. A change to either report fails CI before it fails a reader.")
     return "\n".join(parts) + "\n"
 
