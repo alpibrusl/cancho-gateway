@@ -709,7 +709,7 @@ class Frames:
         ws.close()
 
     def a_client_that_is_still_sending_when_it_is_refused_still_gets_its_close(gw, up):
-        path = "/small/flood/sink"
+        path = "/small/flood/echo"
         n0 = len(gw.lines())
         ws = go(gw, path, timeout=30)
         flood = bytes([0x82, 0xFE, 0x10, 0x01]) + KEY + os.urandom(1 << 20) * 48
@@ -724,9 +724,10 @@ class Frames:
 
         t = threading.Thread(target=send, daemon=True)
         t.start()
+        t.join(30)            # the whole flood goes out before the client looks at what it was answered
+        assert not t.is_alive(), "the flood was not taken"
         payload = expect_close(ws, 1009, echo=False)
         assert code_of(payload) == 1009
-        t.join(20)
         assert not failed, "the connection was reset under a client that was still sending: %r" % failed
         e = log_of(gw, n0, path)
         assert e["rule"] == "ws.message-too-big" and e["ws_close"] == 1009, e
