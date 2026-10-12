@@ -251,7 +251,7 @@ fn rewrite_with[&s, &t, &o, &d, &x](src: &s [byte], table: &t [int], out: &!o [b
         if copy && upgrade && is(name, "sec-websocket-extensions") {
             copy = false;
         }
-        if copy && len(strip) > 0 && is(name, strip) {
+        if copy && is(name, strip) {
             copy = false;
         }
         if copy {

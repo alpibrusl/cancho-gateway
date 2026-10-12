@@ -288,6 +288,14 @@ fn test_auth_refusals_are_counted_per_route_and_kind_and_shown_in_both_formats()
         metrics.auth_refused(stats, 2, 5);
         metrics.auth_refused(stats, 2, 0 - 1);
         metrics.auth_refused(stats, 0, 4);
+        // A route's 32 counters: the four kinds are slots 25 to 28, and the slots beside them (the rate limit's before, three spare after) were not touched.
+        test.assert_eq(stats[2 * 32 + 25], 2);
+        test.assert_eq(stats[2 * 32 + 26], 1);
+        test.assert_eq(stats[2 * 32 + 27], 3);
+        test.assert_eq(stats[2 * 32 + 28], 1);
+        test.assert_eq(stats[2 * 32 + 24], 0);
+        test.assert_eq(stats[2 * 32 + 29], 0);
+        test.assert_eq(stats[3 * 32 + 25], 0);
         let out = alloc_slice[a](metrics.worst_case(), byte_of(0));
         let n = metrics.prometheus(out, 0, stats, names, g);
         test.assert(n > 0);
