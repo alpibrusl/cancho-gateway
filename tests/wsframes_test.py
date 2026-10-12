@@ -708,6 +708,26 @@ class Frames:
         assert got == p
         ws.close()
 
+    def a_client_that_is_still_sending_when_it_is_refused_still_gets_its_close(gw, up):
+        path = "/small/flood/sink"
+        n0 = len(gw.lines())
+        ws = go(gw, path, timeout=30)
+        flood = bytes([0x82, 0xFE, 0x10, 0x01]) + KEY + os.urandom(6 << 20)
+
+        def send():
+            try:
+                ws.sock.sendall(flood)
+            except OSError:
+                pass
+
+        t = threading.Thread(target=send, daemon=True)
+        t.start()
+        payload = expect_close(ws, 1009, echo=False)
+        assert code_of(payload) == 1009
+        t.join(20)
+        e = log_of(gw, n0, path)
+        assert e["rule"] == "ws.message-too-big" and e["ws_close"] == 1009, e
+
     def a_close_from_either_peer_is_passed_through_and_answered(gw, up):
         path = "/small/cc/echo"
         n0 = len(gw.lines())
