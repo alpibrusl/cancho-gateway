@@ -198,7 +198,7 @@ $ <span class="c"># the same line the gateway wrote to stdout:</span>
   <div class="stats">
 <div><b>0</b><span>files written, ever: <code>fs_write</code>, <code>file_write</code>, <code>dir_write</code> are not capabilities the binary has</span></div>
 <div><b>0</b><span>foreign calls: <code>ffi</code> is released at start; no C, no <code>unsafe</code></span></div>
-<div><b>929</b><span>pure functions the compiler counted in the gateway, of every function it has</span></div>
+<div><b>936</b><span>pure functions the compiler counted in the gateway, of every function it has</span></div>
 <div><b>2</b><span>paths the TLS build reads: <code>/dev/urandom</code> and the certificate directory; the build without <code>tls_listen</code> reads none</span></div>
   </div>
   <div class="fitwrap"><table class="fit">
@@ -210,12 +210,15 @@ $ <span class="c"># the same line the gateway wrote to stdout:</span>
       <tr><th><code>conn_read</code></th><td>reading from an open connection</td><td class="good">bounded</td></tr>
       <tr><th><code>conn_write</code></th><td>writing to an open connection</td><td class="good">bounded</td></tr>
       <tr><th><code>dir_read</code></th><td>reading a directory (the certificate directory, through a handle)</td><td class="good">bounded</td></tr>
+      <tr><th><code>err_write</code></th><td>standard error</td><td class="good">bounded</td></tr>
       <tr><th><code>file_read</code></th><td>reading a file through a directory handle</td><td class="good">bounded</td></tr>
       <tr><th><code>heap</code></th><td>the heap: every slab is sized at start</td><td class="good">bounded</td></tr>
       <tr><th><code>io_write</code></th><td>standard output: the access log (and standard error)</td><td class="good">bounded</td></tr>
       <tr><th><code>net_in(&quot;&quot;)</code></th><td>listening: the network bound is shared with connecting and <strong>not narrowed</strong></td><td class="good">bounded</td></tr>
       <tr><th><code>net_out(&quot;&quot;)</code></th><td>connecting: the upstream set is enforced in code and tested, not proved by the compiler</td><td class="good">bounded</td></tr>
       <tr><th><code>poll</code></th><td>the poller: one thread, one loop</td><td class="good">bounded</td></tr>
+      <tr><th><code>signals(&quot;HUP,INT,TERM&quot;)</code></th><td>claiming exactly three signals: SIGHUP reloads the TLS certificates, SIGINT and SIGTERM stop the gateway</td><td class="good">bounded</td></tr>
+      <tr><th><code>signals_read</code></th><td>reading those three signals from the poller</td><td class="good">bounded</td></tr>
     </tbody>
   </table></div>
   <p class="note">The ceiling a person reviews is [gateway] in authority.toml; what the compiler derives may be smaller, never larger. This table is the derived set.</p>
@@ -228,6 +231,7 @@ $ <span class="c"># the same line the gateway wrote to stdout:</span>
       <tr><th><code>conn_read</code></th><td>reading from an open connection</td><td class="good">bounded</td></tr>
       <tr><th><code>conn_write</code></th><td>writing to an open connection</td><td class="good">bounded</td></tr>
       <tr><th><code>dir_read</code></th><td>reading a directory (the certificate directory, through a handle)</td><td class="good">bounded</td></tr>
+      <tr><th><code>err_write</code></th><td>standard error</td><td class="good">bounded</td></tr>
       <tr><th><code>file_read</code></th><td>reading a file through a directory handle</td><td class="good">bounded</td></tr>
       <tr><th><code>fs_read(&quot;/dev/urandom&quot;)</code></th><td>random bytes for TLS handshakes, exactly this device</td><td class="good">bounded</td></tr>
       <tr><th><code>fs_read(&quot;/etc/cancho-gateway/tls&quot;)</code></th><td>the certificate directory compiled into the binary, exactly this path</td><td class="good">bounded</td></tr>
@@ -236,9 +240,11 @@ $ <span class="c"># the same line the gateway wrote to stdout:</span>
       <tr><th><code>net_in(&quot;&quot;)</code></th><td>listening: the network bound is shared with connecting and <strong>not narrowed</strong></td><td class="good">bounded</td></tr>
       <tr><th><code>net_out(&quot;&quot;)</code></th><td>connecting: the upstream set is enforced in code and tested, not proved by the compiler</td><td class="good">bounded</td></tr>
       <tr><th><code>poll</code></th><td>the poller: one thread, one loop</td><td class="good">bounded</td></tr>
+      <tr><th><code>signals(&quot;HUP,INT,TERM&quot;)</code></th><td>claiming exactly three signals: SIGHUP reloads the TLS certificates, SIGINT and SIGTERM stop the gateway</td><td class="good">bounded</td></tr>
+      <tr><th><code>signals_read</code></th><td>reading those three signals from the poller</td><td class="good">bounded</td></tr>
     </tbody>
   </table></div>
-  <p class="note">Exactly two named paths are added, and scripts/authority.py fails on any other fs_read. The generated modules replace the example&#x27;s, so this is the TLS deployment&#x27;s own report.</p>
+  <p class="note">Two named paths are added to the filesystem authority, and scripts/authority.py fails on any other fs_read. The generated modules replace the example&#x27;s, so this is the TLS deployment&#x27;s own report.</p>
   <p>Never in any build: <code>ffi</code>, <code>fs_write</code>, <code>file_write</code>, <code>dir_write</code>, <code>exec</code>, <code>fork</code>. A change to either report fails CI before it fails a reader.
 <!-- report:end -->
 </section>

@@ -457,7 +457,10 @@ class T:
         assert e["outcome"] == "aborted", e
         s.close()
         grown = gw.rss_kib() - rss0
-        assert grown < 4096, "the gateway grew by %d KiB serving a client that did not read (the slot's buffers are 100 KiB)" % grown
+        # The upstream offers 50 MB. A gateway that buffered what the client did not read would grow by about that; one that holds a slot's buffers
+        # grows by under a megabyte here (0 to 0.5 MiB measured locally). The limit allows for the kernel faulting transparent huge pages, which made
+        # one CI run read 5.9 MiB of resident growth for the same few hundred KiB of touched memory.
+        assert grown < int(os.environ.get("TLS_RSS_LIMIT_KIB", "16384")), "the gateway grew by %d KiB serving a client that did not read (the slot's buffers are 100 KiB)" % grown
         assert get(gw)[1] == b"ok"
 
     def garbage_and_old_versions_are_refused_and_nothing_leaks(gw, up):
