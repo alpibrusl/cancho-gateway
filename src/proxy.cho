@@ -652,8 +652,19 @@ fn tunnel_pump[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, client: int,
         w[14] = 0;
     }
     if st[ps + 14] == 1 && w[0] == 1 {
-        // A side went away while the gateway was closing: the tunnel is over.
-        w[13] = 1;
+        // A side went away while the gateway was closing: it will not answer, and no Close can reach it; the other is still waited for. A direction cut off inside a frame cannot be given one either.
+        w[done_at] = 1;
+        var to_src = wsframe.t_sent_upstream();
+        if dir == 0 {
+            to_src = wsframe.t_sent_client();
+        }
+        if w[to_src] == 0 {
+            w[to_src] = 2;
+        }
+        if w[b] == 1 && w[sent_at] == 0 {
+            w[sent_at] = 2;
+        }
+        st[ps + 4] = 0;
     } else if st[ps + 14] == 1 && w[13] == 0 {
         // The source has ended. Bytes the parser still holds (a header, or the start of a Pong) or a payload that was cut off make it a truncated frame; otherwise it is the ending of slice 1.
         var cut = w[b] == 1;
@@ -709,17 +720,25 @@ fn tunnel_pump[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, client: int,
     return 0;
 }
 
-// Run the tunnel of client `client` after something happened to direction `dir`: that direction first, then, if the gateway began to close the tunnel, both until the closing has done what it can.
+// Run the tunnel of client `client` after something happened to direction `dir`: that direction first; then, if the gateway has begun to close the tunnel (a direction answered 2, or a Close
+// frame is still to be placed), both directions, until the closing has done what it can.
 fn tunnel_run[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, client: int, dir: int, now: int) -> [conn_write, poll] int {
     var r = tunnel_pump(tab, core, client, dir, now);
     var again = 0;
-    while r == 2 && again < 3 {
+    while r != 1 && again < 3 {
+        let wk = contents(core.wsf)[ws_at(client)..ws_at(client) + wsframe.state_len()];
+        if r != 2 && !(again == 0 && wk[0] == 1 && (wk[wsframe.t_sent_client()] == 0 || wk[wsframe.t_sent_upstream()] == 0)) {
+            return 0;
+        }
         again = again + 1;
-        r = tunnel_pump(tab, core, client, 0, now);
-        if r != 1 {
-            let r2 = tunnel_pump(tab, core, client, 1, now);
-            if r2 == 1 || r2 == 2 {
-                r = r2;
+        let r0 = tunnel_pump(tab, core, client, 0, now);
+        r = r0;
+        if r0 != 1 {
+            let r1 = tunnel_pump(tab, core, client, 1, now);
+            if r1 == 1 {
+                r = 1;
+            } else if r0 == 2 || r1 == 2 {
+                r = 2;
             } else {
                 r = 0;
             }
