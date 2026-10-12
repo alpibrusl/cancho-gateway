@@ -1,0 +1,4 @@
+idle: gateway CPU over 4 s: 0 ms
+20 handshakes a second: 100 in 5.0 s, gateway CPU 0.70 s = 7.00 ms a handshake (14% of its core)
+50 handshakes a second: 250 in 5.0 s, gateway CPU 1.72 s = 6.88 ms a handshake (34% of its core)
+100 handshakes a second: 500 in 5.0 s, gateway CPU 3.44 s = 6.88 ms a handshake (69% of its core)

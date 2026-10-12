@@ -1,7 +1,7 @@
 # TLS in the gateway (task #16, the decision made)
 
 Status: **slice 1 built (2026-10-08): the listener, the handshake bounds, the data path, the report, the tests; `docs/tls.md` section 10 says what was built, what was measured and where it differs from the
-design above it. Slice 2 built (2026-10-08): certificate reload on `SIGHUP`, a clean stop on `SIGINT` and `SIGTERM`, and an optional `listen` (a TLS-only deployment): section 11. Not built: the cost cell in the benchmark harness (gate 9).** Sections 1 to 9 were written before the code, and where the code found one false it is corrected
+design above it. Slice 2 built (2026-10-08): certificate reload on `SIGHUP`, a clean stop on `SIGINT` and `SIGTERM`, and an optional `listen` (a TLS-only deployment): section 11. Gate 9, the cost in the benchmark harness, measured 2026-10-12: section 12 (over TLS the gateway serves about a 170th of its plain rate, because it keeps no client connection open and every request is a full handshake of 5.9 ms of CPU).** Sections 1 to 9 were written before the code, and where the code found one false it is corrected
 in place and marked *(corrected)*. It replaces the
 "TLS is out of v1" record in `docs/design.md` section 7, whose stated reason (TLS needs foreign code and would make the authority report unbounded) stopped
 being true when cancho shipped a TLS 1.3 server written in cancho (`packages/tls`, cancho #338 and #339; `examples/tls_echo`, #346; the byte-fed HTTP
@@ -16,7 +16,7 @@ corrected here, in place.
 | the engine's interface | slots, bytes in and bytes out: `serve`, `feed`, `recv`, `send`, `take`, `event`, `finish`, `drop`, `server_name`, `alpn`, `suite`, `group` | `tls-server.md` section 5.1 | the engine never reads a file and holds no capability |
 | `examples/tls_echo`, `examples/https_hello` | a complete non-blocking terminator on one `Poller`: handshake bounds, a rate limit, `SIGHUP` reload, `close_notify` on stop | `tls-server.md` section 11, `http-server.md` section 11.6 | `https_hello` uses cancho's `http.server`, which the gateway does not (the gateway has its own framing and proxy state machine); what carries over is the *terminator* half |
 | `narrow(fs, "a", "b")` (cancho #364, **merged**) | one `Fs` narrowed into several literal paths, so a program that reads `/dev/urandom` and one certificate directory reports exactly those two paths instead of `fs_read("")` | #364's description; `examples/tls_echo_fixed` | *(corrected)* the gateway's pin moved to `2fcf4cd`, the commit that has it (`cancho.toml`) |
-| measured cost | TLS 1.3 serves 3.6 times (aarch64) to 4.2 times (x86-64) fewer requests a second from one core than the same server plain (23.4 against 5.6 microseconds of CPU a request on CI's x86-64 runner, 99-byte answers); a full handshake is 3.0 ms (Apple M4) to 5.5 ms (CI x86-64) of CPU | `http-server.md` section 11.7, `tls-server.md` section 11.4 | cancho's server, cancho's request path; the gateway's own cost is a number this task must produce (gate 9) |
+| measured cost | TLS 1.3 serves 3.6 times (aarch64) to 4.2 times (x86-64) fewer requests a second from one core than the same server plain (23.4 against 5.6 microseconds of CPU a request on CI's x86-64 runner, 99-byte answers); a full handshake is 3.0 ms (Apple M4) to 5.5 ms (CI x86-64) of CPU | `http-server.md` section 11.7, `tls-server.md` section 11.4 | cancho's server, cancho's request path; the gateway's own cost is a number this task must produce (gate 9). *(Corrected by gate 9, section 12: those are costs of a connection that stays open. The gateway has no client keep-alive, so each request pays a handshake as well: 157 requests a second over TLS against 26,991 plain on C1, 1 in 170, not 1 in 3.6 to 4.2; a handshake is 5.9 ms of CPU here, 6.9 ms at low rates. The 3.6 to 4.2 is the right order for the bytes of an open connection: 3.6 on C8.)* |
 
 ## 2. What the gateway wants, and what it will not do
 
@@ -77,8 +77,8 @@ the same refusals, the same request id and log line over TLS as over plain TCP; 
 | | today | with `tls_listen` |
 |---|---|---|
 | sessions (table slots) | 256 slots, about 127 sessions (two slots each) | the same; engine slots equal table slots (256) |
-| memory | 4 MiB of buffers, `bufs` 16 KiB and `pends` 32 KiB a slot, and the log queue | plus per slot `cin` (17 KiB) and `cout` (34 KiB), plus the engine: about 40 KiB a connection slot (cancho's figure, `http-server.md` section 11.2), 274 KiB for 16 identities and 75 KiB of key-parser work. Allocated only when `tls_listen` is set, and indexed by table slot (the engine's slot is the table's): **about 23 MiB more at 256 slots**, which is more than ten times the whole gateway's 1.9 MiB today. That is the honest price of the simple numbering. Only client slots use TLS state, and in steady state about half the table is clients (a session holds a client slot and an upstream slot), so a dense index from client slot to TLS state could halve it to about 12 MiB, at the price of an indirection in the data path and of its own admission bound (the accept check today lets up to 254 clients in before any has dialled an upstream): question 5 |
-| CPU | 1 core | a full handshake is 3 to 5.5 ms of that core (cancho's figures; ours is gate 9), so 100 handshakes a second is a third to a half of it: `tls_rate` exists for that; each request costs about 4 times as much as plain on cancho's own server |
+| memory | 4 MiB of buffers, `bufs` 16 KiB and `pends` 32 KiB a slot, and the log queue | plus per slot `cin` (17 KiB) and `cout` (34 KiB), plus the engine: about 40 KiB a connection slot (cancho's figure, `http-server.md` section 11.2), 274 KiB for 16 identities and 75 KiB of key-parser work. Allocated only when `tls_listen` is set, and indexed by table slot (the engine's slot is the table's): **about 23 MiB more at 256 slots**, which is more than ten times the whole gateway's 1.9 MiB today *(corrected by gate 9: 2.6 MiB on `main` of 2026-10-12, and 17 to 28 MiB more than the plain build after a 64-connection load, the top of it above this estimate: section 12)*. That is the honest price of the simple numbering. Only client slots use TLS state, and in steady state about half the table is clients (a session holds a client slot and an upstream slot), so a dense index from client slot to TLS state could halve it to about 12 MiB, at the price of an indirection in the data path and of its own admission bound (the accept check today lets up to 254 clients in before any has dialled an upstream): question 5 |
+| CPU | 1 core | a full handshake is 3 to 5.5 ms of that core (cancho's figures; ours is gate 9), so 100 handshakes a second is a third to a half of it: `tls_rate` exists for that; each request costs about 4 times as much as plain on cancho's own server *(Corrected by gate 9: a handshake is 5.9 ms flat out and 6.9 ms at 20 to 100 a second, so 100 a second is 69% of the core; and a request over this gateway's TLS costs 6.2 ms against 34 µs plain, because every request is a handshake: section 12)* |
 | authority report | `args, clock, conn_accept, conn_read, conn_write, heap, io_write, net_in(""), net_out(""), poll` | plus `dir_read`, `file_read`, `fs_read("/dev/urandom")`, `fs_read("<tls_dir>")` (slice 1) and `signals("HUP,INT,TERM")`, `signals_read` (slice 2, built; in the plain row too, section 11.7). `authority.toml`'s ceiling is changed deliberately, in the same PR, with the reason |
 
 ## 5. What the TLS slice needs from cancho that it does not have
@@ -104,7 +104,7 @@ the same refusals, the same request id and log line over TLS as over plain TCP; 
 | `cin` per slot | 16,384 + 5 + 256 = 16,645, rounded to 17,408 | one record of ciphertext at the engine's largest |
 | `cout` per slot | 34,816 (two records) | the engine writes a record at a time; two lets one be written while the next is made |
 | `tls_handshakes` | 32 | `tls_echo`'s default |
-| `tls_rate` | ~~100~~ **50** a second *(corrected: measured 12 ms a handshake, section 10)* | `tls_echo`'s default was 100; the operator sets it from the machine's own handshake figure |
+| `tls_rate` | ~~100~~ **50** a second *(corrected: measured 12 ms a handshake, section 10; corrected again by gate 9: 6.9 ms at 20 to 100 a second, so 50 a second is 34% of the core, not 60%, and the ceiling is 167 a second flat out; the default stays 50, a bound for a public edge, and is also the most requests a second a deployment at the default can serve over TLS: section 12)* | `tls_echo`'s default was 100; the operator sets it from the machine's own handshake figure |
 | `tls_handshake_ms` | 10,000 | `tls_echo`'s default |
 | identities | at most 16 | the engine's bound |
 | ALPN offered | `http/1.1` | the gateway speaks nothing else |
@@ -119,7 +119,7 @@ the same refusals, the same request id and log line over TLS as over plain TCP; 
 6. **The report:** `scripts/authority.py --check` against the recorded manifest with exactly the labels of section 4 and no `fs_read("")`; a mutant that widens the narrowing to the whole filesystem must fail it.
 7. **The 2,000-line gate** and the existing end-to-end tests (75 in `tests/proxy_test.py`, 16 in `tests/admin_test.py`) passing unchanged on a build with `tls_listen` unset, and (where they apply) over TLS.
 8. **Mutants** of the new code, all killed or explained: the data path's back-pressure (feed without room, send without release), the handshake bounds (each), the phase change at establishment, `close_notify` at the end, the scheme header, the log field, the narrowing.
-9. **Cost, measured in the benchmark harness** against the plain gateway in the same rounds: C1 and C4 over TLS (the harness gets a TLS-capable load tool) and a handshake-rate cell; the result is a number in this document, with the machine's drift stated, not a claim.
+9. **Cost, measured in the benchmark harness** against the plain gateway in the same rounds: C1 and C4 over TLS (the harness gets a TLS-capable load tool) and a handshake-rate cell; the result is a number in this document, with the machine's drift stated, not a claim. *(Done, section 12: C1, C3 and C4 over TLS, a handshake cell (C7), a bulk cell (C8) and C6 over TLS. "Keep-alive" and "new connection per request" are the same cell here, the gateway having no client keep-alive.)*
 
 ## 9. Questions that decide the first slice
 
@@ -163,14 +163,14 @@ its handshake is dropped without an answer, since there is no HTTP to answer wit
 | 6 the report | **met** | `scripts/authority.py --check` (CI) and `tests/authority_test.py`: a build whose directory is widened to `/etc` is refused by the ceiling, one narrowed to `/` is refused by the compiler (nested paths) |
 | 7 the 2,000-line gate, the existing tests | **met** | the largest source file is `proxy.cho`, 1,334 lines; 75 + 16 tests pass with `tls_listen` unset (`example.toml`) |
 | 8 mutants | **21 single edits of the new code: 16 killed, 5 survive, each argued** | below |
-| 9 cost in the benchmark harness | **not done** | the harness has no TLS-capable load tool; the informal numbers below are one machine, one connection, Python endpoints |
+| 9 cost in the benchmark harness | **met on 2026-10-12, with a bad result** | `bench/run.py` (wrk, curl and `openssl s_time`, all TLS-capable): section 12 and `docs/bench.md` section 11. The informal numbers below it are superseded where section 12 says so |
 
 **Mutants.** Killed: feed's "more may be waiting" flag removed (a 3 MB POST stalls, 504); the loop's no-sleep after progress removed (the same); the header clock not started at establishment; establishment declared before the engine says so; `close_notify` not sent; the scheme
 always `http`; the log field off; the concurrency bound removed; the rate bound removed; the handshake deadline never applied; the queue bounded by the handshake deadline; lowest slot first; the session ended with ciphertext still queued; the handshake not counted; the engine's refusal tag lost; the timeout tag lost. **Survive:**
 (1) `send` taking nothing answered `Wrote(0)` instead of `Again` (the proxy treats both as no progress: equivalent). (2) `drain` returning "done" when the socket is full: the next `write` then hands the engine plaintext it queues, bounded by the engine's own output queue and by `cout`; the memory bound the gate measures (RSS) holds either way. (3) `eof` not told to the engine for a peer that left: the proxy drops the session on `End` either way and `tls.drop` wipes the slot. (4) the 20 ms wake while a handshake waits for its turn removed: a queued handshake then starts at the next turn, at most 250 ms later; latency only. (5) a read watch kept while ciphertext is held that the engine cannot take: CPU
 (a busy turn), not correctness; it needs a state (the engine's output full while the plaintext buffer has room) that no test reaches.
 
-**Measured (informal; not gate 9).** One machine, one core of it, Python endpoints and upstream, the gateway's CPU from `/proc`. *A full handshake: 12.0 ms of the gateway's CPU* (200 handshakes started at 50 a second). *Bulk, one connection, 100 MB through the gateway: 162 MB/s over TLS (0.44 s of gateway CPU) against 378 MB/s plain (0.14 s)*; the TLS path is
+**Measured (informal; not gate 9).** One machine, one core of it, Python endpoints and upstream, the gateway's CPU from `/proc`. *A full handshake: 12.0 ms of the gateway's CPU* (200 handshakes started at 50 a second) *(corrected by gate 9: not reproduced; 5.9 ms flat out and 6.9 ms at 50 a second, section 12)*. *Bulk, one connection, 100 MB through the gateway: 162 MB/s over TLS (0.44 s of gateway CPU) against 378 MB/s plain (0.14 s)*; the TLS path is
 about three times the plain one's CPU for the bytes moved. *Memory:* 1.8 MiB resident plain, 2.4 MiB with `tls_listen` and no connection, 13.9 MiB with 100 established TLS connections, about 110 KiB each; the 23 MiB of section 4 is the figure with all 256 slots touched. The per-request cost against plain, and the handshake rate in the benchmark harness, are gate 9.
 
 **What it does not do, again.** *(Corrected by slice 2: reload and a TLS-only deployment are built, section 11.)* TLS to the upstreams, client certificates, HTTP/2, the SNI in the log, a peer address, a change of an identity's names or of the set of identities without a restart. The runbook line: copy the new files in (each file whole, the pair complete), then `kill -HUP <pid>`.
@@ -257,5 +257,33 @@ a bad mutant, not a gap: it reloads on every signal. Rewritten as a test of `SIG
 | G3 | `listen = 0` accepted | the `config.listen` cases |
 | G4 | `--explain` says a plain listener exists | the TLS-only compile check |
 
-**Not done in slice 2:** a drain on stop (requests in flight are cut); the names of an identity, or the set of identities, read again (a restart); a reload of an identity's chain that is not valid yet (R6); the cost cell (gate 9). The runbook line for a renewal: copy the new `chain.pem` and `key.pem` into the identity's directory (each file replaced whole; the pair complete before the signal, because the engine refuses a pair that does not match and the old one keeps serving), then `kill -HUP <pid>`, then look at the
+**Not done in slice 2:** a drain on stop (requests in flight are cut); the names of an identity, or the set of identities, read again (a restart); a reload of an identity's chain that is not valid yet (R6); the cost cell (gate 9; built afterwards, section 12). The runbook line for a renewal: copy the new `chain.pem` and `key.pem` into the identity's directory (each file replaced whole; the pair complete before the signal, because the engine refuses a pair that does not match and the old one keeps serving), then `kill -HUP <pid>`, then look at the
 `tls_reload_failures_total` counter or at standard error.
+
+## 12. Gate 9: the cost, measured (2026-10-12)
+
+Protocol, machine, certificate, cipher, validity and every table: `docs/bench.md` section 11; raw results `bench/results/2026-10-12-tls.json`; the tables of `docs/evidence.html`. Gateway sources of `3560c05`, one core, loopback,
+ECDSA P-256 certificate, TLS 1.3 with `TLS_AES_128_GCM_SHA256` and X25519 as a default OpenSSL client negotiates it, 4-vCPU shared VM (Xeon 2.8 GHz, AES-NI). Medians of 5 interleaved rounds against the plain gateway.
+
+| | plain build | TLS port | |
+|---|---|---|---|
+| C1 `GET /`, 64 connections, requests/s | 26,991 | **157** | 1 in 170 (paired 0.0059, 0.0054–0.0063) |
+| C3 64 KiB response | 8,548 | **149** | 1 in 57 |
+| C4 16 KiB POST | 10,865 | **159** | 1 in 68 |
+| C1 p50 / p99 ms | 1.9 / 5.9 | **192 / 377** | queueing behind handshakes |
+| gateway CPU a request, C1 | 34 µs | **6.2 ms** | 5.9 of it the handshake |
+| a full handshake, gateway CPU | | **5.9 ms** flat out (167 a second); 7.0, 6.9, 6.9 ms at 20, 50, 100 a second | one to an idle gateway: p50 7.5 ms, p99 13.5 |
+| C8, one connection, 64 MiB, MiB/s and CPU a GiB | 695, 1.41 s | **199, 5.01 s** | 3.6 times the CPU for the bytes |
+| RSS: idle, with 100 TLS connections, after a load (C1/C3/C4) | 2.6, 2.6, 3.6/5.4/7.8 MiB | **3.1, 13.9, 20.7/27.0/36.2 MiB** | 110 KiB a connection; 17 to 28 MiB more after a load |
+
+**What it says.**
+
+1. **TLS in this gateway is, today, fit for a few clients that make few requests, not for a public edge.** It has no client keep-alive, so every request pays a full handshake: about 157 requests a second from the core,
+   and a handshake costs the CPU of about 175 plain requests. The overhead per byte of a connection that stays open is small beside it (3.6 times, as cancho's own server measured) and not what an operator feels.
+2. **The default `tls_rate = 50` is the limit an operator meets first:** a deployment at the default serves at most 50 requests a second over TLS (34% of the core at 6.9 ms a handshake); the ceiling is 167. The handshake bounds
+   of section 3 held (gate 3); this is what they protect.
+3. **The designs' figures were right for what they measured and wrong for this gateway:** cancho's 3.6 to 4.2 times fewer requests a second assumed keep-alive (section 1, corrected); the 12 ms a handshake of the informal
+   measurement (section 10) was not reproduced, 5.9 to 7 ms is (section 4 and 7, corrected; the comment in `scripts/generate.py` that carried the 12 ms is corrected too); the 23 MiB of the memory estimate (section 4) is
+   exceeded by 5 MiB after a 64-connection POST load (C4), and the cause was not looked for.
+4. **What would change it is a client keep-alive**, a design decision that `docs/proxy.md` made against (framing across requests, the smuggling surface): with it a request over TLS would cost what C8 shows, 3.6 to 4.2 times, not 170.
+   Not decided here. Not measured here: other proxies over TLS, other cipher suites, several cores, the by-client index of question 5, failure paths of a handshake.
