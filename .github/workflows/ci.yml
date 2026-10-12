@@ -100,6 +100,14 @@ jobs:
         working-directory: gateway
         run: python3 tests/auth_test.py
 
+      - name: JWT bearer tokens (docs/jwt.md) against a recording upstream, plain, over TLS and with WebSocket upgrades, and the verifier against tokens signed by OpenSSL; the mutants are run by hand (tests/jwt_mutants.py)
+        working-directory: gateway
+        run: |
+          python3 -m pip install cryptography   # the independent signer of the differential (the vectors, the unit test and the end-to-end test need nothing)
+          python3 tests/jwt_vectors.py --check
+          python3 tests/jwt_test.py
+          python3 tests/jwt_differential.py 1500
+
       - name: The header policy against nginx (the table in the test says where they differ on purpose, and why)
         working-directory: gateway
         run: |

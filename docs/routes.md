@@ -86,4 +86,4 @@ key); a misspelt key carries `did you mean 'path_prefix'?`.
 - The first draw of requests was 97% refusals and exercised selection little; the generator now draws 60% clean requests
   (27% of the final 4,800 are routed).
 - Selection is a linear scan of the table per request (at most 256 routes). Not measured; #14 will say whether it matters.
-- Per-route timeouts are not keys yet; per-route authentication (`docs/auth.md`), rate limits (`docs/ratelimit.md`) and the forwarding policy (`trust_forwarded`) are.
+- Per-route timeouts are not keys yet; per-route authentication (`docs/auth.md` for API keys, `docs/jwt.md` for tokens), rate limits (`docs/ratelimit.md`) and the forwarding policy (`trust_forwarded`) are.

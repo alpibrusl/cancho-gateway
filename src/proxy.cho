@@ -15,6 +15,7 @@ import gateway.deploy;
 import gateway.egress;
 import gateway.forward;
 import gateway.framing;
+import gateway.jwt;
 import gateway.metrics;
 import gateway.out;
 import gateway.problem;
@@ -339,6 +340,12 @@ fn flush[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: int) 
 // queued and the connection closed once it is sent (the poller reports the socket writable at once). If a response has already
 // begun there is nothing honest to send: the session just ends.
 fn refuse[&t, &c, &r](tab: &!t conns.Table, core: &!c shared.Core, k: int, status: int, rule: &r [byte], now: int) -> [conn_write, poll] int {
+    return refuse_as(tab, core, k, status, rule, rule, now);
+}
+
+// `refuse`, where the response says `rule` and the access log and the counters say `shown`: a token refused for any of eleven reasons is one answer to the client and eleven in the log
+// (docs/jwt.md section 9).
+fn refuse_as[&t, &c, &r, &l](tab: &!t conns.Table, core: &!c shared.Core, k: int, status: int, rule: &r [byte], shown: &l [byte], now: int) -> [conn_write, poll] int {
     let st = contents(core.state);
     let pd = contents(core.pends);
     let p = shared.stride() * k;
@@ -356,7 +363,7 @@ fn refuse[&t, &c, &r](tab: &!t conns.Table, core: &!c shared.Core, k: int, statu
     // The record of the refusal, for the access log: its status and rule, and that the gateway made it.
     st[p + 29] = status;
     shared.flag_set(core, k, 1);
-    shared.meta_put(core, k, 68, 40, 1, rule);
+    shared.meta_put(core, k, 68, 40, 1, shown);
     let base = k * shared.pend_size();
     // A 401 names how to authenticate: the challenge of the route that refused it (docs/auth.md section 7.2).
     var challenge = "";
@@ -783,16 +790,38 @@ fn unauthenticated[&t, &c, &v, &b](tab: &!t conns.Table, core: &!c shared.Core, 
     let st = contents(core.state);
     let p = shared.stride() * k;
     let header = route.auth_header(sel);
-    var rule = auth.parse(view, tb, header);
+    // A route that accepts JWTs reads a longer credential (docs/jwt.md section 4).
+    var cap = auth.max_credential();
+    if route.auth(sel) >= 2 {
+        cap = jwt.credential_cap();
+    }
+    var rule = auth.parse_cap(view, tb, header, cap);
     if rule == 0 {
-        let found = auth.lookup(auth.credential(view, tb, header));
-        if found == 0 {
-            rule = 3;
-        } else {
-            st[p + shared.auth_slot()] = found;
-            if !auth.allowed(route.auth_keys(sel), found - 1) {
-                rule = 4;
+        let cred = auth.credential(view, tb, header);
+        if route.auth(sel) == 2 || route.auth(sel) == 3 && jwt.dots(cred) == 2 {
+            // A token (docs/jwt.md section 12.1): on a route that takes both kinds, the shape decides, once, and the other verifier never runs. The wall clock is the start-time offset plus the
+            // loop's monotonic clock, in whole seconds (section 7).
+            let verdict = jwt.verify(cred, routes_table.jwt_keys_blob(), route.jwt_keys(sel), route.jwt_aud(sel), route.jwt_iss(sel), route.jwt_leeway(sel), (contents(core.ids)[2] + now) / 1000);
+            if verdict < 0 {
+                metrics.jwt_refused(contents(core.stats), sel, 0 - verdict);
+                refuse_as(tab, core, k, 401, "auth.invalid", jwt.tag(0 - verdict), now);
+                return true;
             }
+            st[p + shared.auth_slot()] = 100 + verdict;
+            return false;
+        }
+        if auth.credential_ok(cred) {
+            let found = auth.lookup(cred);
+            if found == 0 {
+                rule = 3;
+            } else {
+                st[p + shared.auth_slot()] = found;
+                if !auth.allowed(route.auth_keys(sel), found - 1) {
+                    rule = 4;
+                }
+            }
+        } else {
+            rule = 2;
         }
     }
     if rule == 0 {
@@ -814,7 +843,7 @@ fn rate_limited[&t, &c, &v, &b](tab: &!t conns.Table, core: &!c shared.Core, k: 
     var verdict = 0;
     if bytes.equal(route.rate_key(sel), "a") {
         // `rate_key = "auth"` (docs/auth.md section 9): the bucket of the name of the key the request authenticated as.
-        verdict = ratelimit.admit(contents(core.rl), route.rate_base(sel), route.rate_buckets(sel), auth.key_name(st[p + shared.auth_slot()] - 1), route.rate(sel), route.rate_per_ms(sel), route.rate_burst(sel), now);
+        verdict = ratelimit.admit(contents(core.rl), route.rate_base(sel), route.rate_buckets(sel), auth.identity(st[p + shared.auth_slot()]), route.rate(sel), route.rate_per_ms(sel), route.rate_burst(sel), now);
     } else {
         verdict = ratelimit.admit(contents(core.rl), route.rate_base(sel), route.rate_buckets(sel), ratelimit.key(view, tb, route.rate_key(sel)), route.rate(sel), route.rate_per_ms(sel), route.rate_burst(sel), now);
     }
@@ -964,7 +993,7 @@ fn attach[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, slot: int
         var m = 0;
         // The header the route read the credential from is not forwarded, unless the route says so (docs/auth.md section 3).
         var strip = "";
-        if st[p + 31] > 0 && route.auth(st[p + 31] - 1) == 1 && route.auth_forward(st[p + 31] - 1) == 0 {
+        if st[p + 31] > 0 && route.auth(st[p + 31] - 1) > 0 && route.auth_forward(st[p + 31] - 1) == 0 {
             strip = route.auth_header(st[p + 31] - 1);
         }
         if st[p + shared.ws_mode()] == 1 {

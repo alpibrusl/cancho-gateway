@@ -1,0 +1,393 @@
+edition 5;
+
+module gateway.jwt;
+
+import std.bytes;
+import std.ed25519;
+import std.json;
+import gateway.auth;
+import gateway.json_claims;
+
+// JWT bearer tokens (task #8, slice 2; docs/jwt.md). Pure: no effect, no allocation beyond fixed regions (192, 1,024 and 64 bytes of decoded token, their tapes, 4 KiB of names).
+//
+// `verify` answers whether a compact JWS (RFC 7515) is a token this route accepts: signed with `EdDSA` by one of the route's compiled-in public keys, with `exp`, `nbf`, `iss` and
+// `aud` as the route says. The algorithm is never chosen from the token (the only code path is Ed25519). The order of the checks is the point of the module: everything that
+// does not need the key comes first, the signature (about 5 ms: `std.ed25519` is not fast) last, so that accidental load (an expired token retried in a loop) is cheap.
+
+// The refusals. `verify` answers `0 - rule`; `tag` is what the access log says, `kind` what the metrics call it. The client is told none of it (the same `auth.invalid`).
+pub fn rule_count() -> [] int {
+    return 11;
+}
+
+pub fn tag(rule: int) -> [] &static [byte] {
+    if rule == 1 {
+        return "jwt.malformed";
+    }
+    if rule == 2 {
+        return "jwt.alg";
+    }
+    if rule == 3 {
+        return "jwt.header";
+    }
+    if rule == 4 {
+        return "jwt.kid";
+    }
+    if rule == 5 {
+        return "jwt.claims";
+    }
+    if rule == 6 {
+        return "jwt.expired";
+    }
+    if rule == 7 {
+        return "jwt.nbf";
+    }
+    if rule == 8 {
+        return "jwt.aud";
+    }
+    if rule == 9 {
+        return "jwt.iss";
+    }
+    if rule == 10 {
+        return "jwt.clock";
+    }
+    if rule == 11 {
+        return "jwt.signature";
+    }
+    return "";
+}
+
+pub fn kind(rule: int) -> [] &static [byte] {
+    if rule == 1 {
+        return "malformed";
+    }
+    if rule == 2 {
+        return "alg";
+    }
+    if rule == 3 {
+        return "header";
+    }
+    if rule == 4 {
+        return "kid";
+    }
+    if rule == 5 {
+        return "claims";
+    }
+    if rule == 6 {
+        return "expired";
+    }
+    if rule == 7 {
+        return "not_yet_valid";
+    }
+    if rule == 8 {
+        return "audience";
+    }
+    if rule == 9 {
+        return "issuer";
+    }
+    if rule == 10 {
+        return "clock";
+    }
+    if rule == 11 {
+        return "signature";
+    }
+    return "";
+}
+
+// The bounds (docs/jwt.md section 4): the whole token, the header's and the payload's segments (192 and 1,024 bytes decoded), the signature's (64 bytes: 86 characters).
+pub fn max_token() -> [] int {
+    return 2048;
+}
+
+// The longest credential a route that accepts JWTs reads off the header at all (the size of a connection's buffer). A token between `max_token()` and this is `jwt.malformed`, the one
+// answer every token failure gets, and not `auth.malformed` (docs/jwt.md section 9).
+pub fn credential_cap() -> [] int {
+    return 16384;
+}
+
+pub fn max_header_segment() -> [] int {
+    return 256;
+}
+
+pub fn max_payload_segment() -> [] int {
+    return 1366;
+}
+
+pub fn signature_segment() -> [] int {
+    return 86;
+}
+
+// A deployment's clock is not believed before this (seconds since the epoch, 2026-09-01): a gateway started before time sync would otherwise accept every token that expired
+// since 1970 (docs/jwt.md section 7). A release raises it.
+pub fn clock_floor() -> [] int {
+    return 1788220800;
+}
+
+// The most leeway a route can have, in seconds.
+pub fn max_leeway() -> [] int {
+    return 60;
+}
+
+// ---- base64url (RFC 4648 section 5, no padding, one spelling per byte string) ----
+
+fn b64_value(c: int) -> [] int {
+    if c >= 'A' && c <= 'Z' {
+        return c - 'A';
+    }
+    if c >= 'a' && c <= 'z' {
+        return c - 'a' + 26;
+    }
+    if c >= '0' && c <= '9' {
+        return c - '0' + 52;
+    }
+    if c == '-' {
+        return 62;
+    }
+    if c == '_' {
+        return 63;
+    }
+    return 0 - 1;
+}
+
+// Is `s` a base64url text with no padding that decodes canonically: only `A-Z a-z 0-9 - _`, a length that is not 1 modulo 4, and zero bits in the unused tail of its last character?
+// The empty text is valid (it decodes to nothing).
+pub fn b64url_valid[&s](s: &s [byte]) -> [] bool {
+    let rem = len(s) % 4;
+    if rem == 1 {
+        return false;
+    }
+    var i = 0;
+    while i < len(s) {
+        if b64_value(int_of(s[i])) < 0 {
+            return false;
+        }
+        i = i + 1;
+    }
+    if rem == 2 && b64_value(int_of(s[len(s) - 1])) % 16 != 0 {
+        return false;
+    }
+    if rem == 3 && b64_value(int_of(s[len(s) - 1])) % 4 != 0 {
+        return false;
+    }
+    return true;
+}
+
+// The bytes `s` decodes to, into `out`; answers their number, or `0 - 1` if `s` is not `b64url_valid` or `out` is too short.
+pub fn b64url_decode[&s, &o](s: &s [byte], out: &!o [byte]) -> [] int {
+    if !b64url_valid(s) {
+        return 0 - 1;
+    }
+    let n = len(s) / 4 * 3 + len(s) % 4 * 3 / 4;
+    if len(out) < n {
+        return 0 - 1;
+    }
+    var i = 0;
+    var o = 0;
+    while i + 4 <= len(s) {
+        let v = b64_value(int_of(s[i])) * 262144 + b64_value(int_of(s[i + 1])) * 4096 + b64_value(int_of(s[i + 2])) * 64 + b64_value(int_of(s[i + 3]));
+        out[o] = byte_of(v / 65536);
+        out[o + 1] = byte_of(v / 256 % 256);
+        out[o + 2] = byte_of(v % 256);
+        o = o + 3;
+        i = i + 4;
+    }
+    if len(s) % 4 == 2 {
+        let v = b64_value(int_of(s[i])) * 64 + b64_value(int_of(s[i + 1]));
+        out[o] = byte_of(v / 16);
+    }
+    if len(s) % 4 == 3 {
+        let v = b64_value(int_of(s[i])) * 4096 + b64_value(int_of(s[i + 1])) * 64 + b64_value(int_of(s[i + 2]));
+        out[o] = byte_of(v / 1024);
+        out[o + 1] = byte_of(v / 4 % 256);
+    }
+    return n;
+}
+
+// The number of `.` in `s`: the shape that tells a JWT from an API key on a route that takes both (docs/jwt.md section 12.1).
+pub fn dots[&s](s: &s [byte]) -> [] int {
+    return bytes.count_byte(s, '.');
+}
+
+// ---- the header ----
+
+fn lower_equals[&a, &l](a: &a [byte], lower: &l [byte]) -> [] bool {
+    if len(a) != len(lower) {
+        return false;
+    }
+    var i = 0;
+    while i < len(a) {
+        if bytes.to_lower(int_of(a[i])) != int_of(lower[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// The key a header's `kid` (or the absence of one) names among the route's keys: its index plus 1, or 0 for none. With a `kid`: the key of that name that the route allows. Without
+// one: the only key the route allows, if it allows exactly one.
+fn pick_key[&s, &t, &k, &a](doc: &s [byte], tape: &t [int], keys: &k [byte], allowed: &a [byte]) -> [] int {
+    let kid = json.get(doc, tape, 0, "kid");
+    var found = 0;
+    var index = 0;
+    var open = 0;
+    var only = 0;
+    while index < auth.count_in(keys) {
+        if auth.allowed(allowed, index) {
+            open = open + 1;
+            only = index + 1;
+            if kid >= 0 && json.string_equals(doc, tape, kid, auth.name_in(keys, index)) && found == 0 {
+                found = index + 1;
+            }
+        }
+        index = index + 1;
+    }
+    if kid >= 0 {
+        // A `kid` must be a string of 1 to 32 bytes; a match above already means it is one (names are 1 to 32 bytes of a plain alphabet).
+        return found;
+    }
+    if open == 1 {
+        return only;
+    }
+    return 0;
+}
+
+// 0 - rule for a header that is refused, else the key's index plus 1. The header is already decoded.
+fn header_rule[&s, &t, &k, &a](doc: &s [byte], tape: &t [int], keys: &k [byte], allowed: &a [byte]) -> [] int {
+    let alg = json.get(doc, tape, 0, "alg");
+    if alg < 0 || !json.string_equals(doc, tape, alg, "EdDSA") {
+        return 0 - 2;
+    }
+    if json.get(doc, tape, 0, "crit") >= 0 {
+        return 0 - 3;
+    }
+    let typ = json.get(doc, tape, 0, "typ");
+    // `string_view` is the text between the quotes as written: a typ spelt with an escape never equals "jwt", and a typ that is no string has an empty view.
+    if typ >= 0 && !lower_equals(json.string_view(doc, tape, typ), "jwt") {
+        return 0 - 3;
+    }
+    let key = pick_key(doc, tape, keys, allowed);
+    if key == 0 {
+        return 0 - 4;
+    }
+    return key;
+}
+
+fn header_check[&h, &k, &a](seg: &h [byte], keys: &k [byte], allowed: &a [byte]) -> [] int {
+    var answer = 0 - 1;
+    region r {
+        let buf = alloc_slice[r](192, byte_of(0));
+        let n = b64url_decode(seg, buf);
+        if n > 0 {
+            let doc = buf[0..n];
+            let tape = alloc_slice[r](json.tape_len(doc), 0);
+            if json_claims.parse_object(doc, tape) > 0 {
+                answer = header_rule(doc, tape, keys, allowed);
+            }
+        }
+    }
+    return answer;
+}
+
+// ---- the claims ----
+
+fn claims_rule[&s, &t, &u, &i](doc: &s [byte], tape: &t [int], aud: &u [byte], iss: &i [byte], leeway: int, now: int) -> [] int {
+    let exp = json_claims.int_claim(doc, tape, "exp");
+    let nbf = json_claims.int_claim(doc, tape, "nbf");
+    let iat = json_claims.int_claim(doc, tape, "iat");
+    if exp < 0 || nbf == 0 - 2 || iat == 0 - 2 {
+        return 0 - 5;
+    }
+    var l = leeway;
+    if l < 0 {
+        l = 0;
+    }
+    if l > max_leeway() {
+        l = max_leeway();
+    }
+    // The clock as given. No cut is needed to keep the sums below from overflowing: `exp + l` is at most 253,402,300,859; a clock past it is expired and refused before `t + l` is
+    // computed, and a negative clock is below the floor and refused first (`tests/jwt_test.cho` calls this with the ends of `int`).
+    let t = now;
+    if t < clock_floor() {
+        return 0 - 10;
+    }
+    if t >= exp + l {
+        return 0 - 6;
+    }
+    // An absent `nbf` is `0 - 1`, which `t + l` (at least the floor) is never below.
+    if t + l < nbf {
+        return 0 - 7;
+    }
+    if len(iss) > 0 && !json_claims.string_claim_is(doc, tape, "iss", iss) {
+        return 0 - 9;
+    }
+    if len(aud) > 0 && !json_claims.audience_is(doc, tape, aud) {
+        return 0 - 8;
+    }
+    return 0;
+}
+
+fn claims_check[&p, &u, &i](seg: &p [byte], aud: &u [byte], iss: &i [byte], leeway: int, now: int) -> [] int {
+    var answer = 0 - 1;
+    region r {
+        let buf = alloc_slice[r](1024, byte_of(0));
+        let n = b64url_decode(seg, buf);
+        if n > 0 {
+            let doc = buf[0..n];
+            let tape = alloc_slice[r](json.tape_len(doc), 0);
+            if json_claims.parse_object(doc, tape) > 0 {
+                answer = claims_rule(doc, tape, aud, iss, leeway, now);
+            }
+        }
+    }
+    return answer;
+}
+
+// ---- the signature ----
+
+// Does the Ed25519 signature `sseg` (86 characters) verify over `msg` with the key `index` (0-based) of `keys`? A key that does not decode to 32 bytes verifies nothing.
+fn signature_ok[&m, &s, &k](msg: &m [byte], sseg: &s [byte], keys: &k [byte], index: int) -> [] bool {
+    var ok = false;
+    region r {
+        let pk = alloc_slice[r](32, byte_of(0));
+        let sig = alloc_slice[r](64, byte_of(0));
+        if b64url_decode(bytes.field(auth.line_in(keys, index), 9, 2), pk) == 32 && b64url_decode(sseg, sig) == 64 {
+            ok = ed25519.verify(pk, msg, sig) == 1;
+        }
+    }
+    return ok;
+}
+
+// The token `cred` against a route: `keys` is the deployment's table of public keys (`name<TAB>43 characters of base64url` per line), `allowed` the route's key list (`*` or
+// comma-separated indices, `gateway.auth.allowed`), `aud` and `iss` what it requires (empty: nothing), `leeway` its seconds (0 to 60) and `now` the wall clock in seconds.
+// Answers `0 - rule` if the token is refused, else the verifying key's index plus 1. Total: every input of every length ends in one of these.
+pub fn verify[&c, &k, &a, &u, &i](cred: &c [byte], keys: &k [byte], allowed: &a [byte], aud: &u [byte], iss: &i [byte], leeway: int, now: int) -> [] int {
+    if len(cred) > max_token() || dots(cred) != 2 {
+        return 0 - 1;
+    }
+    let d1 = bytes.find(cred, ".");
+    let rest = cred[d1 + 1..len(cred)];
+    let d2 = d1 + 1 + bytes.find(rest, ".");
+    let hseg = cred[0..d1];
+    let pseg = cred[d1 + 1..d2];
+    let sseg = cred[d2 + 1..len(cred)];
+    if len(hseg) < 1 || len(pseg) < 1 || len(hseg) > max_header_segment() || len(pseg) > max_payload_segment() {
+        return 0 - 1;
+    }
+    let key = header_check(hseg, keys, allowed);
+    if key < 0 {
+        return key;
+    }
+    // The signature's text is checked after the header (so that `alg: none`, whose signature is empty, and an HS256 token, whose signature is 43 characters, are `jwt.alg`, which
+    // is what the operator wants to read) and before the payload is parsed.
+    if len(sseg) != signature_segment() || !b64url_valid(sseg) {
+        return 0 - 1;
+    }
+    let claims = claims_check(pseg, aud, iss, leeway, now);
+    if claims < 0 {
+        return claims;
+    }
+    if !signature_ok(cred[0..d2], sseg, keys, key - 1) {
+        return 0 - 11;
+    }
+    return key;
+}

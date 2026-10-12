@@ -296,6 +296,18 @@ nav a[aria-current] { color: var(--fg); font-weight: 650; }
   </ul>
 </section>
 
+<section id="jwt">
+  <h2>JWT bearer tokens</h2>
+  <ul>
+    <li>A route can require a signed token (<code>docs/jwt.md</code>). <strong>The binary holds a public key, never a secret</strong>: an end-to-end test searches the built binary for the public keys it was given (there) and for the seeds that made them (not there). The only algorithm is <code>EdDSA</code> and <strong>the token never chooses it</strong>: <code>alg: none</code> in any case and an HS256 token whose HMAC key is the public key are both <code>jwt.alg</code>. HS256 is not built, on purpose: its verifier needs the secret itself.</li>
+    <li>The token is a compact JWS read by a bounded, strict parser: three segments, base64url without padding and in one spelling per byte string, at most 2,048 bytes, a header of at most 192 bytes and a payload of at most 1,024 (tested at the byte), no repeated name in any object (found by the differential), nesting of 4, 64 members, <code>exp</code> an integer in range and required, no float anywhere near a time, <code>crit</code> refused, <code>aud</code> and <code>iss</code> exact. The claim checks are pure functions of the clock, so every boundary is tested exactly, with the ends of <code>int</code> as the clock.</li>
+    <li><strong>One answer for every invalid token</strong>: thirty-four causes (expired, not yet valid, wrong audience or issuer, wrong or changed signature, <code>none</code>, the HS256 confusion, a tampered payload or header, repeated claims, oversize, bad base64url, wrong segment count, no <code>exp</code>, unknown <code>kid</code>, ...) get byte-identical <code>401</code> responses but for the request id; the cause is only in the access log&rsquo;s <code>rule</code> and the per-route <code>jwt_refused</code> counters, which agree with the log. Authentication is before the rate limiter (a flood of bad tokens spends no token), a refused upgrade takes no tunnel place, and the token is removed before the upstream sees the request over plain, TLS and an upgrade.</li>
+    <li><strong>The cost is real</strong>: the signature takes about 4.8 ms (<code>std.ed25519</code> is correct and not fast) and the loop is one thread, so one client sending wrong signatures made the gateway answer 194 a second. Everything that does not need the key is checked first: an expired token is 17 times cheaper (277 &micro;s against 4,774 &micro;s, <code>tests/jwt_timing.py</code>, not a gate). A deliberate flood of well-formed tokens is not stopped by this and needs a limit in front.</li>
+    <li>A verifier written again in Python (<code>json</code> for the syntax, OpenSSL for the signature) agrees with the gateway on <strong>1,498 tokens and then 3,000 more with two seeds, 0 disagreements</strong>, signed by <code>cryptography</code>; the RFC 8037 signature is verified through the gateway&rsquo;s own decoder. <code>std.ed25519.verify</code> was found to accept a forged signature by a key of small order, so the generator refuses all eight such points.</li>
+    <li>40 unit tests, 16 end-to-end tests (run twice), 117 new generator refusal cases, and 148 mutants of the new code: 138 killed, 10 argued (second lines behind a buffer or a decoder). <strong>Not built, and said so:</strong> HS256, JWKS, revocation, the subject in the log or as a rate key, a key change without a restart. A clock step after start is not followed, and every token is refused while the clock reads before a date compiled into the release.</li>
+  </ul>
+</section>
+
 <section id="bench">
   <h2>The benchmark</h2>
   <p class="sub">Protocol fixed before any number (<a href="https://github.com/alpibrusl/cancho-gateway/blob/main/docs/bench.md">docs/bench.md</a>), run by <code>bench/run.py</code>, raw results in <code>bench/results/</code>.</p>
@@ -420,7 +432,7 @@ nav a[aria-current] { color: var(--fg); font-weight: 650; }
   <ul>
     <li>No soak: a long run with faults has not been done. Short-lived tests are all there is.</li>
     <li>No independent review of the parsing; the corpus is the authors&rsquo;.</li>
-    <li>Not built: JWT or any signed token, a key change without a restart, client certificates. API-key authentication is built per route (<code>docs/auth.md</code>). Rate limiting is built per route, keyed by the route, a header, an <code>X-Forwarded-For</code> element or the authenticated key, and never by client address (<code>docs/ratelimit.md</code>). TLS 1.3 is built, with certificate reload on <code>SIGHUP</code> (<code>docs/tls.md</code>); WebSocket is built as a byte tunnel, and the gateway reads no frame (<code>docs/websocket.md</code>).</li>
+    <li>Not built: HS256 and JWKS, revocation of a token, a key change without a restart, client certificates. API-key authentication (<code>docs/auth.md</code>) and EdDSA JWT verification (<code>docs/jwt.md</code>) are built per route. Rate limiting is built per route, keyed by the route, a header, an <code>X-Forwarded-For</code> element or the authenticated key, and never by client address (<code>docs/ratelimit.md</code>). TLS 1.3 is built, with certificate reload on <code>SIGHUP</code> (<code>docs/tls.md</code>); WebSocket is built as a byte tunnel, and the gateway reads no frame (<code>docs/websocket.md</code>).</li>
     <li>One core, about 127 concurrent sessions, no client keep-alive.</li>
   </ul>
   <p class="note"><a href="index.html">Back to the overview</a> · <a href="https://github.com/alpibrusl/cancho-gateway/tree/main/docs">All design documents</a></p>

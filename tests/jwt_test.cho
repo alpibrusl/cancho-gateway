@@ -1,0 +1,661 @@
+edition 5;
+
+import std.bytes;
+import std.ed25519;
+import std.json;
+import std.test;
+import gateway.auth;
+import gateway.json_claims;
+import gateway.jwt;
+import gateway.jwt_vectors;
+
+// JWT verification without a gateway (docs/jwt.md section 11, gate 1): base64url, the bounded JSON reader, every claim check at its boundary, the order of the checks and what
+// each refusal is, the RFC 8037 vector, and hostile input of every size and byte value. The tokens are tests/jwt_vectors.cho's (test keys; tests/jwt_vectors.py makes them).
+
+// The route of most tests: both keys allowed, `aud` "api", `iss` "https://iss.example", no leeway, the clock at `jwt_vectors.now()`.
+fn check(token: &static [byte]) -> [] int {
+    return jwt.verify(token, jwt_vectors.keys(), "*", "api", "https://iss.example", 0, jwt_vectors.now());
+}
+
+fn rule(token: &static [byte]) -> [] int {
+    return 0 - check(token);
+}
+
+// ---- base64url ----
+
+fn hex_matches[&b](data: &b [byte], hex: &static [byte]) -> [] bool {
+    if len(hex) != 2 * len(data) {
+        return false;
+    }
+    var i = 0;
+    while i < len(data) {
+        let v = int_of(data[i]);
+        var hi = '0' + v / 16;
+        if v / 16 >= 10 {
+            hi = 'a' + v / 16 - 10;
+        }
+        var lo = '0' + v % 16;
+        if v % 16 >= 10 {
+            lo = 'a' + v % 16 - 10;
+        }
+        if int_of(hex[2 * i]) != hi || int_of(hex[2 * i + 1]) != lo {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_base64url_decodes_every_length_and_refuses_every_other_spelling() -> [] int {
+    var i = 0;
+    while i < jwt_vectors.b64_count() {
+        let text = jwt_vectors.b64_text(i);
+        let want = jwt_vectors.b64_want(i);
+        region a {
+            let out = alloc_slice[a](300, byte_of(0));
+            let n = jwt.b64url_decode(text, out);
+            if bytes.equal(want, "no") {
+                test.assert(n < 0);
+                test.assert(!jwt.b64url_valid(text));
+            } else {
+                test.assert(n >= 0);
+                test.assert(jwt.b64url_valid(text));
+                test.assert(hex_matches(out[0..n], want[3..len(want)]));
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_base64url_does_not_write_past_a_short_buffer_and_the_empty_text_is_nothing() -> [] int {
+    region a {
+        let two = alloc_slice[a](2, byte_of(7));
+        test.assert(jwt.b64url_decode("AAAA", two) < 0);
+        test.assert(jwt.b64url_decode("", two) == 0);
+        test.assert(jwt.b64url_decode("AAA", two) == 2);
+        let none = alloc_slice[a](0, byte_of(0));
+        test.assert(jwt.b64url_decode("", none) == 0);
+        test.assert(jwt.b64url_decode("AA", none) < 0);
+    }
+    return 0;
+}
+
+// ---- the RFC 8037 vector ----
+
+// RFC 8037 appendix A.4 and A.5: the key `11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo` and the JWS of "Example of Ed25519 signing" under it. The payload is not JSON (so it is no JWT:
+// `verify` refuses it as malformed, never reaching the signature), which is why the signature is checked here through the same decoder and `std.ed25519`.
+fn test_the_rfc_8037_signature_verifies_and_one_changed_bit_does_not() -> [] int {
+    region a {
+        let pk = alloc_slice[a](32, byte_of(0));
+        let sig = alloc_slice[a](64, byte_of(0));
+        test.assert(jwt.b64url_decode("11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo", pk) == 32);
+        test.assert(hex_matches(pk, "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"));
+        test.assert(jwt.b64url_decode("hgyY0il_MGCjP0JzlnLWG1PPOt7-09PGcvMg3AIbQR6dWbhijcNR4ki4iylGjg5BhVsPt9g7sVvpAr_MuM0KAg", sig) == 64);
+        test.assert(ed25519.verify(pk, "eyJhbGciOiJFZERTQSJ9.RXhhbXBsZSBvZiBFZDI1NTE5IHNpZ25pbmc", sig) == 1);
+        test.assert(ed25519.verify(pk, "eyJhbGciOiJFZERTQSJ9.RXhhbXBsZSBvZiBFZDI1NTE5IHNpZ25pbmd", sig) == 0);
+        sig[10] = byte_of(int_of(sig[10]) ^ 1);
+        test.assert(ed25519.verify(pk, "eyJhbGciOiJFZERTQSJ9.RXhhbXBsZSBvZiBFZDI1NTE5IHNpZ25pbmc", sig) == 0);
+    }
+    let keys = "rfc\t11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\n";
+    test.assert(jwt.verify("eyJhbGciOiJFZERTQSJ9.RXhhbXBsZSBvZiBFZDI1NTE5IHNpZ25pbmc.hgyY0il_MGCjP0JzlnLWG1PPOt7-09PGcvMg3AIbQR6dWbhijcNR4ki4iylGjg5BhVsPt9g7sVvpAr_MuM0KAg", keys, "*", "", "", 0, jwt_vectors.now()) == 0 - 1);
+    return 0;
+}
+
+// ---- accepted ----
+
+fn test_a_valid_token_is_accepted_and_names_its_key() -> [] int {
+    test.assert(check(jwt_vectors.v_ok()) == 1);
+    test.assert(check(jwt_vectors.v_ok_k2()) == 2);
+    return 0;
+}
+
+fn test_the_variants_that_are_valid_are_accepted() -> [] int {
+    test.assert(check(jwt_vectors.v_ok_notyp()) == 1);
+    test.assert(check(jwt_vectors.v_ok_typ_lower()) == 1);
+    test.assert(check(jwt_vectors.v_ok_kid_escaped()) == 1);
+    test.assert(check(jwt_vectors.v_ok_ignored_members()) == 1);
+    test.assert(check(jwt_vectors.v_ok_aud_array()) == 1);
+    test.assert(check(jwt_vectors.v_ok_aud_array16()) == 1);
+    test.assert(check(jwt_vectors.v_ok_depth4()) == 1);
+    test.assert(check(jwt_vectors.v_ok_members64()) == 1);
+    test.assert(check(jwt_vectors.v_ok_name64()) == 1);
+    test.assert(check(jwt_vectors.v_ok_nbf()) == 0 - 7);
+    test.assert(check(jwt_vectors.v_ok_whitespace()) == 1);
+    test.assert(check(jwt_vectors.v_ok_unicode()) == 1);
+    return 0;
+}
+
+fn test_a_token_without_a_kid_is_accepted_only_when_the_route_has_exactly_one_key() -> [] int {
+    let t = jwt_vectors.v_ok_nokid();
+    test.assert(jwt.verify(t, jwt_vectors.keys(), "0", "api", "https://iss.example", 0, jwt_vectors.now()) == 1);
+    test.assert(jwt.verify(t, jwt_vectors.keys(), "1", "api", "https://iss.example", 0, jwt_vectors.now()) == 0 - 11);
+    test.assert(rule(t) == 4);
+    test.assert(jwt.verify(t, jwt_vectors.keys(), "0,1", "api", "https://iss.example", 0, jwt_vectors.now()) == 0 - 4);
+    test.assert(jwt.verify(t, jwt_vectors.keys(), "", "api", "https://iss.example", 0, jwt_vectors.now()) == 0 - 4);
+    return 0;
+}
+
+fn test_a_route_only_accepts_the_keys_it_allows() -> [] int {
+    test.assert(jwt.verify(jwt_vectors.v_ok(), jwt_vectors.keys(), "1", "api", "https://iss.example", 0, jwt_vectors.now()) == 0 - 4);
+    test.assert(jwt.verify(jwt_vectors.v_ok_k2(), jwt_vectors.keys(), "0", "api", "https://iss.example", 0, jwt_vectors.now()) == 0 - 4);
+    test.assert(jwt.verify(jwt_vectors.v_ok_k2(), jwt_vectors.keys(), "0,1", "api", "https://iss.example", 0, jwt_vectors.now()) == 2);
+    test.assert(jwt.verify(jwt_vectors.v_ok(), "", "*", "api", "https://iss.example", 0, jwt_vectors.now()) == 0 - 4);
+    return 0;
+}
+
+fn test_no_configured_audience_or_issuer_checks_neither() -> [] int {
+    let now = jwt_vectors.now();
+    test.assert(jwt.verify(jwt_vectors.v_ok_exp_noaud(), jwt_vectors.keys(), "*", "", "", 0, now) == 1);
+    test.assert(jwt.verify(jwt_vectors.v_bad_aud_other(), jwt_vectors.keys(), "*", "", "", 0, now) == 1);
+    test.assert(jwt.verify(jwt_vectors.v_bad_iss_other(), jwt_vectors.keys(), "*", "", "", 0, now) == 1);
+    test.assert(jwt.verify(jwt_vectors.v_ok_exp_noaud(), jwt_vectors.keys(), "*", "api", "", 0, now) == 0 - 8);
+    test.assert(jwt.verify(jwt_vectors.v_ok_exp_noaud(), jwt_vectors.keys(), "*", "", "https://iss.example", 0, now) == 0 - 9);
+    return 0;
+}
+
+// ---- refused, by rule ----
+
+fn test_the_shape_of_a_token_is_one_of_three_segments_or_it_is_malformed() -> [] int {
+    test.assert(rule(jwt_vectors.v_bad_dots0()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_dots1()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_dots3()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_dots4_jwe()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_empty_header()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_empty_payload()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_leading_dot()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_trailing_dot()) == 1);
+    test.assert(rule("") == 1);
+    test.assert(rule(".") == 1);
+    test.assert(rule("..") == 1);
+    test.assert(rule("...") == 1);
+    test.assert(rule("a.b.c") == 1);
+    return 0;
+}
+
+fn test_base64url_that_is_not_canonical_or_not_url_safe_is_malformed() -> [] int {
+    test.assert(rule(jwt_vectors.v_bad_padding()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_plus()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_slash()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_space()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_len1mod4()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_high_byte()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_nul()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_sig_noncanonical()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_sig_short()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_sig_long()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_sig_empty()) == 1);
+    return 0;
+}
+
+fn test_the_largest_header_and_payload_are_accepted_and_one_byte_more_is_not() -> [] int {
+    test.assert(check(jwt_vectors.v_ok_header_max()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_header_over()) == 1);
+    test.assert(check(jwt_vectors.v_ok_payload_max()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_payload_over()) == 1);
+    return 0;
+}
+
+// A public key of small order (the point of order 4: all zero bytes) verifies a forged signature (R the identity, S zero) for one message in four. `jwt.verify` does not defend against
+// a key like that, and `std.ed25519.verify` accepts it: what keeps one out of the table is the generator (rule 19, `tests/generate_test.py`), and this test says so.
+fn test_a_small_order_key_would_verify_a_forgery_so_the_generator_refuses_one_and_a_damaged_key_verifies_nothing() -> [] int {
+    let now = jwt_vectors.now();
+    test.assert(jwt.verify(jwt_vectors.v_forged_small_order(), jwt_vectors.keys_small(), "*", "api", "https://iss.example", 0, now) == 1);
+    test.assert(jwt.verify(jwt_vectors.v_forged_small_order(), jwt_vectors.keys(), "*", "api", "https://iss.example", 0, now) == 0 - 11);
+    // The same table with the key damaged so that it decodes to 3 bytes: refused, not read as a zero key.
+    test.assert(jwt.verify(jwt_vectors.v_forged_small_order(), jwt_vectors.keys_damaged(), "*", "api", "https://iss.example", 0, now) == 0 - 11);
+    return 0;
+}
+
+fn test_the_size_caps_are_exact() -> [] int {
+    test.assert(rule(jwt_vectors.v_bad_header_big()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_payload_big()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_token_big()) == 1);
+    test.assert(jwt.max_token() == 2048);
+    test.assert(jwt.max_header_segment() == 256 && jwt.max_payload_segment() == 1366 && jwt.signature_segment() == 86);
+    return 0;
+}
+
+fn test_the_algorithm_is_never_chosen_from_the_token() -> [] int {
+    test.assert(rule(jwt_vectors.v_bad_alg_none()) == 2);
+    test.assert(rule(jwt_vectors.v_bad_alg_none_upper()) == 2);
+    test.assert(rule(jwt_vectors.v_bad_alg_hs256()) == 2);
+    test.assert(rule(jwt_vectors.v_bad_alg_rs256()) == 2);
+    test.assert(rule(jwt_vectors.v_bad_alg_es256()) == 2);
+    test.assert(rule(jwt_vectors.v_bad_alg_eddsa_lower()) == 2);
+    test.assert(rule(jwt_vectors.v_bad_alg_eddsa_space()) == 2);
+    test.assert(rule(jwt_vectors.v_bad_alg_ed25519()) == 2);
+    test.assert(rule(jwt_vectors.v_bad_alg_empty()) == 2);
+    test.assert(rule(jwt_vectors.v_bad_alg_missing()) == 2);
+    test.assert(rule(jwt_vectors.v_bad_alg_number()) == 2);
+    test.assert(rule(jwt_vectors.v_bad_alg_array()) == 2);
+    test.assert(rule(jwt_vectors.v_bad_alg_null()) == 2);
+    test.assert(rule(jwt_vectors.v_bad_header_empty_object_noalg()) == 2);
+    return 0;
+}
+
+fn test_an_hs256_token_signed_with_the_public_key_as_the_secret_is_an_alg_refusal() -> [] int {
+    test.assert(rule(jwt_vectors.v_bad_confusion_raw()) == 2);
+    test.assert(rule(jwt_vectors.v_bad_confusion_text()) == 2);
+    test.assert(rule(jwt_vectors.v_bad_alg_none_unsigned()) == 2);
+    return 0;
+}
+
+fn test_crit_and_a_wrong_typ_are_header_refusals() -> [] int {
+    test.assert(rule(jwt_vectors.v_bad_crit()) == 3);
+    test.assert(rule(jwt_vectors.v_bad_crit_empty()) == 3);
+    test.assert(rule(jwt_vectors.v_bad_crit_null()) == 3);
+    test.assert(rule(jwt_vectors.v_bad_typ_atjwt()) == 3);
+    test.assert(rule(jwt_vectors.v_bad_typ_number()) == 3);
+    test.assert(rule(jwt_vectors.v_bad_typ_escaped()) == 3);
+    return 0;
+}
+
+fn test_a_kid_names_one_of_the_routes_keys_exactly_or_it_is_refused() -> [] int {
+    test.assert(rule(jwt_vectors.v_bad_kid_unknown()) == 4);
+    test.assert(rule(jwt_vectors.v_bad_kid_number()) == 4);
+    test.assert(rule(jwt_vectors.v_bad_kid_empty()) == 4);
+    test.assert(rule(jwt_vectors.v_bad_kid_case()) == 4);
+    test.assert(rule(jwt_vectors.v_bad_kid_long()) == 4);
+    return 0;
+}
+
+fn test_a_header_that_is_not_one_bounded_json_object_is_malformed() -> [] int {
+    test.assert(rule(jwt_vectors.v_bad_header_array()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_header_string()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_header_dup_alg()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_header_dup_alg2()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_header_dup_kid()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_header_syntax()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_header_trailing()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_header_utf8()) == 1);
+    return 0;
+}
+
+fn test_a_payload_that_is_not_one_bounded_json_object_is_malformed() -> [] int {
+    test.assert(rule(jwt_vectors.v_bad_payload_array()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_payload_string()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_payload_number()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_payload_empty_object()) == 5);
+    test.assert(rule(jwt_vectors.v_bad_payload_syntax()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_payload_nonjson()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_payload_trailing()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_payload_comment()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_payload_nan()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_payload_single_quotes()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_payload_leading_zero()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_payload_utf8()) == 1);
+    return 0;
+}
+
+fn test_a_repeated_claim_name_is_refused_whichever_copy_is_good_and_however_it_is_spelled() -> [] int {
+    test.assert(rule(jwt_vectors.v_bad_dup_exp()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_dup_exp_first_bad()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_dup_exp_escaped()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_dup_aud()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_dup_other()) == 1);
+    // In a nested object too (found by the differential of tests/jwt_differential.py: the first version looked at the root only), while the same name in two objects is fine.
+    test.assert(rule(jwt_vectors.v_bad_dup_nested()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_dup_nested_escaped()) == 1);
+    test.assert(check(jwt_vectors.v_ok_same_name_in_two_objects()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_nested_members65()) == 1);
+    test.assert(check(jwt_vectors.v_ok_nested_members64()) == 1);
+    return 0;
+}
+
+fn test_nesting_members_and_names_are_bounded() -> [] int {
+    test.assert(rule(jwt_vectors.v_bad_depth5()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_depth_deep()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_members65()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_name65()) == 1);
+    return 0;
+}
+
+fn test_exp_is_required_and_every_time_claim_is_a_bounded_integer() -> [] int {
+    test.assert(rule(jwt_vectors.v_bad_exp_missing()) == 5);
+    test.assert(rule(jwt_vectors.v_bad_exp_float()) == 5);
+    test.assert(rule(jwt_vectors.v_bad_exp_exponent()) == 5);
+    test.assert(rule(jwt_vectors.v_bad_exp_string()) == 5);
+    test.assert(rule(jwt_vectors.v_bad_exp_negative()) == 5);
+    test.assert(rule(jwt_vectors.v_bad_exp_negzero_float()) == 5);
+    test.assert(rule(jwt_vectors.v_bad_exp_huge()) == 5);
+    test.assert(rule(jwt_vectors.v_bad_exp_over()) == 5);
+    test.assert(rule(jwt_vectors.v_bad_exp_null()) == 5);
+    test.assert(rule(jwt_vectors.v_bad_exp_bool()) == 5);
+    test.assert(rule(jwt_vectors.v_bad_exp_array()) == 5);
+    test.assert(rule(jwt_vectors.v_bad_nbf_float()) == 5);
+    test.assert(rule(jwt_vectors.v_bad_nbf_negative()) == 5);
+    test.assert(rule(jwt_vectors.v_bad_nbf_string()) == 5);
+    test.assert(rule(jwt_vectors.v_bad_iat_string()) == 5);
+    test.assert(rule(jwt_vectors.v_bad_iat_float()) == 5);
+    return 0;
+}
+
+fn test_audience_and_issuer_are_exact() -> [] int {
+    test.assert(rule(jwt_vectors.v_bad_aud_other()) == 8);
+    test.assert(rule(jwt_vectors.v_bad_aud_prefix()) == 8);
+    test.assert(rule(jwt_vectors.v_bad_aud_case()) == 8);
+    test.assert(rule(jwt_vectors.v_bad_aud_missing()) == 8);
+    test.assert(rule(jwt_vectors.v_bad_aud_number()) == 8);
+    test.assert(rule(jwt_vectors.v_bad_aud_array_number()) == 8);
+    test.assert(rule(jwt_vectors.v_bad_aud_array17()) == 8);
+    test.assert(rule(jwt_vectors.v_bad_iss_other()) == 9);
+    test.assert(rule(jwt_vectors.v_bad_iss_missing()) == 9);
+    test.assert(rule(jwt_vectors.v_bad_iss_array()) == 9);
+    return 0;
+}
+
+fn test_a_signature_that_does_not_verify_is_the_last_refusal() -> [] int {
+    test.assert(rule(jwt_vectors.v_bad_sig_flip()) == 11);
+    test.assert(rule(jwt_vectors.v_bad_sig_other_key()) == 11);
+    test.assert(rule(jwt_vectors.v_bad_sig_tampered_payload()) == 11);
+    test.assert(rule(jwt_vectors.v_bad_sig_tampered_header()) == 11);
+    test.assert(rule(jwt_vectors.v_bad_sig_zero()) == 11);
+    test.assert(rule(jwt_vectors.v_bad_sig_s_ge_l()) == 11);
+    test.assert(rule(jwt_vectors.v_bad_sig_identity()) == 11);
+    return 0;
+}
+
+fn test_a_damaged_key_table_verifies_nothing() -> [] int {
+    let now = jwt_vectors.now();
+    let t = jwt_vectors.v_ok();
+    test.assert(jwt.verify(t, "k1\tAAAA\n", "*", "api", "https://iss.example", 0, now) == 0 - 11);
+    test.assert(jwt.verify(t, "k1\t\n", "*", "api", "https://iss.example", 0, now) == 0 - 11);
+    test.assert(jwt.verify(t, "k1\n", "*", "api", "https://iss.example", 0, now) == 0 - 11);
+    test.assert(jwt.verify(t, "k1", "*", "api", "https://iss.example", 0, now) == 0 - 11);
+    test.assert(jwt.verify(t, "\n\n\n", "*", "api", "https://iss.example", 0, now) == 0 - 4);
+    return 0;
+}
+
+// ---- the claims, at their boundaries (docs/jwt.md section 7) ----
+
+fn at(now: int, leeway: int) -> [] int {
+    return jwt.verify(jwt_vectors.v_ok_nbf(), jwt_vectors.keys(), "*", "api", "https://iss.example", leeway, now);
+}
+
+// `v_ok_nbf` has `exp` = now() + 100 and `nbf` = now() + 50.
+fn test_exp_is_valid_up_to_the_second_before_it_and_leeway_only_extends_it() -> [] int {
+    let exp = jwt_vectors.exp();
+    test.assert(at(exp - 1, 0) == 1);
+    test.assert(at(exp, 0) == 0 - 6);
+    test.assert(at(exp + 1, 0) == 0 - 6);
+    test.assert(at(exp + 4, 5) == 1);
+    test.assert(at(exp + 5, 5) == 0 - 6);
+    test.assert(at(exp + 59, 60) == 1);
+    test.assert(at(exp + 60, 60) == 0 - 6);
+    return 0;
+}
+
+fn test_nbf_is_valid_from_that_second_and_leeway_brings_it_forward() -> [] int {
+    let nbf = jwt_vectors.now() + 50;
+    test.assert(at(nbf - 1, 0) == 0 - 7);
+    test.assert(at(nbf, 0) == 1);
+    test.assert(at(nbf - 5, 5) == 1);
+    test.assert(at(nbf - 6, 5) == 0 - 7);
+    test.assert(at(nbf - 60, 60) == 1);
+    test.assert(at(nbf - 61, 60) == 0 - 7);
+    return 0;
+}
+
+fn test_leeway_is_bounded_whatever_it_is_called_with() -> [] int {
+    let exp = jwt_vectors.exp();
+    test.assert(at(exp + 60, 61) == 0 - 6);
+    test.assert(at(exp + 60, 1000000) == 0 - 6);
+    test.assert(at(exp + 59, 1000000) == 1);
+    test.assert(at(exp, 0 - 5) == 0 - 6);
+    test.assert(at(exp - 1, 0 - 5) == 1);
+    return 0;
+}
+
+fn test_the_clock_before_its_floor_refuses_every_token_and_a_wild_clock_overflows_nothing() -> [] int {
+    let floor = jwt.clock_floor();
+    test.assert(at(floor - 1, 0) == 0 - 10);
+    test.assert(at(0, 0) == 0 - 10);
+    test.assert(at(0 - 1, 0) == 0 - 10);
+    test.assert(at(0 - 9223372036854775807, 0) == 0 - 10);
+    test.assert(at(9223372036854775807, 60) == 0 - 6);
+    test.assert(at(9223372036854775807, 0) == 0 - 6);
+    test.assert(jwt.verify(jwt_vectors.v_ok_exp_max(), jwt_vectors.keys(), "*", "", "", 60, 9223372036854775807) == 0 - 6);
+    test.assert(jwt.verify(jwt_vectors.v_ok_exp_max(), jwt_vectors.keys(), "*", "", "", 60, 253402300799) == 1);
+    test.assert(jwt.verify(jwt_vectors.v_ok_exp_max(), jwt_vectors.keys(), "*", "", "", 0, floor) == 1);
+    return 0;
+}
+
+fn test_the_clock_floor_is_after_the_date_it_was_written() -> [] int {
+    // 2026-09-01 is 1,788,220,800; the floor must not be earlier.
+    test.assert(jwt.clock_floor() >= 1788220800);
+    test.assert(jwt.clock_floor() < jwt_vectors.now());
+    return 0;
+}
+
+// ---- cheap checks come before the signature ----
+
+fn test_every_check_but_the_signature_is_made_before_the_signature() -> [] int {
+    // An expired token with a wrong signature is expired, not a signature failure: the claims are read first, the signature is the last refusal.
+    let now = jwt_vectors.now();
+    test.assert(jwt.verify(jwt_vectors.v_bad_sig_flip(), jwt_vectors.keys(), "*", "api", "https://iss.example", 0, jwt_vectors.exp()) == 0 - 6);
+    test.assert(jwt.verify(jwt_vectors.v_bad_sig_flip(), jwt_vectors.keys(), "*", "other", "https://iss.example", 0, now) == 0 - 8);
+    test.assert(jwt.verify(jwt_vectors.v_bad_sig_flip(), jwt_vectors.keys(), "*", "api", "other", 0, now) == 0 - 9);
+    test.assert(jwt.verify(jwt_vectors.v_bad_sig_flip(), jwt_vectors.keys(), "*", "api", "https://iss.example", 0, now) == 0 - 11);
+    return 0;
+}
+
+// ---- tags and kinds ----
+
+fn test_every_rule_has_a_tag_and_a_kind() -> [] int {
+    var r = 1;
+    while r <= jwt.rule_count() {
+        test.assert(len(jwt.tag(r)) > 4 && bytes.starts_with(jwt.tag(r), "jwt."));
+        test.assert(len(jwt.kind(r)) > 0);
+        r = r + 1;
+    }
+    test.assert(bytes.equal(jwt.tag(1), "jwt.malformed") && bytes.equal(jwt.tag(2), "jwt.alg") && bytes.equal(jwt.tag(3), "jwt.header") && bytes.equal(jwt.tag(4), "jwt.kid"));
+    test.assert(bytes.equal(jwt.tag(5), "jwt.claims") && bytes.equal(jwt.tag(6), "jwt.expired") && bytes.equal(jwt.tag(7), "jwt.nbf") && bytes.equal(jwt.tag(8), "jwt.aud"));
+    test.assert(bytes.equal(jwt.tag(9), "jwt.iss") && bytes.equal(jwt.tag(10), "jwt.clock") && bytes.equal(jwt.tag(11), "jwt.signature"));
+    test.assert(bytes.equal(jwt.kind(7), "not_yet_valid") && bytes.equal(jwt.kind(8), "audience") && bytes.equal(jwt.kind(9), "issuer"));
+    test.assert(len(jwt.tag(0)) == 0 && len(jwt.tag(12)) == 0 && len(jwt.kind(0)) == 0 && len(jwt.kind(12)) == 0);
+    return 0;
+}
+
+// ---- the JSON reader on its own ----
+
+fn parsed(doc: &static [byte]) -> [] int {
+    var n = 0;
+    region a {
+        let tape = alloc_slice[a](json.tape_len(doc), 0);
+        n = json_claims.parse_object(doc, tape);
+    }
+    return n;
+}
+
+fn test_the_json_reader_accepts_objects_and_refuses_everything_else() -> [] int {
+    test.assert(parsed("{}") == 1);
+    test.assert(parsed(" {\"a\":1} ") > 0);
+    test.assert(parsed("[]") == 0);
+    test.assert(parsed("1") == 0);
+    test.assert(parsed("\"a\"") == 0);
+    test.assert(parsed("null") == 0);
+    test.assert(parsed("") == 0);
+    test.assert(parsed("{") == 0);
+    test.assert(parsed("{}}") == 0);
+    test.assert(parsed("{}{}") == 0);
+    test.assert(parsed("{\"a\":}") == 0);
+    test.assert(parsed("{\"a\"}") == 0);
+    test.assert(parsed("{'a':1}") == 0);
+    return 0;
+}
+
+fn test_nesting_counts_brackets_outside_strings_only() -> [] int {
+    test.assert(json_claims.depth_of("{}") == 1);
+    test.assert(json_claims.depth_of("{\"a\":[1]}") == 2);
+    test.assert(json_claims.depth_of("{\"a\":\"[[[[[[\"}") == 1);
+    test.assert(json_claims.depth_of("{\"a\":\"\\\"[[[[\"}") == 1);
+    test.assert(json_claims.depth_of("{\"a\":\"\\\\\",\"b\":[[[1]]]}") == 4);
+    test.assert(parsed("{\"a\":{\"b\":[[1]]}}") > 0);
+    test.assert(parsed("{\"a\":{\"b\":[[[1]]]}}") == 0);
+    test.assert(parsed("{\"a\":\"[[[[[[[[[[\"}") > 0);
+    return 0;
+}
+
+fn repeated(n: int, ch: int) -> [] int {
+    var depth = 0;
+    region a {
+        let doc = alloc_slice[a](n, byte_of(ch));
+        let tape = alloc_slice[a](json.tape_len(doc), 0);
+        depth = json_claims.parse_object(doc, tape) + 1000 * json_claims.depth_of(doc);
+    }
+    return depth;
+}
+
+fn depth_only(n: int, ch: int) -> [] int {
+    var depth = 0;
+    region a {
+        let doc = alloc_slice[a](n, byte_of(ch));
+        depth = json_claims.depth_of(doc);
+    }
+    return depth;
+}
+
+fn too_small_tape() -> [] int {
+    var n = 1;
+    region a {
+        let tape = alloc_slice[a](10, 0);
+        n = json_claims.parse_object("{\"exp\":1,\"a\":2,\"b\":3,\"c\":4}", tape);
+    }
+    return n;
+}
+
+fn test_a_document_of_open_brackets_is_a_bounded_loop_and_a_refusal() -> [] int {
+    test.assert(repeated(1000, '[') == 1000 * 1000);
+    test.assert(repeated(1000, '{') == 1000 * 1000);
+    test.assert(repeated(1000, 'x') == 0);
+    test.assert(depth_only(60000, '[') == 60000);
+    test.assert(depth_only(60000, '{') == 60000);
+    test.assert(depth_only(60000, ']') == 0);
+    test.assert(too_small_tape() == 0);
+    return 0;
+}
+
+fn test_names_are_compared_decoded() -> [] int {
+    test.assert(parsed("{\"a\":1,\"b\":2}") > 0);
+    test.assert(parsed("{\"a\":1,\"a\":2}") == 0);
+    test.assert(parsed("{\"a\":1,\"\\u0061\":2}") == 0);
+    test.assert(parsed("{\"\\u00e9\":1,\"\\u00c9\":2}") > 0);
+    test.assert(parsed("{\"\\u00e9\":1,\"\\u00e9\":2}") == 0);
+    test.assert(parsed("{\"a\":{\"x\":1,\"x\":2}}") == 0);
+    test.assert(parsed("{\"a\":[{\"x\":1},{\"x\":2},{\"y\":{\"x\":3,\"\\u0078\":4}}]}") == 0);
+    test.assert(parsed("{\"a\":[{\"x\":1},{\"x\":2},{\"y\":{\"x\":3}}]}") > 0);
+    test.assert(parsed("{\"\":1,\"\":2}") == 0);
+    return 0;
+}
+
+fn test_integer_claims_are_integers_in_range_and_nothing_else() -> [] int {
+    region a {
+        let doc = "{\"a\":5,\"b\":5.0,\"c\":1e2,\"d\":\"5\",\"e\":-1,\"f\":253402300799,\"g\":253402300800,\"h\":92233720368547758070,\"i\":0,\"j\":null,\"k\":-0}";
+        let tape = alloc_slice[a](json.tape_len(doc), 0);
+        test.assert(json_claims.parse_object(doc, tape) > 0);
+        test.assert(json_claims.int_claim(doc, tape, "a") == 5);
+        test.assert(json_claims.int_claim(doc, tape, "b") == 0 - 2);
+        test.assert(json_claims.int_claim(doc, tape, "c") == 0 - 2);
+        test.assert(json_claims.int_claim(doc, tape, "d") == 0 - 2);
+        test.assert(json_claims.int_claim(doc, tape, "e") == 0 - 2);
+        test.assert(json_claims.int_claim(doc, tape, "f") == 253402300799);
+        test.assert(json_claims.int_claim(doc, tape, "g") == 0 - 2);
+        test.assert(json_claims.int_claim(doc, tape, "h") == 0 - 2);
+        test.assert(json_claims.int_claim(doc, tape, "i") == 0);
+        test.assert(json_claims.int_claim(doc, tape, "j") == 0 - 2);
+        test.assert(json_claims.int_claim(doc, tape, "k") == 0);
+        test.assert(json_claims.int_claim(doc, tape, "zz") == 0 - 1);
+    }
+    return 0;
+}
+
+fn test_the_audience_is_a_string_or_a_short_array_of_strings() -> [] int {
+    region a {
+        let one = "{\"aud\":\"x\"}";
+        let t1 = alloc_slice[a](json.tape_len(one), 0);
+        json_claims.parse_object(one, t1);
+        test.assert(json_claims.audience_is(one, t1, "x"));
+        test.assert(!json_claims.audience_is(one, t1, "y"));
+        test.assert(!json_claims.audience_is(one, t1, ""));
+        let esc = "{\"aud\":[\"\\u0078\",\"z\"]}";
+        let t2 = alloc_slice[a](json.tape_len(esc), 0);
+        json_claims.parse_object(esc, t2);
+        test.assert(json_claims.audience_is(esc, t2, "x"));
+        test.assert(json_claims.audience_is(esc, t2, "z"));
+        test.assert(!json_claims.audience_is(esc, t2, "q"));
+        let none = "{\"aud\":[]}";
+        let t3 = alloc_slice[a](json.tape_len(none), 0);
+        json_claims.parse_object(none, t3);
+        test.assert(!json_claims.audience_is(none, t3, "x"));
+        let obj = "{\"aud\":{\"x\":1}}";
+        let t4 = alloc_slice[a](json.tape_len(obj), 0);
+        json_claims.parse_object(obj, t4);
+        test.assert(!json_claims.audience_is(obj, t4, "x"));
+        let missing = "{}";
+        let t5 = alloc_slice[a](json.tape_len(missing), 0);
+        json_claims.parse_object(missing, t5);
+        test.assert(!json_claims.audience_is(missing, t5, "x"));
+    }
+    return 0;
+}
+
+// ---- hostile input of every size ----
+
+fn run_of(n: int, ch: int) -> [] int {
+    var r = 0;
+    region a {
+        let s = alloc_slice[a](n, byte_of(ch));
+        r = jwt.verify(s, jwt_vectors.keys(), "*", "api", "https://iss.example", 0, jwt_vectors.now());
+    }
+    return r;
+}
+
+fn test_credentials_of_every_size_and_shape_are_refused_without_a_panic() -> [] int {
+    var n = 0;
+    while n < 40 {
+        test.assert(run_of(n, '.') < 0);
+        test.assert(run_of(n, 'A') < 0);
+        test.assert(run_of(n, 255) < 0);
+        test.assert(run_of(n, 0) < 0);
+        n = n + 1;
+    }
+    test.assert(run_of(2047, 'A') == 0 - 1);
+    test.assert(run_of(2048, 'A') == 0 - 1);
+    test.assert(run_of(2049, 'A') == 0 - 1);
+    test.assert(run_of(2049, '.') == 0 - 1);
+    test.assert(run_of(10000, 'A') == 0 - 1);
+    test.assert(run_of(10000, '.') == 0 - 1);
+    test.assert(run_of(60000, '.') == 0 - 1);
+    return 0;
+}
+
+fn flipped(index: int, value: int) -> [] int {
+    let t = jwt_vectors.v_ok();
+    var r = 0;
+    region a {
+        let s = alloc_slice[a](len(t), byte_of(0));
+        var i = 0;
+        while i < len(t) {
+            s[i] = t[i];
+            i = i + 1;
+        }
+        s[index] = byte_of(value);
+        r = jwt.verify(s, jwt_vectors.keys(), "*", "api", "https://iss.example", 0, jwt_vectors.now());
+    }
+    return r;
+}
+
+fn test_every_byte_of_a_valid_token_replaced_by_every_interesting_value_never_panics_and_is_never_accepted_unless_unchanged() -> [] int {
+    let t = jwt_vectors.v_ok();
+    var i = 0;
+    while i < len(t) {
+        // A byte replaced by one that cannot occur in the token (a space, a NUL, 0xff) is never accepted.
+        test.assert(flipped(i, ' ') < 0);
+        test.assert(flipped(i, 0) < 0);
+        test.assert(flipped(i, 255) < 0);
+        i = i + 1;
+    }
+    test.assert(flipped(0, int_of(t[0])) == 1);
+    return 0;
+}
