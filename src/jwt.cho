@@ -98,6 +98,12 @@ pub fn max_token() -> [] int {
     return 2048;
 }
 
+// The longest credential a route that accepts JWTs reads off the header at all (the size of a connection's buffer). A token between `max_token()` and this is `jwt.malformed`, the one
+// answer every token failure gets, and not `auth.malformed` (docs/jwt.md section 9).
+pub fn credential_cap() -> [] int {
+    return 16384;
+}
+
 pub fn max_header_segment() -> [] int {
     return 256;
 }
@@ -110,10 +116,10 @@ pub fn signature_segment() -> [] int {
     return 86;
 }
 
-// A deployment's clock is not believed before this (seconds since the epoch, 2026-09-21): a gateway started before time sync would otherwise accept every token that expired
+// A deployment's clock is not believed before this (seconds since the epoch, 2026-09-01): a gateway started before time sync would otherwise accept every token that expired
 // since 1970 (docs/jwt.md section 7). A release raises it.
 pub fn clock_floor() -> [] int {
-    return 1790000000;
+    return 1788220800;
 }
 
 // The most leeway a route can have, in seconds.

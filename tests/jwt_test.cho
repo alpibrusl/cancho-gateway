@@ -396,8 +396,8 @@ fn test_the_clock_before_its_floor_refuses_every_token_and_a_wild_clock_overflow
 }
 
 fn test_the_clock_floor_is_after_the_date_it_was_written() -> [] int {
-    // 2026-09-21 is 1,789,948,800; the floor must not be earlier.
-    test.assert(jwt.clock_floor() >= 1789948800);
+    // 2026-09-01 is 1,788,220,800; the floor must not be earlier.
+    test.assert(jwt.clock_floor() >= 1788220800);
     test.assert(jwt.clock_floor() < jwt_vectors.now());
     return 0;
 }

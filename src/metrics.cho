@@ -834,12 +834,12 @@ pub fn frame[&o](out: &!o [byte], status: int, ctype: &static [byte], end: int) 
 // An upper bound on the response to a scrape, for this deployment: what the buffer is sized to, and within a tenth of the largest answer there
 // can be (the unit test checks both). In the Prometheus text, which is the larger format: the families' comments and the six plain
 // lines (3,0xx bytes with the reload and tunnel counters, rounded up), a line for each rule and one for `other` (98 bytes: the name's 40 and an 18-digit number), per route
-// 28 lines (2,152 bytes and its name 28 times, the four of `auth_refused_total` among them), per upstream 21 lines (1,615 bytes and its name 21 times).
+// 39 lines (2,152 bytes and its name 28 times, the four of `auth_refused_total` among them, and the eleven of `jwt_refused_total`: 850 bytes and its name 11 times; the name is counted 41 times in all), per upstream 21 lines (1,615 bytes and its name 21 times).
 pub fn worst_case() -> [] int {
-    var bytes = head_room() + 3072 + 384 + 512 + 160 + (rule_cap() + 1) * 98 + 64;
+    var bytes = head_room() + 3072 + 384 + 512 + 160 + 256 + (rule_cap() + 1) * 98 + 64;
     var i = 0;
     while i < routes() {
-        bytes = bytes + 1836 + 316 + 130 + 30 * len(route.name(i));
+        bytes = bytes + 1836 + 316 + 130 + 850 + 41 * len(route.name(i));
         i = i + 1;
     }
     i = 0;

@@ -137,7 +137,7 @@ Checks, with `L` the route's `jwt_leeway` in seconds (0 to 60, default **0**; th
 
 **The floor.** The monotonic clock cannot step, but `ids[2]` is the wall clock *as read at start*. A host without a battery-backed clock that starts before time sync (an embedded charger, a VM from a snapshot) reads
 1970 or a stale date; with that offset **every token whose `exp` is in the future of the wrong date would be valid, including tokens that expired years ago**. That is a fail-*open* error of the worst kind, so the
-code compiles in `clock_floor()`, a date no earlier than the build (1,790,000,000 s, 2026-09-21) and refuses every token (`jwt.clock`, 401, counted) while the clock reads before it. The floor is a constant in
+code compiles in `clock_floor()`, a date no earlier than the build (1,788,220,800 s, 2026-09-01) and refuses every token (`jwt.clock`, 401, counted) while the clock reads before it. The floor is a constant in
 `src/jwt.cho` that a release raises; it is not read from the build machine's clock because the generated files must be reproducible (`generate.py --check`). It cannot detect a clock that is wrong but later than the
 floor: nothing in the gateway can.
 

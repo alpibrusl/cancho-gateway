@@ -793,7 +793,7 @@ fn unauthenticated[&t, &c, &v, &b](tab: &!t conns.Table, core: &!c shared.Core, 
     // A route that accepts JWTs reads a longer credential (docs/jwt.md section 4).
     var cap = auth.max_credential();
     if route.auth(sel) >= 2 {
-        cap = jwt.max_token();
+        cap = jwt.credential_cap();
     }
     var rule = auth.parse_cap(view, tb, header, cap);
     if rule == 0 {
