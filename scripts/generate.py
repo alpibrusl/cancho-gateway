@@ -48,6 +48,14 @@ WS_IDLE_MS, WS_IDLE_RANGE = 600000, (100, 86400000)
 WS_LIFETIME_MS, WS_LIFETIME_RANGE = 86400000, (100, 2592000000)
 WS_MAX_TUNNELS, WS_TUNNELS_RANGE = 64, (1, 127)
 MAX_SUBPROTOCOLS = 8
+# Rate limiting (docs/ratelimit.md section 4): tokens per period (N/s, N/m, N/h), bucket size, buckets per route and in all (three 8-byte ints each: at most 1.5 MiB).
+RATE_MAX, BURST_MAX = 1000000, 1000000
+RATE_PERIODS = {"s": 1000, "m": 60000, "h": 3600000}
+BUCKETS, BUCKETS_RANGE, BUCKETS_TOTAL = 1024, (4, 65536), 65536
+# Headers a rate_key may not name: the hop-by-hop ones and the framing and routing ones (the gateway removes or owns them), and, unless the route trusts
+# forwarding claims, the claims themselves.
+RATE_REFUSED_HEADERS = ["connection", "keep-alive", "proxy-connection", "proxy-authorization", "te", "trailer", "upgrade", "content-length", "transfer-encoding", "host"]
+RATE_CLAIM_HEADERS = ["forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port", "x-real-ip"]
 MAX_ORIGINS = 16
 TOKEN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}")
 ORIGIN = re.compile(r"[a-z][a-z0-9+.-]*://[a-z0-9.-]+(:[0-9]{1,5})?")
@@ -57,7 +65,8 @@ KEYS = {
            "tls_listen", "tls_dir", "tls_identities", "tls_handshakes", "tls_rate", "tls_handshake_ms",
            "ws_idle_timeout_ms", "ws_max_lifetime_ms", "ws_max_tunnels"],
     "upstream": ["name", "addr"],
-    "route": ["name", "host", "path_prefix", "methods", "upstream", "max_body", "trust_forwarded", "websocket", "subprotocols", "origins"],
+    "route": ["name", "host", "path_prefix", "methods", "upstream", "max_body", "trust_forwarded", "websocket", "subprotocols", "origins",
+              "rate_limit", "rate_burst", "rate_key", "rate_buckets"],
 }
 
 
@@ -120,6 +129,53 @@ def valid_prefix(p):
     if "//" in p or "%" in p or "\\" in p or any(ord(c) <= 0x20 or ord(c) >= 0x7f for c in p):
         return False
     return not any(seg in (".", "..") for seg in p.split("/"))
+
+
+def rate_options(r, trust, refuse, i):
+    """The rate-limit keys of one route (docs/ratelimit.md section 4), checked; answers the fields of its record. `refuse(rule, message, section,
+    index, key)` raises."""
+    none = {"rate": 0, "per_ms": 0, "burst": 0, "rate_key": "", "buckets": 0}
+    if "rate_limit" not in r:
+        for key in ("rate_burst", "rate_key", "rate_buckets"):
+            if key in r:
+                refuse("config.ratelimit", "%s needs rate_limit on the same route (docs/ratelimit.md section 4)" % key, "route", i, key)
+        return none
+
+    def bad(message, key):
+        refuse("config.ratelimit", message, "route", i, key)
+
+    limit = r["rate_limit"]
+    m = re.fullmatch(r"([1-9][0-9]{0,6})/([smh])", limit) if isinstance(limit, str) else None
+    if not m or int(m.group(1)) > RATE_MAX:
+        bad('rate_limit must be a string "N/s", "N/m" or "N/h" with N an integer in 1..%d (docs/ratelimit.md section 4)' % RATE_MAX, "rate_limit")
+    rate, per_ms = int(m.group(1)), RATE_PERIODS[m.group(2)]
+    burst = r.get("rate_burst", rate)
+    if not isinstance(burst, int) or isinstance(burst, bool) or not 1 <= burst <= BURST_MAX:
+        bad("rate_burst must be an integer in 1..%d" % BURST_MAX, "rate_burst")
+    spec = r.get("rate_key", "route")
+    key = None
+    if isinstance(spec, str):
+        if spec == "route":
+            key = "r"
+        elif spec in ("xff:last", "xff:first"):
+            key = "x:l" if spec == "xff:last" else "x:f"
+        elif spec.startswith("header:") and TOKEN.fullmatch(spec[7:]):
+            key = "h:" + spec[7:].lower()
+    if key is None:
+        bad('rate_key must be "route", "xff:last", "xff:first" or "header:<Name>" with a header name of 1 to 64 token bytes', "rate_key")
+    if key.startswith("h:") and key[2:] in RATE_REFUSED_HEADERS:
+        bad("rate_key names %s, which the gateway removes or owns: a limit keyed on it is no limit" % spec[7:], "rate_key")
+    if (key.startswith("x:") or key.startswith("h:") and key[2:] in RATE_CLAIM_HEADERS) and not trust:
+        bad("rate_key %s keys on a forwarding claim: it needs trust_forwarded = true on the route (docs/headers.md section 2)" % spec, "rate_key")
+    if key == "r":
+        if "rate_buckets" in r:
+            bad('rate_buckets has no meaning with rate_key = "route": a route key has exactly one bucket', "rate_buckets")
+        buckets = 1
+    else:
+        buckets = r.get("rate_buckets", BUCKETS)
+        if not isinstance(buckets, int) or isinstance(buckets, bool) or not BUCKETS_RANGE[0] <= buckets <= BUCKETS_RANGE[1] or buckets % 4:
+            bad("rate_buckets must be an integer, a multiple of 4, in %d..%d" % BUCKETS_RANGE, "rate_buckets")
+    return {"rate": rate, "per_ms": per_ms, "burst": burst, "rate_key": key, "buckets": buckets}
 
 
 def load(path):
@@ -290,8 +346,17 @@ def load(path):
                 not all(isinstance(o, str) and len(o) <= 200 and ORIGIN.fullmatch(o) for o in origins):
             refuse("config.websocket", "origins must be at most %d distinct strings of the form scheme://host[:port], lowercase, no path and no trailing slash" % MAX_ORIGINS,
                    "route", i, "origins")
+        rate = rate_options(r, trust, refuse, i)
         routes.append({"host": host, "prefix": prefix, "mask": mask, "upstream": names[up], "max_body": body,
-                       "trust": 1 if trust else 0, "name": label, "ws": 1 if ws else 0, "protocols": protocols, "origins": origins})
+                       "trust": 1 if trust else 0, "name": label, "ws": 1 if ws else 0, "protocols": protocols, "origins": origins, **rate})
+    base = 0
+    for j, r in enumerate(routes):
+        r["base"] = base
+        base += r["buckets"]
+        if base > BUCKETS_TOTAL:
+            refuse("config.ratelimit", "the routes' rate-limit tables add up to more than %d buckets (a route key counts one)" % BUCKETS_TOTAL, "route", j,
+                   "rate_buckets" if "rate_buckets" in routes_in[j] else "rate_limit")
+    timeouts["rate_total"] = base
     ws_keys = [k for k in ("ws_idle_timeout_ms", "ws_max_lifetime_ms", "ws_max_tunnels") if k in doc]
     if ws_keys and not any(r["ws"] for r in routes):
         refuse("config.websocket", "%s needs a route with websocket = true" % ws_keys[0], key=ws_keys[0])
@@ -427,19 +492,24 @@ def render_deploy(listen, ups, timeouts):
 
 def table_blob(routes):
     """One line per route: host (or *), prefix, method bitmask, upstream index, max body, trust_forwarded (0 or 1), name, websocket (0 or 1), subprotocols
-    (comma-separated), origins (comma-separated); tab-separated, in file order."""
-    return "".join("%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%s\t%s\n" % (r["host"] or "*", r["prefix"], r["mask"], r["upstream"], r["max_body"], r["trust"], r["name"],
-                                                                 r["ws"], ",".join(r["protocols"]), ",".join(r["origins"])) for r in routes)
+    (comma-separated), origins (comma-separated), then the rate limit (docs/ratelimit.md): tokens per period (0: none), the period in ms, the burst, the key
+    (empty, `r`, `x:l`, `x:f` or `h:<lowercase name>`), the buckets, and where the route's buckets begin; tab-separated, in file order."""
+    return "".join("%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t%s\t%d\t%d\n" % (
+        r["host"] or "*", r["prefix"], r["mask"], r["upstream"], r["max_body"], r["trust"], r["name"], r["ws"], ",".join(r["protocols"]), ",".join(r["origins"]),
+        r["rate"], r["per_ms"], r["burst"], r["rate_key"], r["buckets"], r["base"]) for r in routes)
 
 
-def render_routes(routes):
+def render_routes(routes, rate_total):
     return "\n".join([
         "edition 5;", "", "module gateway.routes_table;", "",
         "// Generated by scripts/generate.py from a deployment file -- do not edit (docs/routes.md).",
         "// One line per route: host (`*` for any), path_prefix, method bitmask (GET 1, HEAD 2, POST 4, PUT 8, DELETE 16,",
         "// PATCH 32, OPTIONS 64), upstream index, max body, trust_forwarded (0 or 1), name, websocket (0 or 1), subprotocols and origins (comma-separated, possibly",
-        "// empty; docs/websocket.md). Tab-separated, in file order; `gateway.route` reads it.", "",
+        "// empty; docs/websocket.md), then the rate limit (docs/ratelimit.md): tokens per period (0: none), the period in ms, the burst, the key, the buckets, and the",
+        "// first bucket of the route's table. Tab-separated, in file order; `gateway.route` reads it.", "",
         "pub fn count() -> [] int {", "    return %d;" % len(routes), "}", "",
+        "// The buckets of every route's rate-limit table, added up (docs/ratelimit.md section 6): what the table is sized to.",
+        "pub fn rate_buckets_total() -> [] int {", "    return %d;" % rate_total, "}", "",
         "pub fn blob() -> [] &static [byte] {", "    return %s;" % literal(table_blob(routes)), "}", ""])
 
 
@@ -465,7 +535,7 @@ def main():
         print(json.dumps({"file": args[0], "hint": r.hint, "key": r.key, "line": r.line, "message": str(r), "rule": r.rule},
                          sort_keys=True), file=sys.stderr)
         return 2
-    outputs = {"deploy.cho": render_deploy(listen, ups, timeouts), "routes.cho": render_routes(routes), "tlsfiles.cho": render_tlsfiles(timeouts["tls"])}
+    outputs = {"deploy.cho": render_deploy(listen, ups, timeouts), "routes.cho": render_routes(routes, timeouts["rate_total"]), "tlsfiles.cho": render_tlsfiles(timeouts["tls"])}
     if "--explain" in flags:
         prefix = intended_prefix([a for _, a in ups])
         print("listen %s; %d upstream(s): %s" % (listen or "none (TLS only)", len(ups), ", ".join(a for _, a in ups)))
@@ -481,7 +551,8 @@ def main():
         print("intended egress prefix: %s" % (repr(prefix) if prefix else "none (no shared prefix)"))
         for n, r in enumerate(routes):
             print("route %d: %s %s -> %s (max body %d%s)" % (n, r["host"] or "*", r["prefix"], ups[r["upstream"]][0], r["max_body"], ", trusts forwarding headers" if r["trust"] else "") +
-                  ("; websocket, subprotocols %s, origins %s" % (r["protocols"] or "none", r["origins"] or "none") if r["ws"] else ""))
+                  ("; websocket, subprotocols %s, origins %s" % (r["protocols"] or "none", r["origins"] or "none") if r["ws"] else "") +
+                  ("; limit %d per %d ms, burst %d, key %s, %d bucket(s)" % (r["rate"], r["per_ms"], r["burst"], r["rate_key"], r["buckets"]) if r["rate"] else ""))
         return 0
     target = out_dir or ROOT / "generated"
     if "--check" in flags:

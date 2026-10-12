@@ -1,0 +1,414 @@
+edition 5;
+
+import std.bytes;
+import std.http;
+import std.test;
+import gateway.out;
+import gateway.ratelimit;
+
+// The rate limiter's arithmetic, table and key (docs/ratelimit.md sections 5, 6 and 3), without a gateway. The extremes are here on purpose: the generator
+// bounds the rate and the burst at 1,000,000 and the period at an hour, and no input may reach an overflow (cancho traps on one).
+
+fn test_one_token_is_period_units_and_a_millisecond_gains_rate_units() -> [] int {
+    // 100 a second, room for 100: ten milliseconds add one token (1,000 units), a second adds all of them.
+    test.assert_eq(ratelimit.refill(0, 0, 10, 100, 1000, 100), 1000);
+    test.assert_eq(ratelimit.refill(0, 0, 1000, 100, 1000, 100), 100000);
+    test.assert_eq(ratelimit.refill(250, 5, 15, 100, 1000, 100), 1250);
+    // 10 a minute: one token is 6 seconds.
+    test.assert_eq(ratelimit.refill(0, 0, 6000, 10, 60000, 10), 60000);
+    test.assert_eq(ratelimit.refill(0, 0, 5999, 10, 60000, 10), 59990);
+    // 1 an hour: after an hour, one token.
+    test.assert_eq(ratelimit.refill(0, 0, 3600000, 1, 3600000, 5), 3600000);
+    return 0;
+}
+
+fn test_a_bucket_never_holds_more_than_its_burst() -> [] int {
+    test.assert_eq(ratelimit.refill(99000, 0, 1, 100, 1000, 100), 99100);
+    test.assert_eq(ratelimit.refill(99950, 0, 1, 100, 1000, 100), 100000);
+    test.assert_eq(ratelimit.refill(100000, 0, 5000, 100, 1000, 100), 100000);
+    test.assert_eq(ratelimit.refill(250000, 0, 5000, 100, 1000, 100), 100000);
+    test.assert_eq(ratelimit.capacity(1000, 100), 100000);
+    // A damaged (negative) count is an empty bucket, not a debt.
+    test.assert_eq(ratelimit.refill(0 - 5, 0, 10, 100, 1000, 100), 1000);
+    return 0;
+}
+
+fn test_a_clock_that_stands_still_or_goes_back_gives_nothing() -> [] int {
+    test.assert_eq(ratelimit.refill(500, 77, 77, 100, 1000, 100), 500);
+    test.assert_eq(ratelimit.refill(500, 100, 99, 100, 1000, 100), 500);
+    test.assert_eq(ratelimit.refill(500, 1000000000, 0, 1000000, 1000, 1000000), 500);
+    test.assert_eq(ratelimit.refill(0, 9223372036854775807, 0, 1000000, 3600000, 1000000), 0);
+    test.assert_eq(ratelimit.refill(0, 9223372036854775807, 0 - 9223372036854775807, 1000000, 3600000, 1000000), 0);
+    return 0;
+}
+
+fn test_a_huge_elapsed_time_is_cut_at_thirty_days_and_overflows_nothing() -> [] int {
+    // 1 an hour with room for a million tokens, idle for ever: thirty days of refill, 720 tokens, not the burst.
+    test.assert_eq(ratelimit.refill(0, 0, 1000000000000000000, 1, 3600000, 1000000), 2592000000);
+    test.assert_eq(ratelimit.refill(0, 0, 9223372036854775807, 1, 3600000, 1000000), 2592000000);
+    test.assert_eq(ratelimit.refill(0, 0 - 9223372036854775807, 9223372036854775807, 1, 3600000, 1000000), 2592000000);
+    test.assert_eq(ratelimit.refill(0, 0 - 5, 10, 1, 3600000, 1000000), 2592000000);
+    // The largest rate over the longest trusted gap: the product is 2.6e15 and the bucket is full.
+    test.assert_eq(ratelimit.refill(0, 0, 9223372036854775807, 1000000, 1000, 1000000), 1000000000);
+    test.assert_eq(ratelimit.refill(0, 0, 9223372036854775807, 1000000, 3600000, 1000000), 3600000000000);
+    // The largest burst at the longest period, as full as can be: nothing to add, nothing computed.
+    test.assert_eq(ratelimit.refill(3600000000000, 0, 9223372036854775807, 1000000, 3600000, 1000000), 3600000000000);
+    // Exactly thirty days is not cut; one millisecond more counts the same.
+    test.assert_eq(ratelimit.refill(0, 0, 2592000000, 1, 3600000, 1000000), 2592000000);
+    test.assert_eq(ratelimit.refill(0, 0, 2592000001, 1, 3600000, 1000000), 2592000000);
+    return 0;
+}
+
+fn test_retry_after_is_rounded_up_and_never_zero() -> [] int {
+    test.assert_eq(ratelimit.retry_secs(0, 100, 1000), 1);
+    test.assert_eq(ratelimit.retry_secs(999, 1000000, 1000), 1);
+    test.assert_eq(ratelimit.retry_secs(0, 1, 1000), 1);
+    test.assert_eq(ratelimit.retry_secs(0, 3, 1000), 1);
+    test.assert_eq(ratelimit.retry_secs(500, 1, 1000), 1);
+    test.assert_eq(ratelimit.retry_secs(0, 1, 60000), 60);
+    test.assert_eq(ratelimit.retry_secs(0, 10, 60000), 6);
+    test.assert_eq(ratelimit.retry_secs(1, 10, 60000), 6);
+    test.assert_eq(ratelimit.retry_secs(0, 1, 3600000), 3600);
+    test.assert_eq(ratelimit.retry_secs(0, 1000000, 3600000), 1);
+    test.assert_eq(ratelimit.retry_secs(0, 1000, 3600000), 4);
+    // Rounded up at both steps: 1,001 ms is 2 s, 2,000 ms is 2 s, 2,001 ms is 3 s.
+    test.assert_eq(ratelimit.retry_secs(0, 1, 1001), 2);
+    test.assert_eq(ratelimit.retry_secs(0, 1, 2000), 2);
+    test.assert_eq(ratelimit.retry_secs(0, 1, 2001), 3);
+    // The deficit is rounded up before the rate divides it: 7 units at 2 a millisecond is 4 ms.
+    test.assert_eq(ratelimit.retry_secs(993, 2, 1000), 1);
+    // A rate or a deficit that should not occur is clamped, not divided by.
+    test.assert_eq(ratelimit.retry_secs(0, 0, 1000), 1);
+    test.assert_eq(ratelimit.retry_secs(1000, 5, 1000), 1);
+    return 0;
+}
+
+fn test_the_hash_has_bounded_values_and_the_empty_key_is_one() -> [] int {
+    test.assert_eq(ratelimit.fingerprint(""), 1);
+    test.assert_eq(ratelimit.hash1(""), 0);
+    test.assert_eq(ratelimit.hash2(""), 0);
+    test.assert(ratelimit.fingerprint("a") != ratelimit.fingerprint("b"));
+    test.assert(ratelimit.fingerprint("ab") != ratelimit.fingerprint("ba"));
+    test.assert(ratelimit.fingerprint("a") != ratelimit.fingerprint("aa"));
+    test.assert_eq(ratelimit.fingerprint("abc"), ratelimit.fingerprint("abc"));
+    test.assert(ratelimit.fingerprint("a") > 1);
+    region a {
+        // A head's whole 16 KiB of the highest byte: every step of both hashes stays inside the bounds the document states.
+        let big = alloc_slice[a](16384, byte_of(255));
+        test.assert(ratelimit.hash1(big) >= 0 && ratelimit.hash1(big) < 2147483647);
+        test.assert(ratelimit.hash2(big) >= 0 && ratelimit.hash2(big) < 2147483629);
+        test.assert(ratelimit.fingerprint(big) > 0 && ratelimit.fingerprint(big) < 4611686018427387904);
+        test.assert(ratelimit.set_of(big, 16384) >= 0 && ratelimit.set_of(big, 16384) < 16384);
+    }
+    test.assert_eq(ratelimit.set_of("anything", 1), 0);
+    test.assert_eq(ratelimit.set_of("anything", 0), 0);
+    return 0;
+}
+
+// The key `k<n>`, written into `buf`.
+fn numbered[&b](buf: &!b [byte], n: int) -> [] int {
+    let k = out.put(buf, 0, "key-");
+    return out.put_int(buf, k, n);
+}
+
+fn test_a_new_key_gets_its_burst_then_the_bucket_is_empty_and_refills() -> [] int {
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(4), 0);
+        // 1 a second, room for 3.
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", 1, 1000, 3, 0), 0);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", 1, 1000, 3, 0), 0);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", 1, 1000, 3, 0), 0);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", 1, 1000, 3, 0), 1);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", 1, 1000, 3, 999), 1);
+        // The wait it was told was enough: one token at exactly a second.
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", 1, 1000, 3, 1000), 0);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", 1, 1000, 3, 1000), 1);
+        // Two seconds idle: two tokens, not three.
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", 1, 1000, 3, 3000), 0);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", 1, 1000, 3, 3000), 0);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", 1, 1000, 3, 3000), 1);
+        // Long idle: the burst, and no more.
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", 1, 1000, 3, 100000), 0);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", 1, 1000, 3, 100000), 0);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", 1, 1000, 3, 100000), 0);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", 1, 1000, 3, 100000), 1);
+    }
+    return 0;
+}
+
+fn test_the_wait_a_refusal_names_is_the_wait_that_works() -> [] int {
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(4), 0);
+        // 10 a minute, room for 2: a token is 6 s.
+        test.assert_eq(ratelimit.admit(t, 0, 4, "k", 10, 60000, 2, 0), 0);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "k", 10, 60000, 2, 0), 0);
+        let wait = ratelimit.admit(t, 0, 4, "k", 10, 60000, 2, 0);
+        test.assert_eq(wait, 6);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "k", 10, 60000, 2, 5999), 1);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "k", 10, 60000, 2, 6000), 0);
+    }
+    return 0;
+}
+
+fn test_keys_do_not_share_a_bucket_and_the_empty_key_is_one_shared_bucket() -> [] int {
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(64), 0);
+        test.assert_eq(ratelimit.admit(t, 0, 64, "a", 1, 1000, 1, 0), 0);
+        test.assert(ratelimit.admit(t, 0, 64, "a", 1, 1000, 1, 0) > 0);
+        test.assert_eq(ratelimit.admit(t, 0, 64, "b", 1, 1000, 1, 0), 0);
+        test.assert_eq(ratelimit.admit(t, 0, 64, "ab", 1, 1000, 1, 0), 0);
+        // The absent key: everyone without a key is one client.
+        test.assert_eq(ratelimit.admit(t, 0, 64, "", 1, 1000, 1, 0), 0);
+        test.assert(ratelimit.admit(t, 0, 64, "", 1, 1000, 1, 0) > 0);
+    }
+    return 0;
+}
+
+fn test_a_routes_table_is_its_own_slice_of_the_one_table() -> [] int {
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(12), 0);
+        // Two routes of four buckets each, the second beginning at bucket 4: the same key spends from each separately.
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", 1, 1000, 1, 0), 0);
+        test.assert(ratelimit.admit(t, 0, 4, "a", 1, 1000, 1, 0) > 0);
+        test.assert_eq(ratelimit.admit(t, 4, 4, "a", 1, 1000, 1, 0), 0);
+        test.assert(ratelimit.admit(t, 4, 4, "a", 1, 1000, 1, 0) > 0);
+        // And a route of one bucket (the `route` key) at the end of the table.
+        test.assert_eq(ratelimit.admit(t, 8, 1, "", 1, 1000, 2, 0), 0);
+        test.assert_eq(ratelimit.admit(t, 8, 1, "", 1, 1000, 2, 0), 0);
+        test.assert(ratelimit.admit(t, 8, 1, "", 1, 1000, 2, 0) > 0);
+        // And one of three (sets of one) after it.
+        test.assert_eq(ratelimit.admit(t, 9, 3, "zz", 1, 1000, 1, 0), 0);
+        test.assert(ratelimit.admit(t, 9, 3, "zz", 1, 1000, 1, 0) > 0);
+    }
+    return 0;
+}
+
+fn test_a_set_of_recovering_buckets_refuses_a_new_key_and_still_serves_the_old() -> [] int {
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(4), 0);
+        // One set of four. 1 a second, room for 2: each key's one request leaves it recovering (one token of two).
+        test.assert_eq(ratelimit.admit(t, 0, 4, "k1", 1, 1000, 2, 0), 0);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "k2", 1, 1000, 2, 0), 0);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "k3", 1, 1000, 2, 0), 0);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "k4", 1, 1000, 2, 0), 0);
+        // A fifth key has no bucket and none to take over: refused as a table-full, naming when the first will be whole (a second).
+        test.assert_eq(ratelimit.admit(t, 0, 4, "k5", 1, 1000, 2, 0), 0 - 1);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "k5", 1, 1000, 2, 500), 0 - 1);
+        // The four keys that hold buckets are served as before (k1 spends its second token).
+        test.assert_eq(ratelimit.admit(t, 0, 4, "k1", 1, 1000, 2, 500), 0);
+        test.assert(ratelimit.admit(t, 0, 4, "k1", 1, 1000, 2, 500) > 0);
+        // A second later k2, k3 and k4 are whole again (a whole bucket is as good as an empty one) and k5 takes the first of them.
+        test.assert_eq(ratelimit.admit(t, 0, 4, "k5", 1, 1000, 2, 1000), 0);
+        // k1 was never taken over: it spent its second token at 500 ms, has half a token back since, and the half it was owed before: one whole token.
+        test.assert_eq(ratelimit.admit(t, 0, 4, "k1", 1, 1000, 2, 1000), 0);
+        test.assert(ratelimit.admit(t, 0, 4, "k1", 1, 1000, 2, 1000) > 0);
+    }
+    return 0;
+}
+
+fn test_a_table_that_is_full_names_the_wait_until_a_bucket_is_whole() -> [] int {
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(4), 0);
+        // 10 a minute, room for 10: a spent token takes 6 s to come back.
+        var i = 0;
+        while i < 4 {
+            region b {
+                let k = alloc_slice[b](24, byte_of(0));
+                let n = numbered(k, i);
+                test.assert_eq(ratelimit.admit(t, 0, 4, k[0..n], 10, 60000, 10, 0), 0);
+            }
+            i = i + 1;
+        }
+        test.assert_eq(ratelimit.admit(t, 0, 4, "new", 10, 60000, 10, 0), 0 - 6);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "new", 10, 60000, 10, 3500), 0 - 3);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "new", 10, 60000, 10, 6000), 0);
+    }
+    return 0;
+}
+
+fn test_the_wait_for_a_full_table_is_at_most_a_day() -> [] int {
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(4), 0);
+        // 1 an hour, room for a million: a bucket that spent 25 tokens is 25 hours from whole, which is longer than the day a wait is cut at.
+        var i = 0;
+        while i < 100 {
+            region b {
+                let k = alloc_slice[b](24, byte_of(0));
+                let n = numbered(k, i / 25);
+                test.assert_eq(ratelimit.admit(t, 0, 4, k[0..n], 1, 3600000, 1000000, 0), 0);
+            }
+            i = i + 1;
+        }
+        test.assert_eq(ratelimit.admit(t, 0, 4, "new", 1, 3600000, 1000000, 0), 0 - 86400);
+    }
+    return 0;
+}
+
+fn test_the_largest_rate_and_burst_at_the_longest_period_overflow_nothing() -> [] int {
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(8), 0);
+        let big = ratelimit.max_burst();
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", ratelimit.max_rate(), 3600000, big, 0), 0);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", ratelimit.max_rate(), 3600000, big, 9223372036854775807), 0);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", 1, 3600000, big, 0), 0);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", 1, 3600000, big, 9223372036854775807), 0);
+        test.assert_eq(ratelimit.admit(t, 4, 4, "a", ratelimit.max_rate(), 1000, 1, 0), 0);
+        test.assert(ratelimit.admit(t, 4, 4, "a", ratelimit.max_rate(), 1000, 1, 0) > 0);
+        // A thousandth of a second later, at a million a second, a token is back.
+        test.assert_eq(ratelimit.admit(t, 4, 4, "a", ratelimit.max_rate(), 1000, 1, 1), 0);
+    }
+    return 0;
+}
+
+fn test_a_clock_that_goes_back_neither_gives_tokens_nor_strands_the_bucket() -> [] int {
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(4), 0);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", 1, 1000, 1, 5000), 0);
+        test.assert(ratelimit.admit(t, 0, 4, "a", 1, 1000, 1, 5000) > 0);
+        // Back to 100: no tokens gained by the jump, and the bucket is re-anchored there, so a second after the new time it is whole.
+        test.assert(ratelimit.admit(t, 0, 4, "a", 1, 1000, 1, 100) > 0);
+        test.assert(ratelimit.admit(t, 0, 4, "a", 1, 1000, 1, 1099) > 0);
+        test.assert_eq(ratelimit.admit(t, 0, 4, "a", 1, 1000, 1, 1100), 0);
+    }
+    return 0;
+}
+
+fn test_a_table_that_does_not_fit_is_refused_not_read() -> [] int {
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(8), 0);
+        test.assert_eq(ratelimit.admit(t, 5, 4, "a", 1, 1000, 1, 0), 0 - 1);
+        test.assert_eq(ratelimit.admit(t, 0 - 1, 4, "a", 1, 1000, 1, 0), 0 - 1);
+        test.assert_eq(ratelimit.admit(t, 0, 0, "a", 1, 1000, 1, 0), 0 - 1);
+        test.assert_eq(ratelimit.admit(t, 65532, 4, "a", 1, 1000, 1, 0), 0 - 1);
+        test.assert_eq(ratelimit.admit(t, 0, 9, "a", 1, 1000, 1, 0), 0 - 1);
+        test.assert_eq(ratelimit.table_len(0), 3);
+        test.assert_eq(ratelimit.table_len(65536), 196608);
+    }
+    return 0;
+}
+
+// How many of `n` distinct keys, each admitted once into a table of `buckets` buckets whose buckets never recover (1 an hour, room for 1: after the one
+// token a bucket is empty for an hour), are refused because their set is full. Family 0 is `key-0`, `key-1`, ...; family 1 is made to look like API keys
+// (a prefix, eight hex digits spread by a multiplier, a tenant number).
+fn refused_of(buckets: int, n: int, family: int) -> [] int {
+    var refused = 0;
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(buckets), 0);
+        var i = 0;
+        while i < n {
+            region b {
+                let k = alloc_slice[b](48, byte_of(0));
+                var at = 0;
+                if family == 0 {
+                    at = numbered(k, i);
+                } else {
+                    at = out.put(k, 0, "sk_live_");
+                    at = out.put_hex(k, at, i * 2654435761 % 4294967296, 8);
+                    at = out.put(k, at, "-tenant");
+                    at = out.put_int(k, at, i % 97);
+                }
+                if ratelimit.admit(t, 0, buckets, k[0..at], 1, 3600000, 1, 0) < 0 {
+                    refused = refused + 1;
+                }
+            }
+            i = i + 1;
+        }
+    }
+    return refused;
+}
+
+fn test_the_load_a_table_carries_before_it_refuses() -> [] int {
+    // 2,048 buckets in 512 sets of four, keys that never recover: how many of the keys sent so far found their set full. The figures are deterministic
+    // (the hash is) and are the ones docs/ratelimit.md section 12 reports; they fail if the hash stops spreading keys or the sets stop being four.
+    test.assert_eq(refused_of(2048, 512, 0), 0);
+    test.assert_eq(refused_of(2048, 1024, 0), 3);
+    test.assert_eq(refused_of(2048, 1536, 0), 62);
+    test.assert_eq(refused_of(2048, 2048, 0), 278);
+    test.assert_eq(refused_of(2048, 2560, 0), 592);
+    test.assert_eq(refused_of(2048, 3072, 0), 1034);
+    test.assert_eq(refused_of(2048, 512, 1), 1);
+    test.assert_eq(refused_of(2048, 1024, 1), 30);
+    test.assert_eq(refused_of(2048, 1536, 1), 139);
+    test.assert_eq(refused_of(2048, 2048, 1), 372);
+    test.assert_eq(refused_of(2048, 3072, 1), 1134);
+    // No table ever holds more than its buckets, and a set of one set takes exactly four.
+    test.assert_eq(refused_of(4, 10, 0), 6);
+    test.assert_eq(refused_of(4, 4, 0), 0);
+    return 0;
+}
+
+// ---- the key of a request ----
+
+fn key_is(req: &static [byte], spec: &static [byte], want: &static [byte]) -> [] bool {
+    var ok = false;
+    region a {
+        let table = alloc_slice[a](http.slots(32), 0);
+        if http.parse(req, table) > 0 {
+            ok = bytes.equal(ratelimit.key(req, table, spec), want);
+        }
+    }
+    return ok;
+}
+
+fn test_the_route_key_has_no_value() -> [] int {
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key: k\r\n\r\n", "r", ""));
+    return 0;
+}
+
+fn test_a_header_key_is_the_one_headers_value() -> [] int {
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key: abc\r\n\r\n", "h:x-api-key", "abc"));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nx-API-key: abc\r\n\r\n", "h:x-api-key", "abc"));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nA: 1\r\nX-Api-Key:   a b  \r\nB: 2\r\n\r\n", "h:x-api-key", "a b"));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Bearer t.o.k\r\n\r\n", "h:authorization", "Bearer t.o.k"));
+    return 0;
+}
+
+fn test_a_missing_empty_or_repeated_header_is_the_absent_key() -> [] int {
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\n\r\n", "h:x-api-key", ""));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key:\r\n\r\n", "h:x-api-key", ""));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key:    \r\n\r\n", "h:x-api-key", ""));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key: a\r\nX-Api-Key: b\r\n\r\n", "h:x-api-key", ""));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key: a\r\nx-api-key: a\r\n\r\n", "h:x-api-key", ""));
+    // A different header whose name merely contains or extends the key's is not it.
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key2: b\r\nX-Api: c\r\nZ-X-Api-Key: d\r\n\r\n", "h:x-api-key", ""));
+    return 0;
+}
+
+fn test_the_last_forwarded_for_element_is_the_fronts() -> [] int {
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 1.1.1.1, 2.2.2.2, 3.3.3.3\r\n\r\n", "x:l", "3.3.3.3"));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 1.1.1.1\r\n\r\n", "x:l", "1.1.1.1"));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nx-forwarded-for:  1.1.1.1 ,2.2.2.2 \r\n\r\n", "x:l", "2.2.2.2"));
+    // Several lines: the last line's last element.
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 9.9.9.9\r\nX-Forwarded-For: 1.1.1.1, 2.2.2.2\r\n\r\n", "x:l", "2.2.2.2"));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 1.1.1.1, 2.2.2.2\r\nX-Forwarded-For: 9.9.9.9\r\n\r\n", "x:l", "9.9.9.9"));
+    // IPv6 is the text of the element.
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 2001:db8::1\r\n\r\n", "x:l", "2001:db8::1"));
+    return 0;
+}
+
+fn test_the_first_forwarded_for_element_is_the_clients_claim() -> [] int {
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 1.1.1.1, 2.2.2.2, 3.3.3.3\r\n\r\n", "x:f", "1.1.1.1"));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 1.1.1.1\r\n\r\n", "x:f", "1.1.1.1"));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Forwarded-For:  1.1.1.1 ,2.2.2.2 \r\n\r\n", "x:f", "1.1.1.1"));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 9.9.9.9\r\nX-Forwarded-For: 1.1.1.1, 2.2.2.2\r\n\r\n", "x:f", "9.9.9.9"));
+    return 0;
+}
+
+fn test_a_missing_or_empty_forwarded_for_is_the_absent_key() -> [] int {
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\n\r\n", "x:l", ""));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\n\r\n", "x:f", ""));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Forwarded-For:\r\n\r\n", "x:l", ""));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 1.1.1.1,\r\n\r\n", "x:l", ""));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: ,1.1.1.1\r\n\r\n", "x:f", ""));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 1.1.1.1, ,\r\n\r\n", "x:l", ""));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Forwarded-Forx: 1.1.1.1\r\nX-Real-IP: 1.1.1.1\r\n\r\n", "x:l", ""));
+    return 0;
+}
+
+fn test_a_spec_the_generator_never_writes_is_the_absent_key() -> [] int {
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key: a\r\n\r\n", "", ""));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key: a\r\n\r\n", "h", ""));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key: a\r\n\r\n", "q:z", ""));
+    test.assert(key_is("GET / HTTP/1.1\r\nHost: a\r\nX-Api-Key: a\r\n\r\n", "h:", ""));
+    return 0;
+}
