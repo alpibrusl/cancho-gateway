@@ -64,6 +64,7 @@ def message(kind):
 class Upstream(wb.Upstream):
     def __init__(self, port):
         self.kind = "small"
+        self.port = port
         super().__init__(port)
 
     def serve(self, c):
@@ -102,7 +103,10 @@ def run(port, up, direction, kind, path, total):
             if not d or d.endswith(b"\x88\x02\x03\xe8"):
                 break
     else:
-        one = wb.frame(1, message(kind), True)
+        payload = message(kind)
+        key = b"\x01\x02\x03\x04"
+        masked = bytes(b ^ key[i % 4] for i, b in enumerate(payload))     # wsframes_bench.frame writes the key but does not apply it: fine for a byte-agnostic gateway, not for this one
+        one = wb.frame(1, masked, True)
         batch = one * max(1, (1 << 20) // len(one))
         sent = 0
         while sent < total:

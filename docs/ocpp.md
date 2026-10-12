@@ -71,8 +71,8 @@ policy refuses and the bytes might be well-formed.
 |---|---|---|
 | `ws.ocpp-binary` | a binary message (opcode 2) on an OCPP route: OCPP-J is text; judged at the frame header, so it is always at a boundary | 1008 |
 | `ws.ocpp-json` | not a JSON array where the message begins; a byte that is not JSON where JSON is expected (including inside the payload: a missing colon, a bare word, a bad escape, a control character in a string, a malformed number); bytes after the closing `]`; a message that ends before the `]` (including an empty one) | 1007 |
-| `ws.ocpp-type` | element 0 is not the digit 2, 3 or 4 | 1007 |
-| `ws.ocpp-arity` | the closing `]` where another element is due (too few), or a `,` after the last (too many) | 1007 |
+| `ws.ocpp-type` | element 0 is not the digit 2, 3 or 4, or is missing (`[]`); a type digit followed by anything but white space, a `,` or a `]` (`[22`, `[2.0`, `[2x`). *(corrected: the first draft of this table did not say where `[]` and `[22` go; the unit tests fixed it.)* | 1007 |
+| `ws.ocpp-arity` | the closing `]` where another element is due (too few: `[2]`, `[2,"a"]`, `[2,"a","B",]`), or a `,` after the last (too many) | 1007 |
 | `ws.ocpp-id` | element 1 is not a string of the grammar above (a number, an empty string, 37 characters, an escape, a non-ASCII byte) | 1007 |
 | `ws.ocpp-action` | a CALL's element 2 is not a string of the action grammar | 1007 |
 | `ws.ocpp-payload` | the payload (CALL element 3, CALLRESULT element 2) or the CALLERROR details (element 4) is not an object | 1007 |
@@ -165,3 +165,59 @@ a bitmask, 1 for 1.6, 2 for 2.0.1, 0 for none; `--explain` says what each route 
 | OCPP 2.1 | a value `"2.1"` and types 5 and 6 in the grammar |
 | the upstream's choice of version | the negotiated subprotocol is not read by the recogniser; with several versions per route it could select the grammar |
 | a per-message rate limit | slice 2's counter exists; a bucket per tunnel does not |
+
+## 11. As built
+
+Built 2026-10-12 on a branch of its own, against the pinned compiler (`2fcf4cd`), on top of `origin/main` `3560c05`. Everything below was run on the development machine (one core shared with the test processes; CI will differ in timing).
+
+**What exists.**
+
+- *`src/ocppframe.cho`* (470 lines, pure, no effect): the recogniser `step`, `reset`, `complete`; about forty positions in one function, with the helpers `value`, `between`, `element`, `open`, `close`. *`src/wsframe.cho`* (728 lines) steps it beside the UTF-8 automaton (one call per text byte of a validated direction), refuses a binary message at its header, and refuses a message that ends before the grammar does; it also carries the nine tags, `own_code` (1008 for binary and nesting, 1007 for the rest), `is_ocpp` and `enable_ocpp`. The state block is **72 ints** a tunnel (28 a direction: 20 to 26 the recogniser, 27 the flag), the `wsf` slab 256 x 72 ints = **144 KiB** (arithmetic, not a resident-size measurement).
+- *The tunnel* (`src/proxy.cho`, **1,961 lines**: `scripts/lines.py` passes, with 39 to spare): four lines switch the flag on from the route's column when the 101 is relayed, three count a violation. Nothing else in `tunnel_pump` changed.
+- *Key and table* (`scripts/generate.py`): `ws_ocpp`, column 27 of the route table (`route.ws_ocpp`), `--explain` says which route validates. *Metrics:* `ocpp_violations` (JSON) and `ws_ocpp_violations_total` (Prometheus), one more int; `worst_case()` grew by 256 bytes and `fill` in the bound test moved its rule table by one int.
+- *Tests:* `tests/ocppframe_test.cho` (25 cancho tests, 206 message cases, each in both directions), `tests/ocpp_test.py` (10 end-to-end tests, below), 23 generator refusals, 5 accepted deployments and one compiled-table test, `tests/ocpp_mutants.py` (70 mutants), `tests/ocpp_bench.py`. `tests/wsframe_test.cho` changed only where it had the state size or a direction's offset written as a number. The recording upstream of `tests/wsframes_test.py` now answers `ocpp2.0.1` as well as `ocpp1.6`.
+
+**Where the build found the design wrong or incomplete** *(corrected in place above where it mattered)*:
+
+| design | built | why |
+|---|---|---|
+| section 3: where `[]`, `[22`, `[2]` go | `[]` and `[22` are `ws.ocpp-type`, `[2]` is `ws.ocpp-arity` | found writing the unit table; the rule is "the first byte that cannot continue a match", and a type digit's follower decides |
+| section 9 gate 2: the differential through "a small cancho probe" | through real tunnels, one per message, eight at a time | no probe is needed: the gateway is the thing under test, and a tunnel answers with the echo or a Close; the cost is about 40 ms a message |
+| the first run of the end-to-end tests | the recording upstream answered only `ocpp1.6`, so the routes for `ocpp2.0.1` got a 502 from the gateway's own upstream check | a test-harness gap, not a gateway one (the check worked); the stub now picks the first offered token |
+| the first run of the benchmark | an "up" stream of 0.3 ms/MiB for the validated route | `wsframes_bench.frame` writes a mask key and does not apply it: a byte-agnostic gateway never minds, this one refused the first message. The bench masks properly now; the numbers below are from the fixed one |
+| a first end-to-end assertion that the echo of a valid message sent just before a binary one is delivered | not asserted | the Close is decided in the same read, so the echo may or may not arrive first (slice 2's helper already says so) |
+
+**Gates.**
+
+| gate | status | where |
+|---|---|---|
+| 1 recogniser, every split, random mutations | **met** | `ocppframe_test.cho`: every valid and every refused message of section 3's table (206 cases, client and server direction) whole, at every pair of cut points (a stride of 3 over 70 bytes) and byte by byte, with one verdict; a refusal fed whole forwards nothing and is at a frame boundary; fragmented at every byte with a ping between; an empty final fragment; messages in a stream restart the machine; a payload of 3,000 opening brackets is refused at the 33rd; 3,000 random mutations of valid messages, in three pieces and byte by byte, have one verdict |
+| 2 differential | **met** | `ocpp_test.py`: **2,140 messages** (every valid one with each ASCII byte deleted, 1,800 random edits of one to three bytes, deep documents, random printable text) through real tunnels: **797 accepted, 1,343 refused** (`ws.ocpp-json` 833, `-type` 170, `-id` 111, `-code` 100, `-action` 70, `-payload` 47, `-arity` 10, `-depth` 2); gateway and reference agree on every verdict, Close code and log tag; every accepted one is echoed whole and `json.loads` accepts it; no message `json.loads` refuses is accepted. *Arity and depth are thinly covered by mutation (a deleted byte rarely changes a count); the unit table and the end-to-end refusals cover them by construction.* An earlier run of 3,165 messages agreed too |
+| 3 end to end | **met** | 44 refusals from the client (route, tag, Close code, the log, `ws_close`, **the upstream's bytes equal to the gateway's Close 1001 and nothing else**), 13 from the upstream (client told 1011, the upstream its code, the valid message before it delivered whole), binary at the header (whole, empty, fragmented, after a valid message), valid traffic of nine messages on the 1.6, 2.0.1 and both routes whole, byte by byte and in random pieces, byte for byte, a fragmented message with pings, a violation in a later read (the upstream gets the header and the valid bytes and then the end; asserted), a route without `ws_ocpp` forwards the same bad text and a binary message unchanged, the other version's subprotocol refused at the handshake |
+| 4 generator | **met** | 23 refusals (`config.websocket`, with lines) and 5 accepted; a compiled-table test (masks 1, 2, 3, 0 and `--explain`); `deploy/examples/ocpp.toml` carries the key and the site shows it |
+| 5 metrics | **met** | the counter in both formats (unit test, the admin test's key list, an end-to-end count of five violations by both peers and the per-tag `refusals`); an RFC 6455 violation is not counted as an OCPP one |
+| 6 mutants | **70 edits, 69 killed, 1 argued** | below |
+| 7 authority, lines, suites | **met** | labels unchanged (`manifests/` re-recorded: function names only); no file over 2,000 lines; every suite of `CONTRIBUTING.md` that was run passes (below) |
+| 8 cost | **measured** | below |
+
+**Mutants** (`python3 tests/ocpp_mutants.py -j 3`). **70 edits: 69 killed, 1 survives.** The classes: the recogniser's every position and bound (o01 to o44: the nesting bound both ways, the stack, every number position, escapes, hex digits, literals, the id and action bounds and alphabets, the arity of each type, white space, the comma rules, the element index), the parser's wiring (w01 to w13: not stepped, the end-of-message check, binary, the reset, control frames read as OCPP, the Close codes, a tag, the counter's predicate, each direction's flag), the tunnel (p01 to p04: never enabled, always enabled, the counter, the column), the metrics (t01 to t03) and the generator (g01 to g06). Most are killed by the cancho suite, which is what it is for; the ones the unit tests cannot see (the flag from the route, the column, the counter's predicate) are killed by the end-to-end tests. **o07** (a number with a leading zero is admitted, by removing the check after `0`) **survives, and is equivalent**: the next byte then reaches `between`, which refuses every digit with the same tag, so `01` is still `ws.ocpp-json`; the check it removes is redundant by construction. `o10` (an exponent's sign need not be followed by a digit) was first killed **only by the differential**, which showed a gap in the unit table (`1e+}` was there, but the byte after the sign was swallowed and the next closed the message: `1e+}}]` was not); the cases were added and the unit test kills it now. `g02` is killed by a crash (an unknown version raises in the generator and the table test sees exit 1), which is a kill, not a pretty one. Equivalent generator edits that were **not written** because they cannot be killed: dropping the "ws_ocpp needs websocket" check (a route without `websocket` has no `subprotocols`, so the next check refuses it with the same tag and line) and dropping the "distinct versions" check (a repeated version cannot match the distinct subprotocols).
+
+**Measured** *(one machine, the gateway's CPU from `/proc`, 64 MiB each way, one tunnel, median of three, `tests/ocpp_bench.py`; the same gateway, a route without `ws_ocpp` against one with it; valid OCPP-J messages)*:
+
+| traffic | plain route | `ws_ocpp` | ratio |
+|---|---|---|---|
+| upstream to client, 331-byte CALLs | 5.00 ms/MiB | 8.59 ms/MiB | 1.72 |
+| upstream to client, 4,991-byte CALLRESULTs | 5.62 | 8.12 | 1.44 |
+| client to upstream, 331-byte CALLs (masked) | 5.16 | 9.38 | 1.82 |
+| client to upstream, 4,991-byte CALLRESULTs (masked) | 5.00 | 9.06 | 1.81 |
+
+*The plain route already pays for the UTF-8 automaton* (slice 2, section 15), so the recogniser costs about **3 to 4 ms a MiB** more: about 1.1 microseconds on a 331-byte message. It is a function call and a chain of comparisons a byte, in a language without a switch; a deployment moving 100 MiB/s of OCPP text would spend about 0.35 of a core on it. OCPP traffic is orders of magnitude below that. *Not measured:* memory at hundreds of tunnels (the slab is 144 KiB by arithmetic), latency, a browser, `wss` (the recogniser runs on the plaintext the TLS engine hands over, as the frame parser does; the new tests are plain; slice 2's `wss` tests still pass).
+
+**Counts, from the last full run of the gate** (a few lines of tests were added after it, and `cancho test` and `ocpp_test.py` were re-run: noted where): `generate_test.py`: `7 prefix cases, 399 refusal cases, 62 accepted, 0 failures`. `ocpp_test.py`: `10 tests, 0 failures`. `wsframes_test.py`: `25 tests, 0 failures`. `websocket_test.py`: `55 tests, 0 failures`. `proxy_test.py`: `77 tests, 0 failures`. `admin_test.py`: `16 tests, 0 failures`. `tls_test.py`: `22 tests, 0 failures`. `ratelimit_test.py`: `16 tests, 0 failures`. `auth_test.py`: `14 tests, 0 failures`. `jwt_test.py`: `16 tests, 0 failures`. `jwt_differential.py 1500`: `0 disagreements`. `route_test.py 12 400`: `12 tables, 4800 requests, 0 failures`; `--fixed`: `18 fixed cases, 0 failures`. `response/run.py`: `55 cases, 0 failures`. `smuggling/run.py --gateway`: `67 cases, 0 disagreements`. `cancho test`: every suite ok (`ocppframe` 25, `wsframe` 21). `check_site.py`, `figures.py --check`, `proof.py --check` (after regenerating the report tables), `authority.py --check`, `authority_test.py`, `lines.py`, `cancho fmt --check src tests generated` and `generate.py deploy/example.toml --check`: pass. **Not run:** `headers/differential.py` (needs nginx), `smuggling/run.py --prefixes`, `--chunked` and `--fuzz` (the framing code did not change), the `websockets` library as an OCPP peer of the new tests.
+
+**Not done, and not known.**
+
+- **Whether any real charger sends an id with an escape, a non-ASCII byte or an empty id, or an action with a hyphen**: unknown (section 5); the gateway refuses them.
+- **The negotiated version is not read**: with `["1.6", "2.0.1"]` the same grammar is applied whichever the charger chose.
+- **A violation by a peer while the gateway is already closing** is not tagged a second time (slice 2's rule), and a refusal that comes in a later read than its frame's header leaves the other side with half a frame (section 2).
+- **Interaction with PR #47** (rate limiting: route table, metrics, proxy): the route table gains column 27 here and the metrics block one int; whichever merges second renumbers its column and its `stats_len`, and `proxy.cho` has 39 lines left under the ceiling.
