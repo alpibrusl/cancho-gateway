@@ -2,7 +2,7 @@
 
 Status: **slice 1 built (2026-10-08).** Sections 1 to 12 are the decision, written before the code; the gates in section 12 were fixed then and must be able to fail. Section 13 is what was built, what was measured and the mutants, and says where
 the build found the design false; a claim found false is corrected in place and marked *(corrected)*. Claims about cancho are about the pinned
-compiler (`cancho.toml`, `2fcf4cd`).
+compiler (`cancho.toml`, `2fcf4cd`). **Slice 2 (frames, ping/pong, close handshake, message limit, UTF-8) is `docs/websocket-frames.md`**: it supersedes sections 7 and 8 and the "Not done" list below where they say that no frame is read.
 
 The use case is OCPP-J: EV chargers connect to a back office over a WebSocket (`ws`, or `wss` in production) and speak a subprotocol, `ocpp1.6` or `ocpp2.0.1`, for hours or weeks. The gateway sits in front of the
 back office: it is where the strict parsing, the upstream set, the access log, the metrics and TLS already are. This slice makes the gateway carry the connection. It does **not** understand OCPP and does **not**
