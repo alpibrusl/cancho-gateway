@@ -60,15 +60,15 @@ pub fn depth_of[&s](src: &s [byte]) -> [] int {
     return deepest;
 }
 
-// Are the names of the members of the object at node 0 distinct, each at most `max_name()` bytes once decoded? Compared decoded, so `"exp"` and `"exp"` are one name.
-// The names are decoded once into a slab of `max_members()` x `max_name()` bytes (4 KiB), then compared pairwise: at most 2,016 comparisons.
-fn names_distinct[&s, &t](src: &s [byte], tape: &t [int]) -> [] bool {
-    let n = json.count(tape, 0);
+// Are the names of the members of the object at node `obj` distinct, each at most `max_name()` bytes once decoded? Compared decoded: a name spelt with an escape (a `e` for
+// the letter e) is the same name as the letter. The names are decoded once into a slab of `max_members()` x `max_name()` bytes (4 KiB), then compared pairwise: at most 2,016 comparisons.
+fn names_distinct[&s, &t](src: &s [byte], tape: &t [int], obj: int) -> [] bool {
+    let n = json.count(tape, obj);
     var ok = true;
     region a {
         let slab = alloc_slice[a](max_members() * max_name(), byte_of(0));
         let lens = alloc_slice[a](max_members(), 0);
-        var node = 1;
+        var node = obj + 1;
         var m = 0;
         while m < n && ok {
             let l = json.string_length(src, tape, node);
@@ -108,8 +108,14 @@ pub fn parse_object[&s, &t](src: &s [byte], tape: &!t [int]) -> [] int {
     if nodes < 1 || json.kind(tape, 0) != json.kind_object() {
         return 0;
     }
-    if json.count(tape, 0) > max_members() || !names_distinct(src, tape) {
-        return 0;
+    // Every object of the document, the root and the ones inside it: a repeated name in a nested object is as ambiguous as one at the root (the differential of tests/jwt_differential.py
+    // found that the first version looked at the root only).
+    var i = 0;
+    while i < nodes {
+        if json.kind(tape, i) == json.kind_object() && (json.count(tape, i) > max_members() || !names_distinct(src, tape, i)) {
+            return 0;
+        }
+        i = i + 1;
     }
     return nodes;
 }

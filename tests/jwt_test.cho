@@ -275,6 +275,12 @@ fn test_a_repeated_claim_name_is_refused_whichever_copy_is_good_and_however_it_i
     test.assert(rule(jwt_vectors.v_bad_dup_exp_escaped()) == 1);
     test.assert(rule(jwt_vectors.v_bad_dup_aud()) == 1);
     test.assert(rule(jwt_vectors.v_bad_dup_other()) == 1);
+    // In a nested object too (found by the differential of tests/jwt_differential.py: the first version looked at the root only), while the same name in two objects is fine.
+    test.assert(rule(jwt_vectors.v_bad_dup_nested()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_dup_nested_escaped()) == 1);
+    test.assert(check(jwt_vectors.v_ok_same_name_in_two_objects()) == 1);
+    test.assert(rule(jwt_vectors.v_bad_nested_members65()) == 1);
+    test.assert(check(jwt_vectors.v_ok_nested_members64()) == 1);
     return 0;
 }
 
@@ -516,7 +522,9 @@ fn test_names_are_compared_decoded() -> [] int {
     test.assert(parsed("{\"a\":1,\"\\u0061\":2}") == 0);
     test.assert(parsed("{\"\\u00e9\":1,\"\\u00c9\":2}") > 0);
     test.assert(parsed("{\"\\u00e9\":1,\"\\u00e9\":2}") == 0);
-    test.assert(parsed("{\"a\":{\"x\":1,\"x\":2}}") > 0);
+    test.assert(parsed("{\"a\":{\"x\":1,\"x\":2}}") == 0);
+    test.assert(parsed("{\"a\":[{\"x\":1},{\"x\":2},{\"y\":{\"x\":3,\"\\u0078\":4}}]}") == 0);
+    test.assert(parsed("{\"a\":[{\"x\":1},{\"x\":2},{\"y\":{\"x\":3}}]}") > 0);
     test.assert(parsed("{\"\":1,\"\":2}") == 0);
     return 0;
 }
