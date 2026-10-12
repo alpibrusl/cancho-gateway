@@ -16,6 +16,9 @@ All of these pass before anything is called done (CI runs them, `.github/workflo
     python3 tests/route_test.py 12 400          # route selection vs the reference; also --fixed (docs/routes.md)
     python3 tests/ratelimit_test.py             # rate limiting, end to end (docs/ratelimit.md); its mutants: tests/ratelimit_mutants.py
     python3 tests/auth_test.py                  # API-key authentication, end to end (docs/auth.md); its mutants: tests/auth_mutants.py
+    python3 tests/jwt_vectors.py --check        # tests/jwt_vectors.cho is what the script writes (the unit test's tokens; test keys only)
+    python3 tests/jwt_test.py                   # JWT bearer tokens, end to end (docs/jwt.md); its mutants: tests/jwt_mutants.py
+    python3 tests/jwt_differential.py 1500      # the verifier against tokens signed by OpenSSL and a reference written again in Python (needs `cryptography`)
     cancho build
     cancho test
     python3 tests/smuggling/run.py --gateway    # also --prefixes, --fuzz 1500, --chunked (docs/framing.md)

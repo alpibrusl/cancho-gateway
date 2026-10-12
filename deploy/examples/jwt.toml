@@ -1,0 +1,39 @@
+# Example 11: JWT bearer tokens. Upstream: python3 scripts/demo_upstream.py 9000
+#
+# The binary holds one PUBLIC key and nothing secret. The key below is a DEMO key: its private half (the "seed") is the base64url of the text
+# "cancho-gateway-demo-seed-PUBLIC!", printed in docs/examples.html so that you can sign the tokens of the walk-through. Anyone can sign a token it accepts: it protects nothing.
+# Make your own with `python3 scripts/mkjwt.py keygen <name>` (the table to paste on standard output, the seed once on standard error; nothing is written to a file).
+listen = 8080
+admin_listen = 9090
+auth_allow_plain = true         # a token sent over plain HTTP can be replayed by anyone on the path until it expires. Here the plain port is only for this walk-through on localhost;
+                                # in a deployment it is for a port that a TLS-terminating front reaches, or leave `listen` out and serve `tls_listen` alone (docs/auth.md section 7.3)
+
+[[upstream]]
+name = "api"
+addr = "127.0.0.1:9000"
+
+[[jwt_key]]
+name = "demo-issuer"            # the `kid` of the tokens, and what the access log calls the caller
+public_key = "90A88FKxE4B1AHSPNinFzthqD-azTKdxyJGnf0eqHQE"   # Ed25519, 32 bytes as 43 characters of base64url: not a secret
+
+[[route]]
+name = "orders"
+path_prefix = "/orders"
+upstream = "api"
+auth = "jwt"                    # `Authorization: Bearer <token>`, removed before the upstream sees the request; EdDSA is the only algorithm and the token never chooses it
+jwt_aud = "orders-api"          # the token's `aud` must be this (a string, or one element of an array)
+jwt_iss = "https://issuer.example"
+jwt_leeway = 5                  # seconds of clock difference tolerated on `exp` and `nbf` (0 to 60; default 0)
+
+[[route]]
+name = "admin"
+path_prefix = "/admin"
+upstream = "api"
+auth = "jwt"
+jwt_aud = "admin-api"           # a token made for /orders is refused here: the audience differs
+jwt_iss = "https://issuer.example"
+
+[[route]]
+name = "health"
+path_prefix = "/health"
+upstream = "api"                # no auth: nothing here asks for a credential

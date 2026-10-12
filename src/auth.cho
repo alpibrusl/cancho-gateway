@@ -114,7 +114,12 @@ fn credential_of[&v](value: &v [byte], bearer: bool) -> [] &v [byte] {
 
 // Is `cred` a credential: 1 to `max_credential()` bytes, all of the `token68` alphabet?
 pub fn credential_ok[&c](cred: &c [byte]) -> [] bool {
-    if len(cred) < 1 || len(cred) > max_credential() {
+    return credential_ok_cap(cred, max_credential());
+}
+
+// `credential_ok` with another longest length: a route that accepts JWTs reads up to `gateway.jwt`'s `max_token()` (docs/jwt.md section 4).
+pub fn credential_ok_cap[&c](cred: &c [byte], cap: int) -> [] bool {
+    if len(cred) < 1 || len(cred) > cap {
         return false;
     }
     var i = 0;
@@ -141,6 +146,11 @@ pub fn credential[&s, &t, &n](src: &s [byte], table: &t [int], name: &n [byte]) 
 // 0 if the request carries exactly one header `name` holding a credential that is well formed, else the rule that refuses it: 1 `auth.missing` (no such header),
 // 2 `auth.malformed` (the header twice, empty, another scheme, a credential that is empty, too long or outside the alphabet).
 pub fn parse[&s, &t, &n](src: &s [byte], table: &t [int], name: &n [byte]) -> [] int {
+    return parse_cap(src, table, name, max_credential());
+}
+
+// `parse` with another longest credential (`credential_ok_cap`).
+pub fn parse_cap[&s, &t, &n](src: &s [byte], table: &t [int], name: &n [byte], cap: int) -> [] int {
     let found = count_named(src, table, name);
     if found == 0 {
         return 1;
@@ -148,7 +158,7 @@ pub fn parse[&s, &t, &n](src: &s [byte], table: &t [int], name: &n [byte]) -> []
     if found > 1 {
         return 2;
     }
-    if !credential_ok(credential(src, table, name)) {
+    if !credential_ok_cap(credential(src, table, name), cap) {
         return 2;
     }
     return 0;
@@ -250,6 +260,21 @@ pub fn name_in[&b](blob: &b [byte], index: int) -> [] &b [byte] {
     return blob[0..0];
 }
 
+// Line `index` (0-based) of a table of tab-separated lines, without its newline; empty past the end. The public keys of `gateway.jwt` are read from it.
+pub fn line_in[&b](blob: &b [byte], index: int) -> [] &b [byte] {
+    var n = 0;
+    var at = 0;
+    while at < len(blob) {
+        let end = line_end(blob, at);
+        if n == index {
+            return blob[at..end];
+        }
+        n = n + 1;
+        at = end + 1;
+    }
+    return blob[0..0];
+}
+
 // Does the route's key list `keys` (`*` for all, else comma-separated indices) allow key `index`?
 pub fn allowed[&k](keys: &k [byte], index: int) -> [] bool {
     if len(keys) == 1 && int_of(keys[0]) == '*' {
@@ -284,4 +309,16 @@ pub fn lookup[&c](cred: &c [byte]) -> [] int {
 
 pub fn key_name(index: int) -> [] &static [byte] {
     return name_in(routes_table.keys_blob(), index);
+}
+
+// What a request authenticated as, by the number the client slot holds (`gateway.shared.auth_slot`): 1 to 64 an API key (its index plus 1), 101 and up a JWT key (its index plus 101).
+// The deployment makes the two kinds' names distinct, so the name says which kind it was (docs/jwt.md section 10). Empty for 0 and for a number that names nothing.
+pub fn identity(slot: int) -> [] &static [byte] {
+    if slot > 100 {
+        return name_in(routes_table.jwt_keys_blob(), slot - 101);
+    }
+    if slot > 0 {
+        return key_name(slot - 1);
+    }
+    return routes_table.keys_blob()[0..0];
 }

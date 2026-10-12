@@ -26,6 +26,9 @@ import gateway.routes_table;
 //
 // Slots 25 to 28 (docs/auth.md section 12): requests the route's authentication refused, by kind: `auth.missing`, `auth.malformed`, `auth.invalid` (all 401) and `auth.forbidden` (403).
 //
+// Slots 29 to 39 (docs/jwt.md section 9): tokens the route refused, by kind (the order of `gateway.jwt`'s rules): malformed, alg, header, kid, claims, expired, not_yet_valid, audience,
+// issuer, clock, signature. Every one was answered 401 `auth.invalid`; only the counter and the log say which. The route's block is 48 ints, 40 to 47 unused.
+//
 // Every number is written saturated at 10^18 - 1 (a counter does not get there in the life of a process), so that the size of an answer
 // has a bound that `worst_case()` states and the unit test checks.
 
@@ -90,7 +93,7 @@ pub fn bucket_of(ms: int) -> [] int {
 }
 
 fn route_block() -> [] int {
-    return 32;
+    return 48;
 }
 
 fn upstream_block() -> [] int {
@@ -267,6 +270,15 @@ pub fn rate_refused[&s](stats: &!s [int], route_index: int, table_full: bool) ->
 pub fn auth_refused[&s](stats: &!s [int], route_index: int, rule: int) -> [] int {
     if route_index >= 0 && route_index < routes() && rule >= 1 && rule <= 4 {
         let at = route_index * route_block() + 24 + rule;
+        stats[at] = stats[at] + 1;
+    }
+    return 0;
+}
+
+// A token on route `route_index` was refused: `rule` 1 to 11 as `gateway.jwt` numbers them (`jwt.malformed` ... `jwt.signature`); another number counts nothing.
+pub fn jwt_refused[&s](stats: &!s [int], route_index: int, rule: int) -> [] int {
+    if route_index >= 0 && route_index < routes() && rule >= 1 && rule <= 11 {
+        let at = route_index * route_block() + 28 + rule;
         stats[at] = stats[at] + 1;
     }
     return 0;
@@ -489,6 +501,15 @@ pub fn json[&o, &s, &n, &g](out: &!o [byte], at: int, stats: &s [int], names: &n
         k = jnum(out, k, "invalid", stats[base + 27]);
         k = out.put(out, k, ",");
         k = jnum(out, k, "forbidden", stats[base + 28]);
+        k = out.put(out, k, "},\"jwt_refused\":{");
+        var j = 0;
+        while j < 11 {
+            if j > 0 {
+                k = out.put(out, k, ",");
+            }
+            k = jnum(out, k, jwt_kind(j), stats[base + 29 + j]);
+            j = j + 1;
+        }
         k = out.put(out, k, "}}");
         i = i + 1;
     }
@@ -645,6 +666,41 @@ fn sample2[&o, &a, &b](out: &!o [byte], at: int, name: &static [byte], k1: &stat
     return out.put(out, k, "\n");
 }
 
+// The kinds of `jwt_refused`, in the order of `gateway.jwt`'s rules (docs/jwt.md section 9).
+fn jwt_kind(i: int) -> [] &static [byte] {
+    if i == 0 {
+        return "malformed";
+    }
+    if i == 1 {
+        return "alg";
+    }
+    if i == 2 {
+        return "header";
+    }
+    if i == 3 {
+        return "kid";
+    }
+    if i == 4 {
+        return "claims";
+    }
+    if i == 5 {
+        return "expired";
+    }
+    if i == 6 {
+        return "not_yet_valid";
+    }
+    if i == 7 {
+        return "audience";
+    }
+    if i == 8 {
+        return "issuer";
+    }
+    if i == 9 {
+        return "clock";
+    }
+    return "signature";
+}
+
 fn auth_kind(i: int) -> [] &static [byte] {
     if i == 0 {
         return "missing";
@@ -710,6 +766,16 @@ pub fn prometheus[&o, &s, &n, &g](out: &!o [byte], at: int, stats: &s [int], nam
         var a = 0;
         while a < 4 {
             k = sample2(out, k, "auth_refused_total", "route", route.name(i), "kind", auth_kind(a), stats[i * route_block() + 25 + a]);
+            a = a + 1;
+        }
+        i = i + 1;
+    }
+    k = family(out, k, "jwt_refused_total", "counter", "Bearer tokens refused by the route's JWT verification, by route and kind (every one was answered 401 auth.invalid).");
+    i = 0;
+    while i < routes() {
+        var a = 0;
+        while a < 11 {
+            k = sample2(out, k, "jwt_refused_total", "route", route.name(i), "kind", jwt_kind(a), stats[i * route_block() + 29 + a]);
             a = a + 1;
         }
         i = i + 1;
@@ -872,12 +938,12 @@ pub fn frame[&o](out: &!o [byte], status: int, ctype: &static [byte], end: int) 
 // An upper bound on the response to a scrape, for this deployment: what the buffer is sized to, and within a tenth of the largest answer there
 // can be (the unit test checks both). In the Prometheus text, which is the larger format: the families' comments and the six plain
 // lines (4,3xx bytes with the reload, tunnel and WebSocket frame counters, rounded up), a line for each rule and one for `other` (98 bytes: the name's 40 and an 18-digit number), per route
-// 28 lines (2,152 bytes and its name 28 times, the four of `auth_refused_total` among them), per upstream 21 lines (1,615 bytes and its name 21 times).
+// 39 lines (2,152 bytes and its name 28 times, the four of `auth_refused_total` among them, and the eleven of `jwt_refused_total`: 850 bytes and its name 11 times; the name is counted 41 times in all), per upstream 21 lines (1,615 bytes and its name 21 times).
 pub fn worst_case() -> [] int {
-    var bytes = head_room() + 4372 + 384 + 512 + 160 + (rule_cap() + 1) * 98 + 64;
+    var bytes = head_room() + 4372 + 384 + 512 + 160 + 256 + (rule_cap() + 1) * 98 + 64;
     var i = 0;
     while i < routes() {
-        bytes = bytes + 1836 + 316 + 130 + 30 * len(route.name(i));
+        bytes = bytes + 1836 + 316 + 130 + 850 + 41 * len(route.name(i));
         i = i + 1;
     }
     i = 0;

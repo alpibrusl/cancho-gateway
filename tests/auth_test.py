@@ -370,7 +370,7 @@ class Main:
                 assert m["auth_refused"][kind] == len(mine), (name, kind, m["auth_refused"][kind], len(mine))
                 total[rule] += len(mine)
         assert list(gw.route_metrics("bearer")["auth_refused"]) == ["missing", "malformed", "invalid", "forbidden"]
-        assert list(gw.route_metrics("bearer"))[-3:] == ["rate_limited", "rate_table_full", "auth_refused"]
+        assert list(gw.route_metrics("bearer"))[-4:] == ["rate_limited", "rate_table_full", "auth_refused", "jwt_refused"]
         assert gw.route_metrics("open")["auth_refused"] == {"missing": 0, "malformed": 0, "invalid": 0, "forbidden": 0}
         m = gw.metrics()
         for rule, n in total.items():

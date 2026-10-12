@@ -9,7 +9,7 @@ on either side and the upstream pool (#6), (the header policy of #7 is built: `d
 
 1. **accept** (non-blocking) into a slot; a header deadline starts.
 2. **read the head** into the slot's buffer; `framing.judge` (more, a refusal, or accepted).
-3. **route** (`route.select`), then **authenticate** if the route asks for it (`docs/auth.md`: 401 or 403, before anything else is decided about the request), refuse if the declared `Content-Length` exceeds the route's `max_body`, take a rate-limit token
+3. **route** (`route.select`), then **authenticate** if the route asks for it (`docs/auth.md`, `docs/jwt.md`: an API key or a signed token; 401 or 403, before anything else is decided about the request), refuse if the declared `Content-Length` exceeds the route's `max_body`, take a rate-limit token
    (`docs/ratelimit.md`), and note the upstream the route chose.
 4. **dial** (`tcp_connect_start`) the upstream, after `egress.allowed` re-checks the address against the compiled-in set (which
    is also what keeps the compiler's bound trap unreachable, design section 2.1).
@@ -50,7 +50,8 @@ the response**: a download longer than it is cut, not refused.
 | `proxy.head` | 502 | the head could not be rebuilt for the upstream |
 | `limit.connections` | 503 | no slot for the upstream half |
 | `forward.*`, `framing.*`, `route.*`, `limit.body` | per `docs/framing.md`, `docs/routes.md` | |
-| `auth.missing`, `auth.malformed`, `auth.invalid`, `auth.forbidden` | 401, 401, 401, 403 | `docs/auth.md` section 7.2: the route's credential is absent, ill-formed, matches no key, or is a key the route does not allow |
+| `auth.missing`, `auth.malformed`, `auth.invalid`, `auth.forbidden` | 401, 401, 401, 403 | `docs/auth.md` section 7.2: the route's credential is absent, ill-formed, matches no key, or is a key the route does not allow. A token refused for **any** reason in its content (`docs/jwt.md` section 9) is also `auth.invalid` to the client |
+| `jwt.malformed`, `jwt.alg`, `jwt.header`, `jwt.kid`, `jwt.claims`, `jwt.expired`, `jwt.nbf`, `jwt.aud`, `jwt.iss`, `jwt.clock`, `jwt.signature` | 401 (the response says `auth.invalid`) | **only in the access log and the counters**: why a token was refused (`docs/jwt.md` section 9). The client is told one thing for all of them |
 
 **Where this differs from design section 4:** a client that arrives when the table is full is **closed without a response**
 (there is no slot to answer in); `limit.connections` 503 is only sent when the upstream half cannot be opened.

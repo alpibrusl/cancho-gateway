@@ -18,6 +18,9 @@ import re
 import sys
 import tomllib
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import jwtkit  # noqa: E402  (the point check of a JWT public key, docs/jwt.md section 8)
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 MAX_UPSTREAMS = 256
 MAX_ROUTES = 256
@@ -68,6 +71,13 @@ MAX_ORIGINS = 16
 MAX_KEYS = 64
 KEY_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,31}")
 KEY_DIGEST = re.compile(r"[0-9a-f]{64}")
+# JWT (docs/jwt.md section 8): at most this many public keys, each a name (the `kid`, and what the access log calls the caller) and 32 bytes of Ed25519 public key as 43
+# characters of base64url; the claims a route may require are printable ASCII without the quote and the backslash; the most leeway, in seconds.
+MAX_JWT_KEYS = 8
+JWT_PUBLIC_KEY = re.compile(r"[A-Za-z0-9_-]{43}")
+JWT_CLAIM = re.compile(r"[ !#-\[\]-~]{1,96}")
+JWT_LEEWAY_MAX = 60
+AUTH_KINDS = ["api-key", "jwt"]
 AUTH_REFUSED_HEADERS = RATE_REFUSED_HEADERS + RATE_CLAIM_HEADERS + ["x-request-id"]
 TOKEN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}")
 ORIGIN = re.compile(r"[a-z][a-z0-9+.-]*://[a-z0-9.-]+(:[0-9]{1,5})?")
@@ -78,8 +88,10 @@ KEYS = {
            "ws_idle_timeout_ms", "ws_max_lifetime_ms", "ws_max_tunnels", "ws_ping_ms", "ws_pong_ms", "ws_close_ms", "auth_allow_plain"],
     "upstream": ["name", "addr"],
     "api_key": ["name", "sha256"],
+    "jwt_key": ["name", "public_key"],
     "route": ["name", "host", "path_prefix", "methods", "upstream", "max_body", "trust_forwarded", "websocket", "subprotocols", "origins", "ws_max_message_bytes",
-              "rate_limit", "rate_burst", "rate_key", "rate_buckets", "auth", "auth_header", "auth_keys", "auth_forward"],
+              "rate_limit", "rate_burst", "rate_key", "rate_buckets", "auth", "auth_header", "auth_keys", "auth_forward",
+              "jwt_alg", "jwt_keys", "jwt_aud", "jwt_iss", "jwt_leeway"],
 }
 
 
@@ -93,7 +105,7 @@ def scan(text):
     """Where each key is: {(section, index, key): line}, and where each table starts: {(section, index): line}."""
     keys, starts = {}, {}
     section, index = "", 0
-    counts = {"upstream": 0, "route": 0, "api_key": 0}
+    counts = {"upstream": 0, "route": 0, "api_key": 0, "jwt_key": 0}
     for number, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         m = re.fullmatch(r"\[\[([A-Za-z_][A-Za-z0-9_-]*)\]\]", line)
@@ -153,7 +165,7 @@ def rate_hashes(key):
     return h1, h2
 
 
-def rate_options(r, trust, identities, refuse, i):
+def rate_options(r, trust, identities, refuse, i, jwt=False):
     """The rate-limit keys of one route (docs/ratelimit.md section 4), checked; answers the fields of its record. `identities` is the names of the keys the route
     admits, or None if it has no auth (docs/auth.md). `refuse(rule, message, section, index, key)` raises."""
     none = {"rate": 0, "per_ms": 0, "burst": 0, "rate_key": "", "buckets": 0}
@@ -187,6 +199,9 @@ def rate_options(r, trust, identities, refuse, i):
             key = "h:" + spec[7:].lower()
     if key is None:
         bad('rate_key must be "route", "auth", "xff:last", "xff:first" or "header:<Name>" with a header name of 1 to 64 token bytes', "rate_key")
+    if key == "a" and jwt:
+        bad('rate_key = "auth" is refused on a route that accepts jwt: a token\'s subject is unbounded, so the table could refuse an authentic caller (docs/jwt.md section 10); '
+            'use rate_key = "route", "xff:last" or a header key', "rate_key")
     if key == "a" and identities is None:
         bad('rate_key = "auth" keys on the authenticated identity: the route needs auth (docs/auth.md section 9)', "rate_key")
     if key.startswith("h:") and key[2:] in RATE_REFUSED_HEADERS:
@@ -217,11 +232,20 @@ def rate_options(r, trust, identities, refuse, i):
     return {"rate": rate, "per_ms": per_ms, "burst": burst, "rate_key": key, "buckets": buckets}
 
 
-def auth_options(r, key_names, refuse, i):
-    """The authentication keys of one route (docs/auth.md section 6), checked; answers the fields of its record. `refuse(rule, message, section, index, key)` raises."""
-    none = {"auth": 0, "auth_header": "", "auth_forward": 0, "auth_keys": "", "challenge": ""}
+def jwt_algorithm_message(alg):
+    if alg == "none":
+        return 'jwt_alg = "none": an unsecured token is never accepted (docs/jwt.md section 3); the only algorithm is "EdDSA"'
+    if isinstance(alg, str) and alg.upper().startswith("HS"):
+        return ('jwt_alg = %r: HMAC needs the verifier to hold the secret, which the binary must not (docs/auth.md section 1) and a file would widen the authority row; '
+                'the only algorithm is "EdDSA", verified with a public key (docs/jwt.md section 3)' % alg)
+    return 'jwt_alg must be the string "EdDSA", the only algorithm (docs/jwt.md section 3); got %r' % (alg,)
+
+
+def auth_options(r, key_names, jwt_names, refuse, i):
+    """The authentication keys of one route (docs/auth.md section 6, docs/jwt.md section 8), checked; answers the fields of its record. `refuse(rule, message, section, index, key)` raises."""
+    none = {"auth": 0, "auth_header": "", "auth_forward": 0, "auth_keys": "", "challenge": "", "jwt_keys": "", "jwt_aud": "", "jwt_iss": "", "jwt_leeway": 0}
     if "auth" not in r:
-        for key in ("auth_header", "auth_keys", "auth_forward"):
+        for key in ("auth_header", "auth_keys", "auth_forward", "jwt_alg", "jwt_keys", "jwt_aud", "jwt_iss", "jwt_leeway"):
             if key in r:
                 refuse("config.auth", "%s needs auth on the same route (docs/auth.md section 6)" % key, "route", i, key)
         return none
@@ -229,13 +253,24 @@ def auth_options(r, key_names, refuse, i):
     def bad(message, key):
         refuse("config.auth", message, "route", i, key)
 
-    if r["auth"] != "api-key":
-        bad('auth must be "api-key": the only kind in this slice (docs/auth.md section 6)', "auth")
+    kinds = r["auth"]
+    if isinstance(kinds, str):
+        kinds = [kinds]
+    if not isinstance(kinds, list) or not kinds or len(set(map(str, kinds))) != len(kinds) or not all(isinstance(k, str) and k in AUTH_KINDS for k in kinds):
+        bad('auth must be "api-key", "jwt", or a list of those two without repeats (docs/auth.md section 6, docs/jwt.md section 8)', "auth")
+    has_api, has_jwt = "api-key" in kinds, "jwt" in kinds
+    if not has_api and "auth_keys" in r:
+        bad('auth_keys needs "api-key" in auth: it names [[api_key]] keys', "auth_keys")
+    for key in ("jwt_alg", "jwt_keys", "jwt_aud", "jwt_iss", "jwt_leeway"):
+        if not has_jwt and key in r:
+            bad('%s needs "jwt" in auth on the same route (docs/jwt.md section 8)' % key, key)
     header = r.get("auth_header", "Authorization")
     if not isinstance(header, str) or not TOKEN.fullmatch(header):
         bad("auth_header must be a header name: a token of 1 to 64 bytes", "auth_header")
     if header.lower() in AUTH_REFUSED_HEADERS:
         bad("auth_header names %s, which the gateway removes, owns or replaces: it could never carry a key" % header, "auth_header")
+    if has_jwt and header.lower() != "authorization":
+        bad("auth_header %s on a route that accepts jwt: a token is a Bearer token in Authorization (docs/jwt.md section 8)" % header, "auth_header")
     allowed = r.get("auth_keys")
     if allowed is not None:
         if not isinstance(allowed, list) or not allowed or len(set(map(str, allowed))) != len(allowed) or not all(isinstance(n, str) and n in key_names for n in allowed):
@@ -243,13 +278,32 @@ def auth_options(r, key_names, refuse, i):
     forward = r.get("auth_forward", False)
     if not isinstance(forward, bool):
         bad("auth_forward must be true or false (docs/auth.md section 3)", "auth_forward")
+    jwt = {"jwt_keys": "", "jwt_aud": "", "jwt_iss": "", "jwt_leeway": 0}
+    if has_jwt:
+        if "jwt_alg" in r and r["jwt_alg"] != "EdDSA":
+            bad(jwt_algorithm_message(r["jwt_alg"]), "jwt_alg")
+        jk = r.get("jwt_keys")
+        if jk is not None and (not isinstance(jk, list) or not jk or len(set(map(str, jk))) != len(jk) or not all(isinstance(n, str) and n in jwt_names for n in jk)):
+            bad("jwt_keys must be a non-empty list of distinct [[jwt_key]] names" + (" (declared: %s)" % ", ".join(jwt_names) if jwt_names else ""), "jwt_keys")
+        jwt["jwt_keys"] = "*" if jk is None else ",".join(str(jwt_names.index(n)) for n in jk)
+        for key in ("jwt_aud", "jwt_iss"):
+            if key in r:
+                v = r[key]
+                if not isinstance(v, str) or not JWT_CLAIM.fullmatch(v):
+                    bad("%s must be a string of 1 to 96 bytes of printable ASCII without the quote and the backslash (docs/jwt.md section 8)" % key, key)
+                jwt[key] = v
+        if "jwt_leeway" in r:
+            v = r["jwt_leeway"]
+            if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= JWT_LEEWAY_MAX:
+                bad("jwt_leeway must be an integer number of seconds in 0..%d (docs/jwt.md section 7)" % JWT_LEEWAY_MAX, "jwt_leeway")
+            jwt["jwt_leeway"] = v
     lower = header.lower()
     if lower == "authorization":
         challenge = 'Bearer realm="cancho-gateway"'
     else:
         challenge = 'ApiKey realm="cancho-gateway", header="%s"' % lower
-    return {"auth": 1, "auth_header": lower, "auth_forward": 1 if forward else 0,
-            "auth_keys": "*" if allowed is None else ",".join(str(key_names.index(n)) for n in allowed), "challenge": challenge}
+    return {"auth": (1 if has_api else 0) + (2 if has_jwt else 0), "auth_header": lower, "auth_forward": 1 if forward else 0,
+            "auth_keys": ("*" if allowed is None else ",".join(str(key_names.index(n)) for n in allowed)) if has_api else "", "challenge": challenge, **jwt}
 
 
 def load(path):
@@ -277,11 +331,11 @@ def load(path):
                        section, index, k, "did you mean %r?" % near[0] if near else "valid keys: " + ", ".join(KEYS[section]))
 
     for k, v in doc.items():
-        if k not in KEYS[""] and k not in ("upstream", "route", "api_key"):
-            near = difflib.get_close_matches(k, KEYS[""] + ["upstream", "route", "api_key"], n=1)
+        if k not in KEYS[""] and k not in ("upstream", "route", "api_key", "jwt_key"):
+            near = difflib.get_close_matches(k, KEYS[""] + ["upstream", "route", "api_key", "jwt_key"], n=1)
             raise Refusal("config.unknown-key", "unknown key or table %r" % k, line=keys.get(("", 0, k), 1), key=k,
                           hint="did you mean %r?" % near[0] if near else None)
-    unknown_keys("", 0, {k: v for k, v in doc.items() if k not in ("upstream", "route", "api_key")})
+    unknown_keys("", 0, {k: v for k, v in doc.items() if k not in ("upstream", "route", "api_key", "jwt_key")})
     # `listen` is optional so that a deployment can serve TLS only (docs/tls.md section 11): 0 means no plain listener. At least one of `listen` and
     # `tls_listen` is required (checked once `tls_listen` is read, below).
     listen = doc.get("listen", 0)
@@ -386,6 +440,37 @@ def load(path):
             refuse("config.auth", "api_key %s has the same sha256 as another key: one credential cannot be two identities" % kname, "api_key", i, "sha256")
         api_keys.append((kname, digest))
     key_names = [n for n, _ in api_keys]
+    jwt_in = doc.get("jwt_key", [])
+    if len(jwt_in) > MAX_JWT_KEYS:
+        refuse("config.auth", "%d [[jwt_key]]; the bound is %d (docs/jwt.md section 8)" % (len(jwt_in), MAX_JWT_KEYS), "jwt_key", MAX_JWT_KEYS)
+    jwt_keys = []
+    for i, kk in enumerate(jwt_in):
+        unknown_keys("jwt_key", i, kk)
+        kname, text = kk.get("name"), kk.get("public_key")
+        if not isinstance(kname, str) or not KEY_NAME.fullmatch(kname):
+            refuse("config.auth", "jwt_key name %r must match [a-z0-9][a-z0-9._-]{0,31} (it is the kid, and the access log writes it)" % (kname,), "jwt_key", i, "name")
+        if any(kname == n for n, _ in jwt_keys) or kname in key_names:
+            refuse("config.auth", "jwt_key name %s is also another key's name: the log's identity must say which kind of key it was (docs/jwt.md section 10)" % kname, "jwt_key", i, "name")
+        raw = None
+        if isinstance(text, str) and JWT_PUBLIC_KEY.fullmatch(text):
+            try:
+                raw = jwtkit.unb64u(text)
+            except ValueError:
+                raw = None
+            if raw is not None and (len(raw) != 32 or jwtkit.b64u(raw) != text):
+                raw = None
+        if raw is None:
+            refuse("config.auth", "jwt_key %s: public_key must be exactly 43 characters of base64url (A-Z a-z 0-9 - _, no padding) that decode canonically to the 32 bytes of an Ed25519 public key "
+                   "(scripts/mkjwt.py makes one)" % kname, "jwt_key", i, "public_key")
+        point = jwtkit.decompress(raw)
+        if point is None:
+            refuse("config.auth", "jwt_key %s: public_key is not a point on the Ed25519 curve" % kname, "jwt_key", i, "public_key")
+        if jwtkit.small_order(point):
+            refuse("config.auth", "jwt_key %s: public_key is a point of small order, which verifies a signature for every message" % kname, "jwt_key", i, "public_key")
+        if any(text == t for _, t in jwt_keys):
+            refuse("config.auth", "jwt_key %s has the same public_key as another key: one verifier cannot be two identities" % kname, "jwt_key", i, "public_key")
+        jwt_keys.append((kname, text))
+    jwt_names = [n for n, _ in jwt_keys]
     routes_in = doc.get("route", [])
     if len(routes_in) > MAX_ROUTES:
         refuse("config.routes", "%d routes; the bound is %d" % (len(routes_in), MAX_ROUTES), "route", MAX_ROUTES)
@@ -442,13 +527,15 @@ def load(path):
                 not all(isinstance(o, str) and len(o) <= 200 and ORIGIN.fullmatch(o) for o in origins):
             refuse("config.websocket", "origins must be at most %d distinct strings of the form scheme://host[:port], lowercase, no path and no trailing slash" % MAX_ORIGINS,
                    "route", i, "origins")
-        auth = auth_options(r, key_names, refuse, i)
-        if auth["auth"] and not api_keys:
+        auth = auth_options(r, key_names, jwt_names, refuse, i)
+        if auth["auth"] & 1 and not api_keys:
             refuse("config.auth", "auth needs at least one [[api_key]]: a route nobody can enter (docs/auth.md section 6)", "route", i, "auth")
+        if auth["auth"] & 2 and not jwt_keys:
+            refuse("config.auth", "auth = jwt needs at least one [[jwt_key]]: a route nobody can enter (docs/jwt.md section 8)", "route", i, "auth")
         who = None
         if auth["auth"]:
-            who = key_names if auth["auth_keys"] == "*" else [key_names[int(x)] for x in auth["auth_keys"].split(",")]
-        rate = rate_options(r, trust, who, refuse, i)
+            who = key_names if auth["auth_keys"] == "*" else [key_names[int(x)] for x in auth["auth_keys"].split(",") if x]
+        rate = rate_options(r, trust, who, refuse, i, jwt=bool(auth["auth"] & 2))
         routes.append({"host": host, "prefix": prefix, "mask": mask, "upstream": names[up], "max_body": body,
                        "trust": 1 if trust else 0, "name": label, "ws": 1 if ws else 0, "protocols": protocols, "origins": origins, "ws_message": ws_message, **rate, **auth})
     base = 0
@@ -460,8 +547,10 @@ def load(path):
                    "rate_buckets" if "rate_buckets" in routes_in[j] else "rate_limit")
     timeouts["rate_total"] = base
     auth_routes = [j for j, r in enumerate(routes) if r["auth"]]
-    if api_keys and not auth_routes:
+    if api_keys and not any(r["auth"] & 1 for r in routes):
         refuse("config.auth", "[[api_key]] and no route with auth: the digests would be in the binary and protect nothing", "api_key", 0)
+    if jwt_keys and not any(r["auth"] & 2 for r in routes):
+        refuse("config.auth", "[[jwt_key]] and no route that accepts jwt: the keys would be in the binary and protect nothing", "jwt_key", 0)
     plain_ok = doc.get("auth_allow_plain", False)
     if not isinstance(plain_ok, bool):
         refuse("config.auth", "auth_allow_plain must be true or false (docs/auth.md section 7.3)", key="auth_allow_plain")
@@ -472,6 +561,7 @@ def load(path):
                "auth_allow_plain = true if the plain port is reachable only through a TLS-terminating front (docs/auth.md section 7.3)" % routes[auth_routes[0]]["name"],
                "route", auth_routes[0], "auth")
     timeouts["api_keys"] = api_keys
+    timeouts["jwt_keys"] = jwt_keys
     timeouts["auth_plain"] = plain_ok
     ws_keys = [k for k in ("ws_idle_timeout_ms", "ws_max_lifetime_ms", "ws_max_tunnels", "ws_ping_ms", "ws_pong_ms", "ws_close_ms") if k in doc]
     if ws_keys and not any(r["ws"] for r in routes):
@@ -625,15 +715,16 @@ def table_blob(routes):
     """One line per route: host (or *), prefix, method bitmask, upstream index, max body, trust_forwarded (0 or 1), name, websocket (0 or 1), subprotocols
     (comma-separated), origins (comma-separated), then the rate limit (docs/ratelimit.md): tokens per period (0: none), the period in ms, the burst, the key
     (empty, `r`, `a`, `x:l`, `x:f` or `h:<lowercase name>`), the buckets, and where the route's buckets begin; then authentication (docs/auth.md): 1 if the route
-    authenticates, the lowercase header it reads, 1 if it forwards the credential, the allowed key indices (`*` for all, else comma-separated), and the
-    `WWW-Authenticate` challenge; then the route's `ws_max_message_bytes` (docs/websocket-frames.md); tab-separated, in file order."""
-    return "".join("%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%d\n" % (
+    authenticates (1 API keys, 2 JWTs, 3 both), the lowercase header it reads, 1 if it forwards the credential, the allowed key indices (`*` for all, else comma-separated), and the
+    `WWW-Authenticate` challenge; then the JWT fields (docs/jwt.md): the allowed JWT key indices, the required audience and issuer (empty: none) and the leeway in seconds;
+    then the route's `ws_max_message_bytes` (docs/websocket-frames.md); tab-separated, in file order."""
+    return "".join("%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\n" % (
         r["host"] or "*", r["prefix"], r["mask"], r["upstream"], r["max_body"], r["trust"], r["name"], r["ws"], ",".join(r["protocols"]), ",".join(r["origins"]),
         r["rate"], r["per_ms"], r["burst"], r["rate_key"], r["buckets"], r["base"],
-        r["auth"], r["auth_header"], r["auth_forward"], r["auth_keys"], r["challenge"], r["ws_message"]) for r in routes)
+        r["auth"], r["auth_header"], r["auth_forward"], r["auth_keys"], r["challenge"], r["jwt_keys"], r["jwt_aud"], r["jwt_iss"], r["jwt_leeway"], r["ws_message"]) for r in routes)
 
 
-def render_routes(routes, rate_total, api_keys):
+def render_routes(routes, rate_total, api_keys, jwt_keys):
     return "\n".join([
         "edition 5;", "", "module gateway.routes_table;", "",
         "// Generated by scripts/generate.py from a deployment file -- do not edit (docs/routes.md).",
@@ -641,13 +732,17 @@ def render_routes(routes, rate_total, api_keys):
         "// PATCH 32, OPTIONS 64), upstream index, max body, trust_forwarded (0 or 1), name, websocket (0 or 1), subprotocols and origins (comma-separated, possibly",
         "// empty; docs/websocket.md), then the rate limit (docs/ratelimit.md): tokens per period (0: none), the period in ms, the burst, the key, the buckets, and the",
         "// first bucket of the route's table, then authentication (docs/auth.md): 1 if the route authenticates, the header it reads, 1 if it forwards the credential, the",
-        "// allowed key indices (`*`: all) and the WWW-Authenticate challenge, then the WebSocket message limit (docs/websocket-frames.md). Tab-separated, in file order; `gateway.route` reads it.", "",
+        "// allowed key indices (`*`: all) and the WWW-Authenticate challenge, then the JWT fields (docs/jwt.md): the allowed public-key indices, the required audience and issuer",
+        "// (empty: none) and the leeway in seconds, then the WebSocket message limit (docs/websocket-frames.md). Tab-separated, in file order; `gateway.route` reads it.", "",
         "pub fn count() -> [] int {", "    return %d;" % len(routes), "}", "",
         "// The buckets of every route's rate-limit table, added up (docs/ratelimit.md section 6): what the table is sized to.",
         "pub fn rate_buckets_total() -> [] int {", "    return %d;" % rate_total, "}", "",
         "// The API keys (docs/auth.md section 4.1): one line per key, `name<TAB>sha256 as 64 lowercase hex digits`, in file order. Digests only: the binary holds no key.",
         "pub fn key_count() -> [] int {", "    return %d;" % len(api_keys), "}", "",
         "pub fn keys_blob() -> [] &static [byte] {", "    return %s;" % literal("".join("%s\t%s\n" % k for k in api_keys)), "}", "",
+        "// The JWT public keys (docs/jwt.md section 8): one line per key, `name<TAB>43 characters of base64url`, in file order. Public keys only: nothing here is a secret.",
+        "pub fn jwt_key_count() -> [] int {", "    return %d;" % len(jwt_keys), "}", "",
+        "pub fn jwt_keys_blob() -> [] &static [byte] {", "    return %s;" % literal("".join("%s\t%s\n" % k for k in jwt_keys)), "}", "",
         "pub fn blob() -> [] &static [byte] {", "    return %s;" % literal(table_blob(routes)), "}", ""])
 
 
@@ -673,7 +768,7 @@ def main():
         print(json.dumps({"file": args[0], "hint": r.hint, "key": r.key, "line": r.line, "message": str(r), "rule": r.rule},
                          sort_keys=True), file=sys.stderr)
         return 2
-    outputs = {"deploy.cho": render_deploy(listen, ups, timeouts), "routes.cho": render_routes(routes, timeouts["rate_total"], timeouts["api_keys"]), "tlsfiles.cho": render_tlsfiles(timeouts["tls"])}
+    outputs = {"deploy.cho": render_deploy(listen, ups, timeouts), "routes.cho": render_routes(routes, timeouts["rate_total"], timeouts["api_keys"], timeouts["jwt_keys"]), "tlsfiles.cho": render_tlsfiles(timeouts["tls"])}
     if "--explain" in flags:
         prefix = intended_prefix([a for _, a in ups])
         print("listen %s; %d upstream(s): %s" % (listen or "none (TLS only)", len(ups), ", ".join(a for _, a in ups)))
@@ -692,8 +787,16 @@ def main():
             print("route %d: %s %s -> %s (max body %d%s)" % (n, r["host"] or "*", r["prefix"], ups[r["upstream"]][0], r["max_body"], ", trusts forwarding headers" if r["trust"] else "") +
                   ("; websocket, subprotocols %s, origins %s, messages up to %d bytes" % (r["protocols"] or "none", r["origins"] or "none", r["ws_message"]) if r["ws"] else "") +
                   ("; limit %d per %d ms, burst %d, key %s, %d bucket(s)" % (r["rate"], r["per_ms"], r["burst"], r["rate_key"], r["buckets"]) if r["rate"] else "") +
-                  ("; authenticates with the %s header, keys %s%s" % (r["auth_header"], "all" if r["auth_keys"] == "*" else ", ".join(timeouts["api_keys"][int(x)][0] for x in r["auth_keys"].split(",")),
+                  ("; authenticates with the %s header, %s%s" % (r["auth_header"], ("keys %s" % ("all" if r["auth_keys"] == "*" else ", ".join(timeouts["api_keys"][int(x)][0] for x in r["auth_keys"].split(",")))) if r["auth"] & 1 else "jwt only",
                                                                 ", forwards the credential" if r["auth_forward"] else "") if r["auth"] else ""))
+        for n, r in enumerate(routes):
+            if r["auth"] & 2:
+                print("route %d accepts jwt (EdDSA): keys %s, audience %s, issuer %s, leeway %d s%s" % (
+                    n, "all" if r["jwt_keys"] == "*" else ", ".join(timeouts["jwt_keys"][int(x)][0] for x in r["jwt_keys"].split(",")),
+                    repr(r["jwt_aud"]) if r["jwt_aud"] else "not checked", repr(r["jwt_iss"]) if r["jwt_iss"] else "not checked", r["jwt_leeway"],
+                    "; an API key too (a credential with two dots is a token, any other is a key)" if r["auth"] & 1 else ""))
+        if timeouts["jwt_keys"]:
+            print("jwt keys: %s (public keys compiled in)" % ", ".join(n for n, _ in timeouts["jwt_keys"]))
         if timeouts["api_keys"]:
             print("api keys: %s (digests only compiled in)%s" % (", ".join(n for n, _ in timeouts["api_keys"]), "; the plain listener is allowed (auth_allow_plain): keys are protected by a front" if timeouts["auth_plain"] else ""))
         return 0

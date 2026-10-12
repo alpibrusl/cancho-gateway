@@ -307,7 +307,7 @@ pub fn rate_base(index: int) -> [] int {
     return number(bytes.field(blob[at..line_end(blob, at)], 9, 16));
 }
 
-// Authentication of route `index` (docs/auth.md section 6): 1 if it authenticates, the lowercase header it reads (`authorization`: a Bearer token; any other: the whole value), 1 if the
+// Authentication of route `index` (docs/auth.md section 6, docs/jwt.md): 0 if it does not authenticate, 1 API keys, 2 JWTs, 3 both; the lowercase header it reads (`authorization`: a Bearer token; any other: the whole value), 1 if the
 // credential is forwarded to the upstream, the key indices it allows (`*` for all, else comma-separated) and its `WWW-Authenticate` challenge (empty if it does not authenticate).
 pub fn auth(index: int) -> [] int {
     let blob = routes_table.blob();
@@ -343,7 +343,33 @@ pub fn auth_challenge(index: int) -> [] &static [byte] {
 pub fn ws_max_message(index: int) -> [] int {
     let blob = routes_table.blob();
     let at = line_start(blob, index);
-    return number(bytes.field(blob[at..line_end(blob, at)], 9, 22));
+    return number(bytes.field(blob[at..line_end(blob, at)], 9, 26));
+}
+
+// JWT acceptance of route `index` (docs/jwt.md section 8; `auth` above is 1 for API keys, 2 for JWTs, 3 for both): the public-key indices it allows (`*` for all, else comma-separated),
+// the audience and issuer a token must carry (empty: not checked) and the leeway in seconds.
+pub fn jwt_keys(index: int) -> [] &static [byte] {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return bytes.field(blob[at..line_end(blob, at)], 9, 22);
+}
+
+pub fn jwt_aud(index: int) -> [] &static [byte] {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return bytes.field(blob[at..line_end(blob, at)], 9, 23);
+}
+
+pub fn jwt_iss(index: int) -> [] &static [byte] {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return bytes.field(blob[at..line_end(blob, at)], 9, 24);
+}
+
+pub fn jwt_leeway(index: int) -> [] int {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return number(bytes.field(blob[at..line_end(blob, at)], 9, 25));
 }
 
 pub fn select[&h, &m, &p](host: &h [byte], method: &m [byte], path: &p [byte]) -> [] int {

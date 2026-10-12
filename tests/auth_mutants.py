@@ -40,8 +40,8 @@ A = "src/auth.cho"
 # ---- the parsing
 m("a01", A, "    if found > 1 {\n        return 2;\n    }", "    if found > 2 {\n        return 2;\n    }", "unit", "a header twice is accepted")
 m("a02", A, "    if found == 0 {\n        return 1;\n    }", "    if found == 0 {\n        return 2;\n    }", "unit", "a missing header is malformed")
-m("a03", A, "    if len(cred) < 1 || len(cred) > max_credential() {", "    if len(cred) < 1 || len(cred) > max_credential() + 1 {", "unit", "a credential of 257 bytes is accepted")
-m("a04", A, "    if len(cred) < 1 || len(cred) > max_credential() {", "    if len(cred) > max_credential() {", "unit", "an empty credential is accepted")
+m("a03", A, "    return credential_ok_cap(cred, max_credential());", "    return credential_ok_cap(cred, max_credential() + 1);", "unit", "a credential of 257 bytes is accepted")
+m("a04", A, "    if len(cred) < 1 || len(cred) > cap {", "    if len(cred) > cap {", "unit", "an empty credential is accepted")
 m("a05", A, " || c == '_' || c == '~' || c == '+' || c == '/' || c == '=';", " || c == '_' || c == '~' || c == '+' || c == '/';", "unit", "'=' is outside the alphabet")
 m("a06", A, " || c == '_' || c == '~' || c == '+' || c == '/' || c == '=';", " || c == '_' || c == '~' || c == '+' || c == '/' || c == '=' || c == ' ';", "unit", "a space is inside the alphabet")
 m("a07", A, 'is_lower(value[0..6], "bearer")', 'bytes.equal(value[0..6], "bearer")', "unit", "the scheme is case-sensitive")
@@ -85,7 +85,7 @@ m("n03", N, '        k = jnum(out, k, "malformed", stats[base + 26]);', '       
 F = "src/forward.cho"
 m("f01", F, "        if copy && is(name, strip) {", '        if copy && is(name, "authorization") {', "unit", "the header stripped is always Authorization")
 S = "src/shared.cho"
-m("l01", S, "        identity = auth.key_name(st[p + auth_slot()] - 1);", "        identity = auth.key_name(st[p + auth_slot()]);", ["the_log_names_the_identity_last_and_never_the_key", "a_valid_key_the_route_does_not_allow_is_a_403"], "the log names the next key")
+m("l01", S, "        identity = auth.identity(st[p + auth_slot()]);", "        identity = auth.identity(st[p + auth_slot()] + 1);", ["the_log_names_the_identity_last_and_never_the_key", "a_valid_key_the_route_does_not_allow_is_a_403"], "the log names the next key")
 m("l02", S, "    if st[p + auth_slot()] > 0 {\n        identity", "    if false {\n        identity", ["the_log_names_the_identity_last_and_never_the_key", "a_valid_key_the_route_does_not_allow_is_a_403"], "the log never names the caller")
 # ---- the proxy: end to end
 P = "src/proxy.cho"
@@ -103,11 +103,11 @@ m("p09", P, "st[p + 23] % 2 == 1, st[p + tlsio.f_mode()] != 0, shared.meta_get(c
 m("p10", P, "    metrics.auth_refused(contents(core.stats), sel, rule);", "    metrics.auth_refused(contents(core.stats), sel, 1);", ["the_counters_agree_with_what_the_clients_were_told"], "every refusal is counted as missing")
 m("p11", P, "    metrics.auth_refused(contents(core.stats), sel, rule);\n", "", ["the_counters_agree_with_what_the_clients_were_told"], "a refusal is not counted")
 m("p12", P, "        challenge = route.auth_challenge(st[p + 31] - 1);", '        challenge = "";', ["each_bad_credential_is_refused_with_its_status_its_rule_and_its_challenge"], "a 401 invites no credential")
-m("p13", P, "        let found = auth.lookup(auth.credential(view, tb, header));", '        let found = auth.lookup(auth.credential(view, tb, "authorization"));', ["a_valid_key_passes_and_the_credential_is_not_forwarded"], "the credential is always read from Authorization")
-m("p14", P, "    var rule = auth.parse(view, tb, header);", '    var rule = auth.parse(view, tb, "authorization");', ["each_bad_credential_is_refused_with_its_status_its_rule_and_its_challenge"], "the credential is always parsed from Authorization")
-m("p15", P, "auth.key_name(st[p + shared.auth_slot()] - 1), route.rate(sel)", 'auth.key_name(0 - 1), route.rate(sel)', ["authentication_comes_before_the_rate_limiter_and_the_identity_is_its_key"], "every caller shares the bucket of the empty key")
-m("p16", P, "auth.key_name(st[p + shared.auth_slot()] - 1), route.rate(sel)", "auth.key_name(st[p + shared.auth_slot()]), route.rate(sel)", ["authentication_comes_before_the_rate_limiter_and_the_identity_is_its_key"], "every caller spends its neighbour's bucket")
-m("p17", P, "        if found == 0 {\n            rule = 3;", "        if found < 0 {\n            rule = 3;", ["each_bad_credential_is_refused_with_its_status_its_rule_and_its_challenge"], "an unknown key is admitted as no one")
+m("p13", P, "        let cred = auth.credential(view, tb, header);", '        let cred = auth.credential(view, tb, "authorization");', ["a_valid_key_passes_and_the_credential_is_not_forwarded"], "the credential is always read from Authorization")
+m("p14", P, "    var rule = auth.parse_cap(view, tb, header, cap);", '    var rule = auth.parse_cap(view, tb, "authorization", cap);', ["each_bad_credential_is_refused_with_its_status_its_rule_and_its_challenge"], "the credential is always parsed from Authorization")
+m("p15", P, "auth.identity(st[p + shared.auth_slot()]), route.rate(sel)", 'auth.key_name(0 - 1), route.rate(sel)', ["authentication_comes_before_the_rate_limiter_and_the_identity_is_its_key"], "every caller shares the bucket of the empty key")
+m("p16", P, "auth.identity(st[p + shared.auth_slot()]), route.rate(sel)", "auth.identity(st[p + shared.auth_slot()] + 1), route.rate(sel)", ["authentication_comes_before_the_rate_limiter_and_the_identity_is_its_key"], "every caller spends its neighbour's bucket")
+m("p17", P, "            if found == 0 {\n                rule = 3;", "            if found < 0 {\n                rule = 3;", ["each_bad_credential_is_refused_with_its_status_its_rule_and_its_challenge"], "an unknown key is admitted as no one")
 m("p18", P, "    refuse(tab, core, k, auth.status(rule), auth.tag(rule), now);", "    refuse(tab, core, k, 401, auth.tag(rule), now);", ["a_valid_key_the_route_does_not_allow_is_a_403"], "a forbidden key is a 401")
 # ---- the generator
 G = "scripts/generate.py"
@@ -118,7 +118,7 @@ m("g04", G, "    if auth_routes and listen != 0 and not plain_ok:", "    if Fals
 m("g05", G, '"auth_header": lower,', '"auth_header": header,', "gen", "the header name is not lowercased")
 m("g06", G, '",".join(str(key_names.index(n)) for n in allowed)', '",".join(str(key_names.index(n) + 1) for n in allowed)', "gen", "a route's key list is shifted by one")
 m("g07", G, "AUTH_REFUSED_HEADERS = RATE_REFUSED_HEADERS + RATE_CLAIM_HEADERS + [", "AUTH_REFUSED_HEADERS = RATE_REFUSED_HEADERS + [", "gen", "a forwarding claim may carry a key")
-m("g08", G, "    if api_keys and not auth_routes:", "    if False:", "gen", "keys that protect nothing are compiled in")
+m("g08", G, '    if api_keys and not any(r["auth"] & 1 for r in routes):', "    if False:", "gen", "keys that protect nothing are compiled in")
 m("g09", G, '    if key == "a" and identities is None:', "    if False:", "gen", "the identity is a rate key on a route without one")
 m("g10", G, 'KEY_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,31}")', 'KEY_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}")', "gen", "a key name may be in uppercase")
 m("g11", G, '    if not isinstance(forward, bool):', "    if False:", "gen", "auth_forward may be a string")
@@ -128,7 +128,7 @@ m("g14", G, '        challenge = \'ApiKey realm="cancho-gateway", header="%s"\' 
 m("g15", G, '"%s\\t%s\\n" % k for k in api_keys', '"%s\\t%s\\n" % (k[0], k[1].upper()) for k in api_keys', "gen", "the digests are compiled in uppercase")
 m("g17", G, "        if crowded:", "        if False:", "gen", "more identities than a set of four buckets can hold are accepted")
 m("g18", G, "            slot = 0 if sets < 2 else (h1 + h2) % 2147483647 % sets", "            slot = 0 if sets < 2 else h1 % sets", "gen", "the set is chosen by another hash than the gateway's")
-m("g16", G, '        if auth["auth"] and not api_keys:', "        if False:", "gen", "a route nobody can enter is accepted")
+m("g16", G, '        if auth["auth"] & 1 and not api_keys:', "        if False:", "gen", "a route nobody can enter is accepted")
 M_ = "scripts/mkkey.py"
 m("s01", M_, '    return "ck_" + base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("=")', '    return "ck_" + base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()', "gen", "a key ends in '='")
 m("s02", M_, '    print("key for %s (shown once; the gateway cannot show it again): %s" % (names[0], key), file=sys.stderr)', '    print("key for %s (shown once; the gateway cannot show it again): %s" % (names[0], key))', "gen", "the key goes to standard output, where a redirect would put it in the file")

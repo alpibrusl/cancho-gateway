@@ -1,6 +1,7 @@
 # Authentication (task #8)
 
-Status: **built (2026-10-12).** Sections 1 to 11 are the design, written before the code; section 12 is what was built and measured. The gates in section 10 are fixed here and must
+Status: **built (2026-10-12).** Sections 1 to 11 are the design, written before the code; section 12 is what was built and measured. **JWT, the "next slice" of section 11.2, is built and has its own document: `docs/jwt.md`.** Where this
+document's sketch of it differed from what was decided, section 11.2 below is corrected in place and says so. The gates in section 10 are fixed here and must
 be able to fail. A claim found false later is corrected in place and marked *(corrected)*. Claims about cancho are about the pinned compiler (`cancho.toml`, `2fcf4cd`).
 
 `docs/headers.md` section 2 recorded the rule this task has to keep: **a credential the gateway itself checks is removed before the request is forwarded.** `docs/ratelimit.md`
@@ -31,7 +32,7 @@ a TLS-terminating front is in front; generator rules, tests, mutants.
 
 | not done | why |
 |---|---|
-| JWT / HMAC-signed tokens | a verifier with a secret in the binary, a clock and a claims policy is a task of its own; the design for it is section 11 |
+| JWT / HMAC-signed tokens | *(corrected: built in the next slice, `docs/jwt.md`, for `EdDSA` with a public key only; HS256 was not built because its verifier needs the secret)* |
 | rotating keys without a restart | the digests are compiled in (that is the requirement). Rotation by overlap needs only a restart (section 7); a `SIGHUP` could re-read a key file but that would add a file read to the authority row, so it is not built (section 11) |
 | mutual TLS (client certificates) | the TLS engine does not ask for or verify client certificates (`docs/tls.md`) |
 | `Basic`, `Digest`, OAuth introspection, cookies, sessions | not asked for; each is a different credential with a different threat |
@@ -61,7 +62,7 @@ read different ones; "and/or" is therefore resolved per route, not per request.
 4. **Case**: the header name and the scheme are case-insensitive; **the credential is case-sensitive** and hashed exactly as sent. No normalisation, trimming of the inside, decoding or Unicode handling happens to it.
 5. A header present but empty is not missing: it is `auth.malformed` (the client tried and sent nothing).
 
-`scripts/mkkey.py` makes keys of the form `ck_` followed by 43 characters of URL-safe base64 (256 bits), all inside the credential alphabet.
+`scripts/mkkey.py` makes keys of the form `ck_` followed by 43 characters of URL-safe base64 (256 bits), all inside the credential alphabet. *(Added with JWT, `docs/jwt.md` section 12.1: on a route that accepts both API keys and tokens, a credential with exactly two `.` is a token and is never looked up as a key, so **a key containing two dots cannot be used on such a route**. A key made by `mkkey.py` has none; the generator cannot see a key, only its digest, so this is a requirement on whoever makes keys.)*
 
 **Removal before forwarding.** The credential header is **removed from the request the upstream gets** (`forward.rewrite`), whichever source it came from, so that a key checked here is never in an upstream's logs, its error pages
 or its debugging output. `auth_forward = true` on a route keeps it, for an upstream that also checks the same credential (for example an application that reads the bearer token for its own purposes); the default is the conservative one.
@@ -277,9 +278,11 @@ Each must be able to fail, with a mutant shown failing it (section 12 records th
   decided when a first user wants it.
 - Per-key rate and burst; per-key method and path rules.
 
-### 11.2 JWT (next slice)
+### 11.2 JWT (next slice: now built, `docs/jwt.md`)
 
-Not built; a design to review before any code.
+*(Corrected.)* This table was the sketch; `docs/jwt.md` is the decision and section 12.2 of that document lists where they differ: **EdDSA only** (HS256 is not built: its verifier needs the secret, which would widen the authority row or put the secret in the binary);
+a token whose `alg` differs from the route's is `jwt.alg` in the log and **`auth.invalid` / `invalid_token` to the client** (not `auth.malformed`); the identity is **the verifying key's name, not `sub`**, and `rate_key = "auth"` is refused on a route that accepts
+tokens (the table-sizing rule of section 9 does not hold for unbounded subjects); structure, claims and clock are as `docs/jwt.md` sections 4, 5 and 7 say, with a clock floor that the sketch lacked. The rest of this table is kept as it was written.
 
 | decision | choice | why |
 |---|---|---|
@@ -446,6 +449,6 @@ The three that survive, and why no test can or should kill them:
 
 ### 12.5 Not done
 
-JWT (section 11.2 is a design); a key change without a restart; client certificates; passing the identity to the upstream; per-key rates and per-key methods; keys in the query string (refused by omission); authentication of the
+JWT (built in the next slice: `docs/jwt.md`); a key change without a restart; client certificates; passing the identity to the upstream; per-key rates and per-key methods; keys in the query string (refused by omission); authentication of the
 admin listener; a route that is "TLS only" inside a deployment that also serves plain (section 7.3). The differential against nginx (`tests/headers/differential.py`) compares what is forwarded on a route that has no
 authentication and was not changed by this work.
