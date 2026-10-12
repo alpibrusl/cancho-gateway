@@ -1,6 +1,6 @@
 # Authentication (task #8)
 
-Status: **design, written before the code.** Sections 1 to 11 are the design; section 12 is filled in when it is built and measured. The gates in section 10 are fixed here and must
+Status: **built (2026-10-12).** Sections 1 to 11 are the design, written before the code; section 12 is what was built and measured. The gates in section 10 are fixed here and must
 be able to fail. A claim found false later is corrected in place and marked *(corrected)*. Claims about cancho are about the pinned compiler (`cancho.toml`, `2fcf4cd`).
 
 `docs/headers.md` section 2 recorded the rule this task has to keep: **a credential the gateway itself checks is removed before the request is forwarded.** `docs/ratelimit.md`
@@ -54,7 +54,7 @@ read different ones; "and/or" is therefore resolved per route, not per request.
 **Exact parsing** (`src/auth.cho`; the same function for both sources; the rule tag is what the client gets, each one a test):
 
 1. **Exactly one header** of that name (name compared without regard to case). None: `auth.missing`. Two or more, even identical: `auth.malformed`. The gateway never picks one: the upstream might pick the other.
-2. The value, with leading and trailing blanks (SP, HT) removed, is the **field**. For `Authorization` it must be the scheme `Bearer` (any case, RFC 9110 11.1), **exactly one space** and the credential. Anything else
+2. The value, with leading and trailing blanks (SP, HT) removed (the parser does it, `std.http`; a unit test pins that), is the **field**. For `Authorization` it must be the scheme `Bearer` (any case, RFC 9110 11.1), **exactly one space** and the credential. Anything else
    (another scheme, no space, two spaces, a tab, nothing after the scheme) is `auth.malformed`: a request carrying `Basic ...` is told so, not treated as anonymous.
 3. The **credential** is 1 to **256 bytes** of `[A-Za-z0-9._~+/=-]` (the `token68` syntax of RFC 9110 11.2). An empty credential, one longer than 256, or one with any other byte (a space inside it, a comma, a quote,
    a control byte, a byte above 0x7f) is `auth.malformed`. The limit is on the credential, not the head: the head is bounded by `limit.head` before this runs.
@@ -132,7 +132,7 @@ which `ps` shows) and prints the same table. Nothing is logged by the script.
     rate_limit = "100/s"
     rate_key = "auth"                    # one bucket per identity
 
-Refusals, all `config.auth` with the key and the line of the file, each with one test in `tests/generate_test.py`:
+Refusals, all `config.auth` with the key and the line of the file, each with one test in `tests/generate_test.py` (rules 1 to 15 as first written; 16 was added by the build):
 
 | # | rule |
 |---|---|
@@ -151,6 +151,7 @@ Refusals, all `config.auth` with the key and the line of the file, each with one
 | 13 | a route with `auth` while the deployment has a plain `listen` and `auth_allow_plain` is not `true` (section 7.3) |
 | 14 | `auth_allow_plain` that is not a boolean, or set without a plain `listen` and an `auth` route |
 | 15 | `rate_key = "auth"` on a route without `auth` (`config.ratelimit`: there is no identity to key on) |
+| 16 | *(added in the build)* `rate_key = "auth"` on a route whose admitted key names would put more than four in one set of its rate table (`config.ratelimit`, section 9) |
 
 **Per-route key sets and `403`.** A key may be valid and not allowed on a route (`auth_keys`). That is `auth.forbidden`, **403**, not 401: the client did authenticate, and re-sending the same credential will not help. It
 tells the holder of a valid key that the key is valid; it tells nobody else anything, since an invalid credential never reaches that test. An unknown key and a wrong key are one case and get one answer (section 4.3).
@@ -219,7 +220,7 @@ deployment has to say:
 | a key on the wire | protected only by TLS (`tls_listen`, or a front that terminates it). On a plain listener a key is sent in clear. Section 7.3 makes the operator say so |
 | the key in an upstream's log | **prevented by default**: the credential header is removed (`auth_forward = false`). With `auth_forward = true` it is the upstream's to protect |
 | the key in a URL | not accepted from the query string at all |
-| the key in the gateway's own log | never: the access log has no headers and no query; the problem body never echoes the credential; the log carries the **name**, not the key or its digest |
+| the key in the gateway's own log | never: the access log has no headers and no query; the problem body never echoes the credential; the log carries the **name**, not the key or its digest. The name is written for a request that authenticated, including one answered `auth.forbidden` (403: the key was valid); a 401 names nobody |
 | the binary or the deployment file is stolen | holds digests of 256-bit keys: not usable as credentials. Not true of a key a person chose (section 4.1) |
 | **replay** | a captured credential works until the key is removed from the binary. There is no nonce, no signature over the request and no expiry: that is what an API key is. Over TLS capture needs the endpoint; the exposure is a leak at the client or at an upstream that logs it |
 | **brute force by guessing** | 256-bit keys are not guessable. A key a person chose is: the gateway has no per-address limit (no peer address), so an online guess is limited only by what the gateway can answer, and an attacker who knows a key's digest can guess offline. Use `mkkey.py` |
@@ -237,8 +238,12 @@ Built, because it is small: the key of the bucket is the **name** of the authent
 passed the header value. The generator requires `auth` on the route (rule 15). The decisions:
 
 - Every identity has its own bucket of the route's rate and burst, so one caller cannot spend another's budget, and **a caller cannot make a new bucket by changing a string**: there are at most 64 identities.
-- A request that did not authenticate never gets here, so there is no "absent" bucket for this key and an attacker cannot fill the table with junk identities (`docs/ratelimit.md` section 3.3, last row: for `auth` the
-  table holds at most 64 keys per route and `rate_buckets` of 4 is enough for four identities; the default 1,024 is far more than needed and can be lowered).
+- A request that did not authenticate never gets here, so there is no "absent" bucket for this key and an attacker cannot fill the table with junk identities (`docs/ratelimit.md` section 3.3, last row).
+- **The table can never refuse an identity.** The names are known when the deployment is generated, so whether four of them land in one set of four buckets is known then too. *(Added in the build; the design had
+  said that a table of four is enough for four identities and the default 1,024 for 64, which is true of chance and not of any particular set of names: with 64 names in 256 sets, the odds that some set gets five are about
+  one in seven hundred, and that is a legitimate caller answered `limit.rate-table`.)* `scripts/generate.py` computes the set of every admitted name with the same two hashes as `src/ratelimit.cho` and refuses the route
+  (rule 16) if any set would hold more than four. A unit test pins the generator's copy of the hash against the gateway's. Then `limit.rate-table` cannot be the answer to an authenticated caller, whatever else is in
+  the table, because no bucket of a set is ever needed by a fifth name.
 - The name is the key, not the digest: the table lives in memory in the process and is never output; the name is the thing the log shows too.
 
 ## 10. Gates, fixed before the code
@@ -249,7 +254,7 @@ Each must be able to fail, with a mutant shown failing it (section 12 records th
    header, a tab, two spaces, `Bearer` alone, another scheme in any case, 256 and 257 bytes, every byte value outside the alphabet, two headers; a key that matches the first, the last and a middle entry; a digest that
    differs in the first and in the last digit; a credential that is a prefix of a key, and a key that is a prefix of the credential; the full table of 64 keys; zero keys; a credential of 0 and of 10,000 bytes (no panic); the
    challenge text for each rule.
-2. **The generator** (`tests/generate_test.py`): each of the 15 rules of section 6 has one refusal test with the key and a line; the accepted forms; the generated table; the counts of that file updated.
+2. **The generator** (`tests/generate_test.py`): each of the 16 rules of section 6 has one refusal test with the key and a line; the accepted forms; the generated table; the counts of that file updated.
 3. **End to end** (`tests/auth_test.py`, the built gateway, a recording upstream): a valid key passes and **the credential is not in what the upstream recorded** (both sources); `auth_forward = true` keeps it; missing, empty,
    duplicate, another scheme, oversized and wrong credentials are each refused with the right status, the right rule, and `WWW-Authenticate` where section 7.2 says; **an unknown key and a wrong key give byte-identical
    responses but for the id**; unauthenticated routes are unaffected; **a refused request never reaches the upstream**; **authentication happens before the rate limiter**: a flood of bad credentials on a route with a limit of one
@@ -290,4 +295,157 @@ Not built; a design to review before any code.
 
 ## 12. As built
 
-*To be filled in when built.*
+Built 2026-10-12 on the pinned compiler. Files: `src/auth.cho` (the module, pure, 287 lines), `src/route.cho` (five accessors of the generated record), `src/problem.cho` (`response_challenge`, the `WWW-Authenticate` header),
+`src/forward.cho` (`rewrite_auth` and `rewrite_upgrade_auth`, which do not copy the credential header), `src/accesslog.cho` (`line_as`, the `identity` key), `src/metrics.cho` (four counters per route),
+`src/shared.cho` (the client slot's field 43, the key a request authenticated as, and the log line), `src/proxy.cho` (`unauthenticated`, 30 lines, called right after routing; the rate limiter's `auth` key; the stripping in `attach`),
+`scripts/generate.py` (the keys and 16 rules), `scripts/mkkey.py`. `proxy.cho` is 1,683 lines and `shared.cho` 443: the ceiling is not near. **The authority report does not change**: no label moves. `manifests/`
+differ by the names of the new pure functions, and `docs/proof.html` by their count (961 to 989); `std.crypto.sha256` is pure. The deployment example `deploy/example.toml` has no key and its generated tables are the old
+ones plus an empty key table.
+
+### 12.1 What the build found false in the design
+
+- *(corrected)* **The table could refuse a legitimate caller.** Section 9 first said that a rate table of four buckets is enough for four identities and the default 1,024 for 64. That is true of chance and not of any set of names:
+  64 names in 256 sets of four put five in one set about one time in seven hundred, and the fifth would be answered `limit.rate-table`. The generator now computes the sets (rule 16, section 6) and a unit test pins its copy of the
+  hash to the gateway's.
+- *(corrected)* A `trim` of the header value in `auth.credential` was redundant: the parser has already taken the blanks off. Its mutant (a11) survived the whole suite, so the guard was removed rather than excused, and the
+  test that sends blanks around a Bearer token stays as the pin on the parser.
+- The `Content-Length` in section 7.2's example was 117; the body is 112 bytes.
+- A guard in `forward.rewrite_with` (`len(strip) > 0`) was redundant for the same reason (a header name is never empty, so it never equals an empty `strip`) and was removed before its mutant was run.
+- The first mutant table had one mutant that did not build its edit (g15: the edit's text had a stray parenthesis; the mutant's file was wrong, not the tests) and one pair that no test could kill by design (below).
+- The route record gained five fields (17 to 21, `auth`, header, forward, key list, challenge); the example deployment's table and `tests/fixtures/long` only change by the empty fields at the end of each line.
+
+### 12.2 Tests
+
+| suite | result |
+|---|---|
+| `cancho test` | 12 suites, **140 tests, 0 failures**: `auth` 19 (new suite), `accesslog` 14 (2 new), `metrics` 13 (1 new), `problem` 7 (1 new), `forward` 22 (2 new), `ratelimit` 25 (1 new), the rest unchanged |
+| `python3 tests/auth_test.py` | **14 tests, 0 failures** (run three times) |
+| `python3 tests/generate_test.py` | 7 prefix cases, **235 refusal cases** (69 new: the 16 rules, their variants, and the checks of `mkkey.py`), **35 accepted** (12 new), 0 failures |
+| `python3 tests/proxy_test.py` | 77 tests, 0 failures, three runs |
+| `python3 tests/admin_test.py`, `tls_test.py`, `websocket_test.py`, `ratelimit_test.py` | 16, 22, 55 (2 skipped: the `websockets` library is not installed), 16; 0 failures |
+| smuggling (`--gateway`, `--prefixes`, `--chunked`, `--fuzz 1500`), `tests/response/run.py`, `tests/route_test.py 12 400` and `--fixed` | 0 failures |
+| `tests/headers/differential.py` (nginx 1.24) | 114 comparisons, 36 differences, all listed, 0 failures: unchanged by this work |
+
+Two existing tests changed because of this work: `tests/admin_test.py` and `tests/ratelimit_test.py` list the members of a route's metrics object, which now ends with `auth_refused`; `tests/ratelimit_test.py`'s `Gateway`
+takes a `top` argument for top-level keys (`auth_allow_plain`), which `tests/auth_test.py` uses. `tests/metrics_bound_test.cho` is unchanged: the offsets of the rule table do not move (the counters are in free slots of the
+route's block), and the worst-case bound is still within a tenth of the largest answer on both deployments.
+
+Not covered by a test, said once: the *timing* of the comparison (section 12.3 measures it and does not gate it) and a flood of refusals that fills the slot table (the shared property of every refusal, `docs/ratelimit.md` section 3.2).
+
+### 12.3 The timing of the comparison, measured (`python3 tests/auth_timing.py 3000`)
+
+3,000 interleaved requests per case through the built gateway, over loopback, on the development machine; microseconds for connect, request and the whole `401`. Not a gate.
+
+| credential | median | p25 | p75 | median vs the first |
+|---|---|---|---|---|
+| no resemblance to a key | 145 | 130 | 170 | |
+| all but the last character of a key | 145 | 130 | 170 | +0.2% |
+| the first character wrong | 144 | 131 | 171 | -0.1% |
+| a prefix of a key | 145 | 130 | 170 | +0.3% |
+| 256 characters | 148 | 134 | 174 | +2.1% |
+
+How much of a key was right does not show, to within the noise of a loopback exchange. The credential's own length does, a little (five blocks of SHA-256 instead of one or two), as section 4.3 said it would. That is all the
+measurement says: a 150 microsecond round trip cannot see a nanosecond difference, and a difference that small is not what the design relies on (section 4.3 says why).
+
+### 12.4 Mutants (`python3 tests/auth_mutants.py`)
+
+81 single edits of the new code, each in a copy of the tree; a mutant is killed by `cancho test` (unit), by the generator's tests (which run `mkkey.py` too), or by the end-to-end test (the tests named first run first, then the
+whole file). **78 killed, 3 survive and are argued, 0 invalid** (the run listed 80: one survivor, the `trim`, led to the guard's removal and its mutant with it; the one that did not build was fixed; two were added with rule 16 and
+killed; `a12`, `g09`, `g15`, `g17` and `g18` were run again after the changes).
+
+The three that survive, and why no test can or should kill them:
+
+- **e01, e02: a comparison that stops early.** Stopping at the first differing digit, or at the first matching key, changes how long a refusal takes and never what it says. Section 4.3 states that the property is a property of the
+  source; a functional test cannot observe it, a timing test on a shared machine proves nothing (section 12.3), and the code review is the check. Kept in the table so that the claim has its edit written down.
+- **p16: every caller spends the next key's bucket.** A relabelling: caller *i* uses the bucket named after key *i + 1* (the last, the empty name). Each caller still has exactly one bucket of its own, no two share one, and the
+  table is the same size, so nothing a client or the log can see tells it from the right mapping. A bug of that shape would only matter if the bucket's name were shown somewhere; it is not.
+
+| id | edit | verdict | killed first by |
+|---|---|---|---|
+| a01 | a header twice is accepted | killed | `test_a_header_twice_is_malformed_even_when_both_are_the_same_good_key` |
+| a02 | a missing header is malformed | killed | `test_no_header_is_missing_and_an_empty_one_is_not` |
+| a03 | a credential of 257 bytes is accepted | killed | `test_a_credential_of_256_bytes_is_accepted_and_of_257_is_not` |
+| a04 | an empty credential is accepted | killed | `test_a_credential_of_any_length_is_hashed_without_a_panic` |
+| a05 | '=' is outside the alphabet | killed | `test_a_bearer_token_is_the_credential` |
+| a06 | a space is inside the alphabet | killed | `test_a_header_is_the_credential_whole` |
+| a07 | the scheme is case-sensitive | killed | `test_a_bearer_token_is_the_credential` |
+| a08 | any byte may follow the scheme | killed | `test_the_scheme_and_its_one_space_are_exact` |
+| a09 | the scheme alone is read past its end | killed | `test_the_scheme_and_its_one_space_are_exact` |
+| a10 | a Bearer token is the whole value | killed | `test_a_bearer_token_is_the_credential` |
+| a12 | every header is read as a Bearer token | killed | `test_a_header_is_the_credential_whole` |
+| a13 | a header name is case-sensitive | killed | `test_a_bearer_token_is_the_credential` |
+| c01 | the digest is written in uppercase | killed | `test_the_digest_of_known_credentials_is_the_sha256_in_lowercase_hex` |
+| c02 | the last digit of a digest is not compared | killed | `test_a_digest_that_differs_in_the_first_or_the_last_digit_is_not_a_match` |
+| c03 | the first digit of a digest is not compared | killed | `test_a_digest_that_differs_in_the_first_or_the_last_digit_is_not_a_match` |
+| c04 | only the last digit decides | killed | `test_a_key_is_found_at_the_first_a_middle_and_the_last_place_and_nowhere_else` |
+| c05 | a digit one bit off is a match | killed | `test_a_digest_that_differs_in_the_first_or_the_last_digit_is_not_a_match` |
+| c06 | the first key is index 0, which means none | killed | `test_a_key_is_found_at_the_first_a_middle_and_the_last_place_and_nowhere_else` |
+| c07 | the digest is read from the tab | killed | `test_a_key_is_found_at_the_first_a_middle_and_the_last_place_and_nowhere_else` |
+| c08 | a digest past the table's end is read | killed | `test_a_table_with_no_key_or_a_damaged_line_matches_nothing_and_reads_nothing_out_of_range` |
+| c09 | only the last key can be found | killed | `test_a_key_is_found_at_the_first_a_middle_and_the_last_place_and_nowhere_else` |
+| c10 | half the credential is hashed | killed | `test_the_digest_of_known_credentials_is_the_sha256_in_lowercase_hex` |
+| c11 | a key is named by its digest | killed | `test_a_key_is_found_at_the_first_a_middle_and_the_last_place_and_nowhere_else` |
+| c12 | a key is named by its neighbour | killed | `test_a_key_is_found_at_the_first_a_middle_and_the_last_place_and_nowhere_else` |
+| e01 | a digest comparison stops at its first difference | survives | argued: a comparison that stops at its first difference gives every answer the full one does; only its time differs, and no functional test can see a time (section 4.3) |
+| e02 | the keys after a match are not compared | survives | argued: the same, for the keys after a match; two keys cannot share a digest, so nothing after a match could match |
+| f01 | the header stripped is always Authorization | killed | `test_the_credential_header_the_route_read_is_not_forwarded` |
+| g01 | an uppercase digest is accepted | killed | generate_test: the refusal case of config.auth at line 8 (accepted, exit 0) |
+| g02 | two names may share a digest | killed | generate_test: the refusal case of config.auth at line 11 (accepted, exit 0) |
+| g03 | 65 keys are accepted | killed | generate_test: the refusal case of config.auth (no line named) (accepted, exit 0) |
+| g04 | a key may cross a plain listener without the flag | killed | generate_test: the refusal case of config.auth at line 11 (accepted, exit 0) |
+| g05 | the header name is not lowercased | killed | generate_test: the compiled routes table |
+| g06 | a route's key list is shifted by one | killed | generate_test: the compiled routes table |
+| g07 | a forwarding claim may carry a key | killed | generate_test: the refusal case of config.auth at line 13 (accepted, exit 0) |
+| g08 | keys that protect nothing are compiled in | killed | generate_test: the refusal case of config.auth at line 6 (refused with the wrong rule or line) |
+| g09 | the identity is a rate key on a route without one | killed | generate_test: the refusal case of config.ratelimit at line 13 (refused with the wrong rule or line) |
+| g10 | a key name may be in uppercase | killed | generate_test: the refusal case of config.auth at line 7 (accepted, exit 0) |
+| g11 | auth_forward may be a string | killed | generate_test: the refusal case of config.auth at line 13 (accepted, exit 0) |
+| g12 | two keys may share a name | killed | generate_test: the refusal case of config.auth at line 10 (accepted, exit 0) |
+| g13 | the flag is accepted without a plain listener | killed | generate_test: the refusal case of config.auth at line 3 (accepted, exit 0) |
+| g14 | a route that reads X-Api-Key invites a Bearer token | killed | generate_test: the compiled routes table |
+| g15 | the digests are compiled in uppercase | killed | generate_test: the compiled routes table |
+| g16 | a route nobody can enter is accepted | killed | generate_test: the refusal case of config.auth at line 9 (accepted, exit 0) |
+| g17 | more identities than a set of four buckets can hold are accepted | killed | generate_test: the refusal of five keys in four buckets |
+| g18 | the set is chosen by another hash than the gateway's | killed | generate_test: the refusal of five keys in two sets |
+| k01 | a route that allows every key allows none | killed | `test_a_routes_key_list_allows_all_or_the_keys_it_names` |
+| k02 | a route's list is shifted by one | killed | `test_a_routes_key_list_allows_all_or_the_keys_it_names` |
+| k03 | a huge number in a list overflows | killed | `test_a_routes_key_list_allows_all_or_the_keys_it_names` |
+| k04 | a forbidden key is a 401 | killed | `test_the_rules_have_a_tag_and_a_status` |
+| k05 | an unknown key is called malformed | killed | `test_the_rules_have_a_tag_and_a_status` |
+| l01 | the log names the next key | killed | `e2e a_valid_key_the_route_does_not_allow_is_a_403` |
+| l02 | the log never names the caller | killed | `e2e a_valid_key_the_route_does_not_allow_is_a_403` |
+| n01 | the counters are one slot too far | killed | `test_auth_refusals_are_counted_per_route_and_kind_and_shown_in_both_formats` |
+| n02 | a fifth kind is written past the counters | killed | `test_auth_refusals_are_counted_per_route_and_kind_and_shown_in_both_formats` |
+| n03 | malformed shows the missing count | killed | `test_auth_refusals_are_counted_per_route_and_kind_and_shown_in_both_formats` |
+| p01 | authentication is never applied | killed | `e2e each_bad_credential_is_refused_with_its_status_its_rule_and_its_challenge` |
+| p02 | authentication comes after the rate limiter | killed | `e2e authentication_comes_before_the_rate_limiter_and_the_identity_is_its_key` |
+| p03 | a refused upgrade keeps its place among the tunnels | killed | `e2e a_websocket_upgrade_is_authenticated_and_a_refused_one_takes_no_tunnel_place` |
+| p04 | the caller is not remembered | killed | `e2e authentication_comes_before_the_rate_limiter_and_the_identity_is_its_key` |
+| p05 | a key is allowed on every route | killed | `e2e a_valid_key_the_route_does_not_allow_is_a_403` |
+| p06 | only the first key is ever allowed | killed | `e2e a_valid_key_the_route_does_not_allow_is_a_403` |
+| p07 | the credential is forwarded | killed | `e2e a_valid_key_passes_and_the_credential_is_not_forwarded` |
+| p08 | the credential is never forwarded | killed | `e2e auth_forward_keeps_the_credential` |
+| p09 | the credential reaches a WebSocket upstream | killed | `e2e a_websocket_upgrade_is_authenticated_and_a_refused_one_takes_no_tunnel_place` |
+| p10 | every refusal is counted as missing | killed | `e2e the_counters_agree_with_what_the_clients_were_told` |
+| p11 | a refusal is not counted | killed | `e2e the_counters_agree_with_what_the_clients_were_told` |
+| p12 | a 401 invites no credential | killed | `e2e each_bad_credential_is_refused_with_its_status_its_rule_and_its_challenge` |
+| p13 | the credential is always read from Authorization | killed | `e2e a_valid_key_passes_and_the_credential_is_not_forwarded` |
+| p14 | the credential is always parsed from Authorization | killed | `e2e each_bad_credential_is_refused_with_its_status_its_rule_and_its_challenge` |
+| p15 | every caller shares the bucket of the empty key | killed | `e2e authentication_comes_before_the_rate_limiter_and_the_identity_is_its_key` |
+| p16 | every caller spends its neighbour's bucket | survives | argued: every caller spends the bucket of the next key's name (the last, the empty key's): a relabelling of buckets, one per caller, that nothing outside the table can tell from the right one |
+| p17 | an unknown key is admitted as no one | killed | `e2e each_bad_credential_is_refused_with_its_status_its_rule_and_its_challenge` |
+| p18 | a forbidden key is a 401 | killed | `e2e a_valid_key_the_route_does_not_allow_is_a_403` |
+| q01 | a 403 carries a challenge | killed | `test_a_401_carries_the_routes_challenge_and_no_other_response_does` |
+| q02 | an unknown key is told its credential was not asked for | killed | `test_a_401_carries_the_routes_challenge_and_no_other_response_does` |
+| q03 | a malformed credential is told it was missing | killed | `test_a_401_carries_the_routes_challenge_and_no_other_response_does` |
+| q04 | a 401 has no reason | killed | `test_a_401_carries_the_routes_challenge_and_no_other_response_does` |
+| s01 | a key ends in '=' | killed | generate_test: the check of scripts/mkkey.py |
+| s02 | the key goes to standard output, where a redirect would put it in the file | killed | generate_test: the check of scripts/mkkey.py |
+| s03 | the digest is written in uppercase | killed | generate_test: the check of scripts/mkkey.py |
+| s04 | a key of 64 bits | killed | generate_test: the check of scripts/mkkey.py |
+
+### 12.5 Not done
+
+JWT (section 11.2 is a design); a key change without a restart; client certificates; passing the identity to the upstream; per-key rates and per-key methods; keys in the query string (refused by omission); authentication of the
+admin listener; a route that is "TLS only" inside a deployment that also serves plain (section 7.3). The differential against nginx (`tests/headers/differential.py`) compares what is forwarded on a route that has no
+authentication and was not changed by this work.

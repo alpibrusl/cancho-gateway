@@ -445,7 +445,7 @@ class Main:
         assert gw.route_metrics("rroute")["rate_limited"] >= 9
         m = gw.metrics()
         assert m["refusals"]["limit.rate"] >= 20 and m["refusals"]["limit.rate-table"] == 1, m["refusals"]
-        assert list(gw.route_metrics("rroute"))[-2:] == ["rate_limited", "rate_table_full"]
+        assert list(gw.route_metrics("rroute"))[-3:] == ["rate_limited", "rate_table_full", "auth_refused"]   # the auth counters follow the rate-limit ones (docs/auth.md section 12)
         prom = gw.admin_get("/metrics?format=prometheus").decode()
         assert '# TYPE cancho_gateway_rate_limited_total counter' in prom and '# TYPE cancho_gateway_rate_table_full_total counter' in prom
         assert 'cancho_gateway_rate_limited_total{route="rroute"} %d' % gw.route_metrics("rroute")["rate_limited"] in prom
