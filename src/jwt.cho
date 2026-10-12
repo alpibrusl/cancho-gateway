@@ -170,7 +170,7 @@ pub fn b64url_decode[&s, &o](s: &s [byte], out: &!o [byte]) -> [] int {
     if !b64url_valid(s) {
         return 0 - 1;
     }
-    let n = len(s) / 4 * 3 + (len(s) % 4) * 3 / 4;
+    let n = len(s) / 4 * 3 + len(s) % 4 * 3 / 4;
     if len(out) < n {
         return 0 - 1;
     }

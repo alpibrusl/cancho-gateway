@@ -55,7 +55,7 @@ pub fn retry_after() -> [] int {
     return 42;
 }
 
-// Client slot field 43: the key a request authenticated as (docs/auth.md), its index plus 1, 0 if it did not authenticate. The access log names it. Cleared with 40 to 47 when a client is accepted.
+// Client slot field 43: the key a request authenticated as (docs/auth.md): an API key's index plus 1, a JWT key's index plus 101 (docs/jwt.md), 0 if it did not authenticate. The access log names it. Cleared with 40 to 47 when a client is accepted.
 pub fn auth_slot() -> [] int {
     return 43;
 }
@@ -310,7 +310,7 @@ pub fn log_end[&c](core: &!c Core, k: int) -> [] int {
     }
     var identity = "";
     if st[p + auth_slot()] > 0 {
-        identity = auth.key_name(st[p + auth_slot()] - 1);
+        identity = auth.identity(st[p + auth_slot()]);
     }
     var wait_ms = 0 - 1;
     if st[p + 26] > 0 && st[p + 25] > 0 {
