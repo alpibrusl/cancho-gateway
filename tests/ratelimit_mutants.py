@@ -63,9 +63,10 @@ m("k07", R, "    if len(spec) < 3 {\n        return src[0..0];\n    }", "", "uni
 m("k08", R, "    if len(a) != len(lower) {\n        return false;\n    }\n    var i = 0;\n    while i < len(a) {\n        if bytes.to_lower(int_of(a[i])) != int_of(lower[i]) {", "    var i = 0;\n    while i < len(lower) {\n        if bytes.to_lower(int_of(a[i])) != int_of(lower[i]) {", "unit", "a header whose name extends the key's is the key")
 # ---- the proxy, the refusal, the counters: end to end
 P = "src/proxy.cho"
+SL = "src/slots.cho"
 m("p01", P, "    if rate_limited(tab, core, k, sel, view, tb, now) {", "    if false && rate_limited(tab, core, k, sel, view, tb, now) {", ["over_the_limit_is_a_429_with_a_retry_after_and_the_upstream_never_sees_it"], "the limit is never applied")
 m("p02", P, "    st[p + shared.ws_mode()] = 0;\n    if verdict > ratelimit.route_offset() {", "    if verdict > ratelimit.route_offset() {", ["an_upgrade_is_limited_and_a_limited_upgrade_takes_no_tunnel_place"], "a limited upgrade keeps its place among the tunnels")
-m("p03", P, '        refuse(tab, core, k, 429, "limit.rate", now);', '        refuse(tab, core, k, 429, "limit.rate-table", now);', ["over_the_limit_is_a_429_with_a_retry_after_and_the_upstream_never_sees_it"], "a spent bucket is reported as a full table")
+m("p03", P, '        slots.refuse(tab, core, k, 429, "limit.rate", now);', '        slots.refuse(tab, core, k, 429, "limit.rate-table", now);', ["over_the_limit_is_a_429_with_a_retry_after_and_the_upstream_never_sees_it"], "a spent bucket is reported as a full table")
 m("p04", P, "        st[p + shared.retry_after()] = verdict;", "        st[p + shared.retry_after()] = 0;", ["over_the_limit_is_a_429_with_a_retry_after_and_the_upstream_never_sees_it"], "limit.rate carries no Retry-After")
 m("p05", P, "    if route.rate(sel) == 0 {\n        return false;", "    if false {\n        return false;", ["under_the_limit_everything_passes"], "a route with no limit is limited")
 m("p06", P, "        metrics.rate_refused(contents(core.stats), sel, false);", "", ["the_counters_agree_with_what_the_clients_were_told"], "limit.rate is not counted")
@@ -111,7 +112,7 @@ m("c12", R, "    if wait == 0 {\n        return 0;\n    }", "    if wait <= 0 {\
 m("e01", P, "element, route.rate(sel), route.rate_per_ms(sel), route.rate_burst(sel), route.rate_ceiling_at(sel), route.rate_ceiling(sel),", "element, route.rate(sel), route.rate_per_ms(sel), route.rate_burst(sel), route.rate_ceiling_at(sel), 0,", ["forty_distinct_keys_against_a_ceiling_of_five_admit_exactly_five"], "the ceiling is never applied")
 m("e02", P, "        metrics.rate_route_refused(contents(core.stats), sel);", "        metrics.rate_refused(contents(core.stats), sel, false);", ["forty_distinct_keys_against_a_ceiling_of_five_admit_exactly_five"], "a ceiling refusal is counted as the key's")
 m("e03", P, "        metrics.rate_route_refused(contents(core.stats), sel);\n", "", ["forty_distinct_keys_against_a_ceiling_of_five_admit_exactly_five"], "a ceiling refusal is not counted")
-m("e04", P, "        refuse(tab, core, k, 429, \"limit.rate-route\", now);", "        refuse(tab, core, k, 429, \"limit.rate\", now);", ["forty_distinct_keys_against_a_ceiling_of_five_admit_exactly_five"], "a ceiling refusal carries the key's rule")
+m("e04", P, "        slots.refuse(tab, core, k, 429, \"limit.rate-route\", now);", "        slots.refuse(tab, core, k, 429, \"limit.rate\", now);", ["forty_distinct_keys_against_a_ceiling_of_five_admit_exactly_five"], "a ceiling refusal carries the key's rule")
 m("e05", P, "        st[p + shared.retry_after()] = verdict - ratelimit.route_offset();", "        st[p + shared.retry_after()] = 0;", ["forty_distinct_keys_against_a_ceiling_of_five_admit_exactly_five"], "a ceiling refusal carries no Retry-After")
 m("e06", P, "        st[p + shared.retry_after()] = verdict - ratelimit.route_offset();", "        st[p + shared.retry_after()] = verdict;", ["forty_distinct_keys_against_a_ceiling_of_five_admit_exactly_five"], "a ceiling refusal's Retry-After keeps the offset")
 m("e07", P, "    st[p + shared.ws_mode()] = 0;\n    if verdict > ratelimit.route_offset() {", "    if verdict > ratelimit.route_offset() {", ["a_limited_upgrade_by_the_ceiling_takes_no_tunnel_place"], "an upgrade the ceiling refused keeps its place among the tunnels")
@@ -169,15 +170,15 @@ m("h10", G, "prefix = r.get(\"rate_xff_prefix\", XFF_PREFIX)", "prefix = r.get(\
 m("h11", G, "if not isinstance(prefix, int) or isinstance(prefix, bool) or not XFF_PREFIX_RANGE[0]", "if not isinstance(prefix, int) or not XFF_PREFIX_RANGE[0]", "gen", "a boolean is a prefix")
 # ---- the circuit's half-open trial (src/proxy.cho): tests/proxy_test.py
 T = "the_half_open_trial_has_one_life_from_open_to_closed"
-m("x01", P, "        h[b + 1] = now + shared.circuit_open_ms();", "        h[b + 1] = now + shared.circuit_open_ms() / 4;", ("proxy", [T]), "a reopened circuit stays open for a quarter of a period")
-m("x02", P, "    if h[b + 2] != 0 && now < h[b + 2] {\n        return 2;\n    }\n", "", ("proxy", [T]), "a trial in flight does not hold the others back")
-m("x03", P, "    h[b] = 0;\n    h[b + 1] = 0;\n    h[b + 2] = 0;", "    h[b] = 0;\n    h[b + 2] = 0;", ("proxy", [T]), "a trial's success leaves the circuit half open")
-m("x04", P, "    h[b] = 0;\n    h[b + 1] = 0;\n    h[b + 2] = 0;", "    h[b + 1] = 0;\n    h[b + 2] = 0;", ("proxy", [T]), "a trial's success does not forget the failures")
-m("x05", P, "        h[b + 1] = now + shared.circuit_open_ms();", "        h[b + 1] = h[b + 1];", ("proxy", [T]), "a failed trial does not reopen the circuit")
-m("x06", P, "    if now < h[b + 1] {\n        return 2;\n    }\n", "", ("proxy", [T]), "an open circuit admits everything")
-m("x07", P, "    h[b + 2] = now + shared.connect_ms() + shared.upstream_ms();\n    return 1;", "    return 1;", ("proxy", [T]), "the trial is never recorded as in flight")
-m("x08", P, "        h[b + 1] = now + shared.circuit_open_ms();\n        h[b + 2] = 0;", "        h[b + 1] = now + shared.circuit_open_ms();", ("proxy", [T]), "a failed trial is never replaced by another")
-m("x09", P, "    if h[b] >= shared.circuit_threshold() {\n        h[b + 1] = now + shared.circuit_open_ms();", "    if h[b] > shared.circuit_threshold() {\n        h[b + 1] = now + shared.circuit_open_ms();", ("proxy", [T]), "the circuit opens one failure late")
+m("x01", SL, "        h[b + 1] = now + shared.circuit_open_ms();", "        h[b + 1] = now + shared.circuit_open_ms() / 4;", ("proxy", [T]), "a reopened circuit stays open for a quarter of a period")
+m("x02", SL, "    if h[b + 2] != 0 && now < h[b + 2] {\n        return 2;\n    }\n", "", ("proxy", [T]), "a trial in flight does not hold the others back")
+m("x03", SL, "    h[b] = 0;\n    h[b + 1] = 0;\n    h[b + 2] = 0;", "    h[b] = 0;\n    h[b + 2] = 0;", ("proxy", [T]), "a trial's success leaves the circuit half open")
+m("x04", SL, "    h[b] = 0;\n    h[b + 1] = 0;\n    h[b + 2] = 0;", "    h[b + 1] = 0;\n    h[b + 2] = 0;", ("proxy", [T]), "a trial's success does not forget the failures")
+m("x05", SL, "        h[b + 1] = now + shared.circuit_open_ms();", "        h[b + 1] = h[b + 1];", ("proxy", [T]), "a failed trial does not reopen the circuit")
+m("x06", SL, "    if now < h[b + 1] {\n        return 2;\n    }\n", "", ("proxy", [T]), "an open circuit admits everything")
+m("x07", SL, "    h[b + 2] = now + shared.connect_ms() + shared.upstream_ms();\n    return 1;", "    return 1;", ("proxy", [T]), "the trial is never recorded as in flight")
+m("x08", SL, "        h[b + 1] = now + shared.circuit_open_ms();\n        h[b + 2] = 0;", "        h[b + 1] = now + shared.circuit_open_ms();", ("proxy", [T]), "a failed trial is never replaced by another")
+m("x09", SL, "    if h[b] >= shared.circuit_threshold() {\n        h[b + 1] = now + shared.circuit_open_ms();", "    if h[b] > shared.circuit_threshold() {\n        h[b + 1] = now + shared.circuit_open_ms();", ("proxy", [T]), "the circuit opens one failure late")
 
 
 # Survivors that are explained, not killed (docs/ratelimit.md section 14.4): the edit changes nothing a test can observe.

@@ -30,6 +30,7 @@ import gateway.tlsio;
 import gateway.websocket;
 import gateway.wsframe;
 import gateway.slots;
+import gateway.wsbind;
 
 // The WebSocket tunnel (docs/websocket.md, docs/websocket-frames.md): the upgrade's answer, then the frames of both directions. Split from `proxy.cho`; the slot table's layout is documented there.
 
@@ -79,10 +80,8 @@ pub fn upgrade_answered[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: 
     copy_into(bf[ub..ub + st[pu + 4] - r], bf[ub + r..ub + st[pu + 4]]);
     st[pu + 4] = st[pu + 4] - r;
     wsframe.init(contents(core.wsf)[ws_at(client)..ws_at(client) + wsframe.state_len()], now);
-    if route.ws_ocpp(st[pc + 31] - 1) > 0 {
-        // The route validates OCPP-J frames (docs/ocpp.md): both directions' recognisers are switched on.
-        wsframe.enable_ocpp(contents(core.wsf)[ws_at(client)..ws_at(client) + wsframe.state_len()]);
-    }
+    // The route's validator kind switches the per-message validation on in both directions (docs/websocket-frames.md section 16); kind 0 leaves the tunnel as it was.
+    wsframe.enable_validator(contents(core.wsf)[ws_at(client)..ws_at(client) + wsframe.state_len()], wsbind.kind_of_route(st[pc + 31] - 1));
     metrics.ws_opened(contents(core.stats));
     return tunnel_down(tab, core, u, now);
 }
@@ -111,9 +110,7 @@ fn tunnel_mark[&c](core: &!c shared.Core, client: int, cause: int, offender: int
     if cause == wsframe.rule_pong_timeout() {
         metrics.ws_pong_timeout(contents(core.stats));
     }
-    if wsframe.is_ocpp(cause) {
-        metrics.ws_ocpp_violation(contents(core.stats));
-    }
+    wsbind.count(contents(core.stats), cause);
     return 0;
 }
 

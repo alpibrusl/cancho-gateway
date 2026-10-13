@@ -88,7 +88,7 @@ names the grammar; a later version with other message types (2.1 adds 5 and 6) i
 
 ## 4. The recogniser
 
-A state machine over the **unmasked** bytes of a text message, stepped by `wsframe.scan` beside the UTF-8 automaton, in `src/ocppframe.cho` (a new module, pure, no effect, no allocation; `wsframe.cho` is 663 lines and the 2,000-line ceiling is not near, but the grammar is a concern of its own).
+A state machine over the **unmasked** bytes of a text message, stepped by `wsframe.scan` beside the UTF-8 automaton *(since the refactor of section 12, through the interface of `src/wsvalidate.cho`)*, in `src/ocppframe.cho` (a new module, pure, no effect, no allocation; `wsframe.cho` is 663 lines and the 2,000-line ceiling is not near, but the grammar is a concern of its own).
 
 **State per direction (eight ints, offsets 20 to 27 of the direction's block):** 20 the position in the grammar (below); 21 the nesting stack (one bit per level, 1 an object); 22 the depth; 23 a counter (the characters of a restricted string so far, or the hex digits of a `\u` still due); 24 the message type (0 not yet read); 25 the index of the element in hand; 26 1 if the string in hand is an object member's name; 27 1 if the direction is validated at all (set when the tunnel starts, from the route; 0 and the recogniser is never called). The ints 20 to 26 are reset at the first frame of each text message.
 
@@ -172,8 +172,8 @@ Built 2026-10-12 on a branch of its own, against the pinned compiler (`2fcf4cd`)
 
 **What exists.**
 
-- *`src/ocppframe.cho`* (470 lines, pure, no effect): the recogniser `step`, `reset`, `complete`; about forty positions in one function, with the helpers `value`, `between`, `element`, `open`, `close`. *`src/wsframe.cho`* (728 lines) steps it beside the UTF-8 automaton (one call per text byte of a validated direction), refuses a binary message at its header, and refuses a message that ends before the grammar does; it also carries the nine tags, `own_code` (1008 for binary and nesting, 1007 for the rest), `is_ocpp` and `enable_ocpp`. The state block is **72 ints** a tunnel (28 a direction: 20 to 26 the recogniser, 27 the flag), the `wsf` slab 256 x 72 ints = **144 KiB** (arithmetic, not a resident-size measurement).
-- *The tunnel* (`src/proxy.cho`, **1,980 lines** after the merge with the rate-limit work: `scripts/lines.py` passes, with 20 to spare): four lines switch the flag on from the route's column when the 101 is relayed, three count a violation. Nothing else in `tunnel_pump` changed.
+- *`src/ocppframe.cho`* (470 lines, pure, no effect): the recogniser `step`, `reset`, `complete`; about forty positions in one function, with the helpers `value`, `between`, `element`, `open`, `close`. *`src/wsframe.cho`* (728 lines when built; 714 after section 12) steps it beside the UTF-8 automaton (one call per text byte of a validated direction), refuses a binary message at its header, and refuses a message that ends before the grammar does; it also carried the nine tags, `own_code` (1008 for binary and nesting, 1007 for the rest), `is_ocpp` and `enable_ocpp` *(corrected: the tags and codes are now in `src/wsvalidate.cho`, section 12; `wsframe` forwards)*. The state block is **72 ints** a tunnel (28 a direction: 20 to 26 the recogniser, 27 the flag), the `wsf` slab 256 x 72 ints = **144 KiB** (arithmetic, not a resident-size measurement).
+- *The tunnel* (`src/proxy.cho`, **1,980 lines** after the merge with the rate-limit work: `scripts/lines.py` passes, with 20 to spare): four lines switch the flag on from the route's column when the 101 is relayed, three count a violation. Nothing else in `tunnel_pump` changed. *(Corrected: the tunnel is now `src/wstunnel.cho`, `proxy.cho` is 1,278 lines, and the two places call `wsbind`, section 12.)*
 - *Key and table* (`scripts/generate.py`): `ws_ocpp`, column 32 of the route table (27 before the merge with the rate-limit work, which took 27 to 31) (`route.ws_ocpp`), `--explain` says which route validates. *Metrics:* `ocpp_violations` (JSON) and `ws_ocpp_violations_total` (Prometheus), one more int; `worst_case()` grew by 256 bytes and `fill` in the bound test moved its rule table by one int.
 - *Tests:* `tests/ocppframe_test.cho` (25 cancho tests, 206 message cases, each in both directions), `tests/ocpp_test.py` (10 end-to-end tests, below), 23 generator refusals, 5 accepted deployments and one compiled-table test, `tests/ocpp_mutants.py` (70 mutants), `tests/ocpp_bench.py`. `tests/wsframe_test.cho` changed only where it had the state size or a direction's offset written as a number. The recording upstream of `tests/wsframes_test.py` now answers `ocpp2.0.1` as well as `ocpp1.6`.
 
@@ -221,3 +221,38 @@ Built 2026-10-12 on a branch of its own, against the pinned compiler (`2fcf4cd`)
 - **The negotiated version is not read**: with `["1.6", "2.0.1"]` the same grammar is applied whichever the charger chose.
 - **A violation by a peer while the gateway is already closing** is not tagged a second time (slice 2's rule), and a refusal that comes in a later read than its frame's header leaves the other side with half a frame (section 2).
 - **Interaction with PR #47** (rate limiting: route table, metrics, proxy): *(resolved: #46 and #47 merged first; `origin/main` `b095614` was merged into this branch, `ws_ocpp` became column 32, `worst_case()` kept both additions, the gate was run again on the merge, and `proxy.cho` has 20 lines left under the ceiling.)*
+
+## 12. Where a second grammar would plug in (the validator seam)
+
+*Added 2026-10-13 with the refactor of `docs/websocket-frames.md` section 16 (behaviour, keys, tags and metric names unchanged; the existing tests pass unchanged).* The question was whether the general gateway should know OCPP. It still does, in four named places, and nowhere else:
+
+1. **`src/ocppframe.cho`**: the grammar (section 4). Unchanged.
+2. **`src/wsvalidate.cho`**: the validator kinds, the range of rule numbers each owns (OCPP-J: 17 to 25), the nine tags and the Close codes (1008 binary and nesting, 1007 the rest), and the dispatch `begin` / `step` / `finish` / `binary`. This replaces what `wsframe.cho` carried (`tag`, `own_code`, `is_ocpp`, `enable_ocpp`, the steps); `wsframe` keeps `is_ocpp` and `enable_ocpp` as forwards for the unit tests.
+3. **`src/wsbind.cho`**: `kind_of_route` (the route table's `ws_ocpp` column, `route.ws_ocpp`, becomes kind 1) and `count` (rules 17 to 25 feed `ws_ocpp_violations_total`).
+4. **`src/route.cho`, `src/metrics.cho`, `scripts/generate.py`**: the key `ws_ocpp`, its column, its counter. Unchanged.
+
+`wstunnel.cho`, `proxy.cho` and the frame layer of `wsframe.cho` do not mention OCPP.
+
+**What a second grammar (call it kind 2) would cost**, from the code as it is:
+
+| step | where | size |
+|---|---|---|
+| the grammar as a stream machine over at most seven ints (`step`, a `complete` test, a `reset`) | a new `src/<name>frame.cho`, pure | the OCPP one is 470 lines; a grammar needing more than seven ints needs the block grown (72 ints a tunnel, 144 KiB in `core.wsf`, by arithmetic) |
+| the kind, the rule range, the tags, the Close codes | `wsvalidate.cho`: one more `if kind == 2` in each of five functions, `kind_of_rule`, `tag`, `close_code` | about 40 lines; `wsframe.rule_count()` (25) grows |
+| the route key and the counter | `generate.py` (a key, its validation, a column), `route.cho` (an accessor), `metrics.cho` (a counter in both formats and the bound), `wsbind.cho` (two branches) | the largest part: a key is not free (section 7) |
+| tests | the recogniser's unit table, the end-to-end refusals, a differential against a reference, the mutants | as section 9 |
+
+What the seam does **not** make cheap: a grammar that needs to see a whole message (JSON schema, correlation of ids) cannot be a stream machine in seven ints; it needs a buffer the size of the message, which this program does not allocate (regions under 64 KiB, no heap growth after start). That is a different design, not a second kind.
+
+**OCPP versions inside kind 1.** The key is a list (`"1.6"`, `"2.0.1"`; a later `"2.1"` is "a new value of the same key", section 3), `route.ws_ocpp` answers a bitmask, and `kind_of_route` only asks whether it is nonzero, because the grammar is the same in every version supported. A version that changes the grammar (2.1 adds message types 5 and 6) is therefore a change *inside* `ocppframe.cho`, which would need the mask: the cheapest way is to pack it with the kind in the direction's eighth int (kind in the low bits, the mask above), written by `wsbind` and read by `ocppframe.step`; no new block, no new key.
+
+**Measured, before and after the refactor** *(same machine, `tests/ocpp_bench.py`, 64 MiB each way, medians; the validated route in ms/MiB, plain route in brackets; this machine's run-to-run spread is about 10 %)*:
+
+| traffic | before (5 rounds) | after (5 rounds) | after (7 rounds) |
+|---|---|---|---|
+| down, 331-byte | 8.59 (4.53) | 8.59 (5.00) | 9.38 (4.84) |
+| down, 4,991-byte | 8.59 (4.84) | 7.97 (4.84) | 8.44 (5.00) |
+| up, 331-byte | 10.31 (5.62) | 10.31 (6.25) | 10.16 (6.09) |
+| up, 4,991-byte | 9.37 (5.94) | 11.56 (5.78) | 9.69 (5.78) |
+
+No regression beyond the spread (the one high cell, 11.56, is 9.69 on the repeat). *Line counts:* `proxy.cho` 1,980 before, 1,278 after (`slots.cho` 357, `wstunnel.cho` 412, `wsvalidate.cho` 120, `wsbind.cho` 26; `wsframe.cho` 728 to 714).
