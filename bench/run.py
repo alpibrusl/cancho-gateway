@@ -5,7 +5,9 @@
     python3 bench/run.py --proxies nginx,cancho --cells C1 --runs 1 --duration 3 --warmup 1   # a quick check
     python3 bench/run.py --oha-rate 3000 ...                   # also the open-loop oha cross-check on C1, at 3000 requests/s
 
-Needs on PATH (or --bin NAME=PATH): nginx haproxy envoy caddy traefik wrk oha slow_upstream cancho taskset.
+    python3 bench/run.py --proxies cancho,cancho-tlsplain,cancho-tls --cells C1,C3,C4,C6,C7,C8   # gate 9, the cost of TLS (docs/tls.md, docs/bench.md section 11)
+
+Needs on PATH (or --bin NAME=PATH): nginx haproxy envoy caddy traefik wrk oha slow_upstream cancho taskset (and openssl, curl for the TLS cells).
 Writes RESULTS.json and RESULTS.md into --work. One proxy at a time is started afresh for each run and stopped after it.
 """
 
@@ -18,6 +20,7 @@ import re
 import shutil
 import signal
 import socket
+import ssl
 import statistics
 import subprocess
 import sys
@@ -25,7 +28,8 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CONF = ROOT / "bench" / "conf"
-PORT, UP = 18080, 19090
+PORT, UP, TLS_PORT = 18080, 19090, 18443
+TLS_PROXIES = ("cancho-tls", "cancho-tlsplain")  # one build with both listeners: the first is measured on the TLS port, the second on the plain port
 PROXY_CORE, UP_CORE, LOAD_CORES = "0", "1", "2,3"
 TICKS = os.sysconf("SC_CLK_TCK")
 ALL_PROXIES = ["cancho", "nginx", "haproxy", "envoy", "caddy", "traefik", "kong"]
@@ -37,6 +41,12 @@ CELLS = {
     "C4": dict(path="/post", conns=64, extra=["-s", str(ROOT / "bench" / "post.lua")], want=2),
     "C5": dict(path="/", conns=64, extra=[], want=2, slow=True),
 }
+BULK_MIB = 64  # C8: one connection, one response of this many MiB (/huge on the upstream)
+
+
+def endpoint(name):
+    """(scheme, port) a proxy is reached on. Only the TLS build's TLS listener speaks https."""
+    return ("https", TLS_PORT) if name == "cancho-tls" else ("http", PORT)
 
 
 def which(args, name):
@@ -120,8 +130,13 @@ def wait_port(port, seconds=20):
     return False
 
 
-def request(method, path, body=None):
-    c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=10)
+def request(method, path, body=None, ep=("http", PORT)):
+    if ep[0] == "https":
+        ctx = ssl.create_default_context()
+        ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE  # the measurement's own sanity check, not a trust decision (wrk does not verify either)
+        c = http.client.HTTPSConnection("127.0.0.1", ep[1], timeout=10, context=ctx)
+    else:
+        c = http.client.HTTPConnection("127.0.0.1", ep[1], timeout=10)
     try:
         c.request(method, path, body=body, headers={"Connection": "close"})
         r = c.getresponse()
@@ -131,14 +146,14 @@ def request(method, path, body=None):
         c.close()
 
 
-def sanity(slow=False):
+def sanity(slow=False, ep=("http", PORT)):
     """The three requests of section 4 (only GET / against the slow upstream of C5, which has no /big). Returns None when right, else a reason."""
     checks = [("GET", "/", None, 2), ("GET", "/big", None, 65536), ("POST", "/post", b"x" * 16384, 2)]
     for method, path, body, want in checks[:1] if slow else checks:
         deadline, last = time.time() + 15, None
         while time.time() < deadline:
             try:
-                got = request(method, path, body)
+                got = request(method, path, body, ep)
             except (OSError, http.client.HTTPException) as e:
                 got = repr(e)
             if got == (200, want):
@@ -156,6 +171,8 @@ def prepare(args):
     work.mkdir(parents=True, exist_ok=True)
     (work / "www").mkdir(exist_ok=True)
     (work / "www" / "big.bin").write_bytes(b"\0" * 65536)
+    if not (work / "www" / "huge.bin").exists():
+        (work / "www" / "huge.bin").write_bytes(b"\0" * (BULK_MIB << 20))
     subs = {"@PORT@": str(PORT), "@UP@": str(UP), "@DIR@": str(work)}
     for src in CONF.iterdir():
         text = src.read_text()
@@ -165,7 +182,11 @@ def prepare(args):
     # The gateway: this repository, copied, with a deployment of one route to the one upstream. With --baseline-rev, the same
     # from that revision as well (proxy "cancho-base"), so that a change to the gateway is measured against its own earlier build
     # in the same interleaved rounds, not against numbers from another time of day.
-    build_gateway(args, ROOT, work / "gw", from_rev=None)
+    if any(n not in TLS_PROXIES for n in args.proxies.split(",")):
+        build_gateway(args, ROOT, work / "gw", from_rev=None)
+    if any(n in args.proxies.split(",") for n in TLS_PROXIES):
+        make_certificate(work / "certs" / "bench")
+        build_gateway(args, ROOT, work / "gw-tls", from_rev=None, tls_dir=work / "certs")
     if args.baseline_rev:
         build_gateway(args, ROOT, work / "gw-base", from_rev=args.baseline_rev)
     if "kong" in args.proxies.split(","):
@@ -177,7 +198,17 @@ def prepare(args):
         (work / d).mkdir(exist_ok=True)
 
 
-def build_gateway(args, root, dest, from_rev):
+def make_certificate(d):
+    """The one identity the TLS build serves: an ECDSA P-256 key and a self-signed certificate (the only type the gateway's TLS engine has), 30 days."""
+    d.mkdir(parents=True, exist_ok=True)
+    subprocess.run(f"openssl ecparam -name prime256v1 -genkey -noout | openssl pkcs8 -topk8 -nocrypt -out {d / 'key.pem'}", shell=True, check=True,
+                   capture_output=True)
+    subprocess.run(["openssl", "req", "-new", "-x509", "-key", str(d / "key.pem"), "-out", str(d / "chain.pem"), "-days", "30", "-subj", "/CN=bench.example",
+                    "-addext", "subjectAltName=DNS:bench.example"], check=True, capture_output=True)
+    (d / "names").write_text("bench.example\n")
+
+
+def build_gateway(args, root, dest, from_rev, tls_dir=None):
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
@@ -190,8 +221,11 @@ def build_gateway(args, root, dest, from_rev):
             shutil.copytree(root / d, dest / d)
         for f in ["cancho.toml", "authority.toml"]:
             shutil.copy(root / f, dest / f)
+    # The TLS build serves the plain port and the TLS port from one process. tls_rate and tls_handshakes are raised to their ceilings: the defaults
+    # (50 handshakes a second, 32 at once) are a safety bound for a public edge and would cap every TLS cell here at 50 requests/s (docs/bench.md section 11).
+    tls = (f'tls_listen = {TLS_PORT}\ntls_dir = "{tls_dir}"\ntls_identities = ["bench"]\ntls_handshakes = 1000\ntls_rate = 100000\n') if tls_dir else ""
     (dest / "deploy.toml").write_text(
-        f'listen = {PORT}\npool_idle_max = 64\n\n[[upstream]]\nname = "u"\naddr = "127.0.0.1:{UP}"\n\n'
+        f'listen = {PORT}\n{tls}pool_idle_max = 64\n\n[[upstream]]\nname = "u"\naddr = "127.0.0.1:{UP}"\n\n'
         '[[route]]\nname = "all"\npath_prefix = "/"\nupstream = "u"\n')
     subprocess.run([sys.executable, str(dest / "scripts" / "generate.py"), str(dest / "deploy.toml")], check=True, cwd=dest)
     # CANCHO_IGNORE_REV=1: build with a compiler other than the pinned one (a local check only; recorded runs use the pinned compiler).
@@ -202,6 +236,8 @@ def proxy_cmd(args, name):
     w = args.work
     if name == "cancho":
         return [str(w / "gw" / "build" / "gateway")], {}
+    if name in TLS_PROXIES:
+        return [str(w / "gw-tls" / "build" / "gateway")], {}
     if name == "cancho-base":
         return [str(w / "gw-base" / "build" / "gateway")], {}
     if name == "kong":
@@ -237,9 +273,9 @@ def seconds(text):
     return float(m.group(1)) * {"us": 1e-6, "ms": 1e-3, "s": 1, "m": 60}[m.group(2)]
 
 
-def run_wrk(args, cell, duration, proxy, upstream):
+def run_wrk(args, cell, duration, proxy, upstream, ep=("http", PORT)):
     c = CELLS[cell]
-    url = f"http://127.0.0.1:{PORT}{c['path']}"
+    url = f"{ep[0]}://127.0.0.1:{ep[1]}{c['path']}"
     out = args.work / "wrk.out"
     argv = ["taskset", "-c", LOAD_CORES, which(args, "wrk"), "-t2", f"-c{c['conns']}", f"-d{duration}s", "--latency"] + c["extra"] + [url]
     pt0, ut0, t0 = group_ticks(proxy.pgid), group_ticks(upstream.pgid), time.time()
@@ -248,8 +284,9 @@ def run_wrk(args, cell, duration, proxy, upstream):
     p.returncode = 0
     wall = time.time() - t0
     pt1, ut1 = group_ticks(proxy.pgid), group_ticks(upstream.pgid)
+    rss = rss_kib(proxy.pgid)  # the proxy's resident set at the end of the load (docs/bench.md section 11)
     return parse_wrk(out.read_text()), dict(
-        wall=wall, load_cpu=(ru.ru_utime + ru.ru_stime) / (2 * wall),
+        wall=wall, rss_kib=rss, load_cpu=(ru.ru_utime + ru.ru_stime) / (2 * wall),
         proxy_cpu=(pt1 - pt0) / TICKS / wall, up_cpu=(ut1 - ut0) / TICKS / wall)
 
 
@@ -292,11 +329,12 @@ def run_oha(args, rate, duration, proxy, upstream):
 
 def start_proxy(args, name, slow=False):
     argv, env = proxy_cmd(args, name)
-    proxy = Proc(argv, PROXY_CORE, env, args.work / f"{name}.log", PORT)
-    if not wait_port(PORT):
+    ep = endpoint(name)
+    proxy = Proc(argv, PROXY_CORE, env, args.work / f"{name}.log", ep[1])
+    if not wait_port(ep[1]):
         proxy.stop()
-        return None, f"{name} did not listen on port {PORT} within 20 s (see {name}.log)"
-    bad = sanity(slow)
+        return None, f"{name} did not listen on port {ep[1]} within 20 s (see {name}.log)"
+    bad = sanity(slow, ep)
     if bad:
         proxy.stop()
         return None, bad
@@ -310,9 +348,14 @@ def measure_memory(args, name):
     time.sleep(1)
     before = rss_kib(proxy.pgid)
     socks = []
+    scheme, port = endpoint(name)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
     try:
         for _ in range(100):
-            socks.append(socket.create_connection(("127.0.0.1", PORT), 2))
+            s = socket.create_connection(("127.0.0.1", port), 2)
+            # Over TLS the 100 connections are 100 completed handshakes (a bare TCP connection would sit in the handshake queue, not in a session).
+            socks.append(ctx.wrap_socket(s, server_hostname="bench.example") if scheme == "https" else s)
     except OSError as e:
         proxy.stop()
         return {"error": f"could not hold 100 connections: {e!r}", "before_kib": before}
@@ -333,12 +376,97 @@ def measure_memory(args, name):
     return {"before_kib": before, "after_kib": after, "still_open": alive}
 
 
-def flags(cell, wrk, load):
+def machine_info():
+    """What the numbers were measured on, recorded with them (docs/bench.md section 11)."""
+    def first(argv):
+        try:
+            return subprocess.run(argv, capture_output=True, text=True).stdout.splitlines()[0].strip()
+        except (OSError, IndexError):
+            return ""
+    cpuinfo = pathlib.Path("/proc/cpuinfo").read_text().splitlines()
+    cpu = next((l.split(":", 1)[1].strip() for l in cpuinfo if l.startswith("model name")), "")
+    mem = next((int(l.split()[1]) // 1024 for l in pathlib.Path("/proc/meminfo").read_text().splitlines() if l.startswith("MemTotal")), 0)
+    flag_line = " " + next((l for l in cpuinfo if l.startswith("flags")), "") + " "
+    return dict(cpu=cpu, cpus=os.cpu_count(), mem_mib=mem, kernel=first(["uname", "-r"]), openssl=first(["openssl", "version"]), curl=first(["curl", "--version"]),
+                wrk=first(["wrk", "--version"]), nginx=subprocess.run(["nginx", "-v"], capture_output=True, text=True).stderr.strip(),
+                aes_ni=" aes " in flag_line, avx2=" avx2 " in flag_line)
+
+
+def tls_info(args):
+    """The certificate and what a default OpenSSL client negotiates with the running TLS listener (wrk and curl are OpenSSL clients too)."""
+    out = subprocess.run(["openssl", "s_client", "-connect", f"127.0.0.1:{TLS_PORT}", "-tls1_3", "-brief"], input="", capture_output=True, text=True, timeout=10)
+    got = {k.strip(): v.strip() for k, _, v in (l.partition(":") for l in (out.stdout + out.stderr).splitlines()) if k.strip() in
+           ("Protocol version", "Ciphersuite", "Hash used", "Signature type", "Server Temp Key")}
+    cert = subprocess.run(["openssl", "x509", "-in", str(args.work / "certs" / "bench" / "chain.pem"), "-noout", "-text"], capture_output=True, text=True).stdout
+    got["certificate"] = ", ".join(l.strip() for l in cert.splitlines() if "Signature Algorithm" in l or "Public-Key" in l or "ASN1 OID" in l)[:300]
+    return got
+
+
+def run_handshakes(args, duration, proxy):
+    """C7: full handshakes only, as fast as the gateway takes them: `openssl s_time -new` connects, handshakes, closes. No request is sent."""
+    # One s_time makes its connections one after another, so it measures a round trip, not what the gateway can do: four run at once, two on each load core.
+    argv = ["taskset", "-c", LOAD_CORES, "openssl", "s_time", "-connect", f"127.0.0.1:{TLS_PORT}", "-new", "-time", str(duration), "-tls1_3"]
+    pt0, t0 = group_ticks(proxy.pgid), time.time()
+    procs = [subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) for _ in range(4)]
+    outs = [p.communicate(timeout=duration + 60)[0] for p in procs]
+    wall = time.time() - t0
+    pt1 = group_ticks(proxy.pgid)
+    ms = [re.search(r"(\d+) connections in ([\d.]+)s", o) for o in outs]
+    n = sum(int(m.group(1)) for m in ms if m)
+    cpu = (pt1 - pt0) / TICKS
+    return dict(handshakes=n, wall=wall, rate=n / wall if n else 0, proxy_cpu=cpu / wall, cpu_ms_per_handshake=cpu / n * 1000 if n else None,
+                client_cpu_s=sum(float(m.group(2)) for m in ms if m), rss_kib=rss_kib(proxy.pgid), marks=[] if n and all(ms) else ["INVALID"])
+
+
+def handshake_latency(count=300):
+    """C7b: the time of one full handshake to an otherwise idle gateway, one at a time, from Python's ssl (so it includes Python's own client work)."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    ts = []
+    old = os.sched_getaffinity(0)
+    os.sched_setaffinity(0, {int(c) for c in LOAD_CORES.split(",")})
+    try:
+        for _ in range(count):
+            t = time.perf_counter()
+            with socket.create_connection(("127.0.0.1", TLS_PORT), 5) as s:
+                ctx.wrap_socket(s, server_hostname="bench.example").close()
+            ts.append((time.perf_counter() - t) * 1000)
+            time.sleep(0.02)  # well under tls_rate, and the gateway idle between handshakes
+    finally:
+        os.sched_setaffinity(0, old)
+    ts.sort()
+    return dict(p50=ts[len(ts) // 2], p99=ts[int(len(ts) * 0.99) - 1], n=len(ts))
+
+
+def run_bulk(args, proxy, name, transfers=20):
+    """C8: the steady state, one connection moving a 64 MiB response (the 16 KiB records of TLS against plain bytes). curl, one transfer at a time."""
+    scheme, port = endpoint(name)
+    argv = ["taskset", "-c", LOAD_CORES, "curl", "-sk", "-o", "/dev/null", "-w", "%{size_download} %{time_total} %{http_code}", f"{scheme}://127.0.0.1:{port}/huge"]
+    subprocess.run(argv, capture_output=True, timeout=60)  # warm-up, discarded
+    secs, bad = [], 0
+    pt0, t0 = group_ticks(proxy.pgid), time.time()
+    for _ in range(transfers):
+        out = subprocess.run(argv, capture_output=True, text=True, timeout=60).stdout.split()
+        if len(out) != 3 or out[0] != str(BULK_MIB << 20) or out[2] != "200":
+            bad += 1
+        else:
+            secs.append(float(out[1]))
+    wall = time.time() - t0
+    cpu = (group_ticks(proxy.pgid) - pt0) / TICKS
+    n = len(secs)
+    return dict(transfers=n, bad=bad, mib_s=BULK_MIB * n / sum(secs) if n else 0, ms_each=1000 * sum(secs) / n if n else None,
+                cpu_s_per_gib=cpu / (BULK_MIB * transfers / 1024), rss_kib=rss_kib(proxy.pgid), wall=wall, marks=["INVALID"] if bad or not n else [])
+
+
+def flags(cell, wrk, load, tls=False):
     marks = []
     if wrk["non2xx"] or wrk["errors"]:
         marks.append("INVALID")
     if load.get("load_cpu") is not None and load["load_cpu"] > 0.9:
-        marks.append("CLIENT-BOUND")
+        # wrk polls a connection that is still handshaking: one thread, one connection, 126 requests/s measured 95% of a core, of which about 13% is
+        # the handshake's own work (docs/bench.md section 11). Over TLS a high figure here is not a bound; the proxy's CPU and the upstream's are the evidence.
+        marks.append("WRK-SPIN" if tls else "CLIENT-BOUND")
     if load["up_cpu"] > 0.9:
         marks.append("UPSTREAM-BOUND")
     return marks
@@ -366,7 +494,8 @@ def main():
     cells = args.cells.split(",")
     prepare(args)
     results = {"commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip(),
-               "runs": args.runs, "duration": args.duration, "warmup": args.warmup, "cells": {}, "memory": {}, "notworking": {}}
+               "runs": args.runs, "duration": args.duration, "warmup": args.warmup, "cells": {}, "memory": {}, "notworking": {},
+               "machine": machine_info()}
     out_json = args.work / "RESULTS.json"
     if args.resume and out_json.exists():
         results = json.loads(out_json.read_text())
@@ -385,7 +514,7 @@ def main():
             sys.exit("the upstream did not start")
 
     try:
-        timed = [c for c in cells if c != "C6"]
+        timed = [c for c in cells if c in CELLS]
         timed.sort(key=lambda c: bool(CELLS[c].get("slow")))  # the slow upstream last, so it is started once a round
         for rnd in range(args.runs):
             rot = proxies[rnd % len(proxies):] + proxies[:rnd % len(proxies)]
@@ -400,19 +529,48 @@ def main():
                         print(f"[{name}] not working in this setup: {bad}", flush=True)
                         continue
                     try:
-                        run_wrk(args, cell, args.warmup, proxy, upstream)  # discarded
-                        wrk, load = run_wrk(args, cell, args.duration, proxy, upstream)
+                        run_wrk(args, cell, args.warmup, proxy, upstream, endpoint(name))  # discarded
+                        wrk, load = run_wrk(args, cell, args.duration, proxy, upstream, endpoint(name))
                         if cell == "C1" and args.oha_rate:
                             run_oha_result = run_oha(args, args.oha_rate, args.duration, proxy, upstream)
                             results["cells"].setdefault("C1-oha", {}).setdefault(name, []).append(
                                 dict(run=rnd, **run_oha_result[0], **{"cpu_" + k: v for k, v in run_oha_result[1].items()}))
                     finally:
                         proxy.stop()
-                    rec = dict(run=rnd, **wrk, **load, marks=flags(cell, wrk, load))
+                    rec = dict(run=rnd, **wrk, **load, marks=flags(cell, wrk, load, endpoint(name)[0] == "https"))
                     results["cells"].setdefault(cell, {}).setdefault(name, []).append(rec)
                     print(f"[{rnd}] {cell:3} {name:8} rps={wrk['rps']} p50={wrk['p50']} p99={wrk['p99']} "
                           f"n2xx={wrk['non2xx']} err={wrk['errors']} proxy={load['proxy_cpu']:.2f} up={load['up_cpu']:.2f} "
                           f"load={load['load_cpu']:.2f} {rec['marks']}", flush=True)
+                    out_json.write_text(json.dumps(results, indent=1))
+        special = [c for c in ("C7", "C8") if c in cells]
+        if special:
+            ensure_upstream(False)
+        for rnd in range(args.runs if special else 0):
+            rot = proxies[rnd % len(proxies):] + proxies[:rnd % len(proxies)]
+            for cell in special:
+                for name in rot:
+                    if name in results["notworking"] or done(cell, name, rnd) or (cell == "C7" and name != "cancho-tls"):
+                        continue
+                    proxy, bad = start_proxy(args, name)
+                    if not proxy:
+                        results["notworking"][name] = bad
+                        print(f"[{name}] not working in this setup: {bad}", flush=True)
+                        continue
+                    try:
+                        if name == "cancho-tls" and "tls" not in results:
+                            results["tls"] = tls_info(args)
+                        if cell == "C7":
+                            if rnd == 0:
+                                results["handshake_latency"] = handshake_latency()
+                            run_handshakes(args, args.warmup, proxy)  # discarded
+                            rec = run_handshakes(args, args.duration, proxy)
+                        else:
+                            rec = run_bulk(args, proxy, name)
+                    finally:
+                        proxy.stop()
+                    results["cells"].setdefault(cell, {}).setdefault(name, []).append(dict(run=rnd, **rec))
+                    print(f"[{rnd}] {cell:3} {name:16} {rec}", flush=True)
                     out_json.write_text(json.dumps(results, indent=1))
         if "C6" in cells:
             ensure_upstream(False)
@@ -432,10 +590,33 @@ def med(values):
     return statistics.median(values)
 
 
+def special_table(cell, by):
+    if cell == "C7":
+        lines = ["", "### C7 full handshakes only (openssl s_time -new, TLS 1.3, no request)", "",
+                 "| proxy | handshakes/s median (min–max) | gateway CPU ms per handshake | proxy CPU | RSS MiB at end | marks |", "|---|---|---|---|---|---|"]
+        for name, recs in by.items():
+            r = [x["rate"] for x in recs]
+            lines.append(f"| {name} | {med(r):,.0f} ({min(r):,.0f}–{max(r):,.0f}) | {med([x['cpu_ms_per_handshake'] for x in recs if x['cpu_ms_per_handshake']]):.2f} | "
+                         f"{med([x['proxy_cpu'] for x in recs]):.0%} | {med([x['rss_kib'] for x in recs]) / 1024:.1f} | {', '.join(sorted({m for x in recs for m in x['marks']}))} |")
+        return lines
+    lines = ["", f"### C8 one connection, one {BULK_MIB} MiB response (curl)", "",
+             "| proxy | MiB/s median (min–max) | gateway CPU s per GiB | RSS MiB at end | marks |", "|---|---|---|---|---|"]
+    for name, recs in by.items():
+        r = [x["mib_s"] for x in recs]
+        lines.append(f"| {name} | {med(r):,.0f} ({min(r):,.0f}–{max(r):,.0f}) | {med([x['cpu_s_per_gib'] for x in recs]):.2f} | "
+                     f"{med([x['rss_kib'] for x in recs]) / 1024:.1f} | {', '.join(sorted({m for x in recs for m in x['marks']}))} |")
+    return lines
+
+
 def table(res):
     lines = []
     for cell, by in res["cells"].items():
-        lines += ["", f"### {cell}", "", "| proxy | req/s median (min–max) | p50 ms | p99 ms | proxy CPU | upstream CPU | load CPU | marks |", "|---|---|---|---|---|---|---|---|"]
+        if cell in ("C7", "C8"):
+            lines += special_table(cell, by)
+            continue
+        rss = [x["rss_kib"] for recs in by.values() for x in recs if "rss_kib" in x]
+        lines += ["", f"### {cell}", "", "| proxy | req/s median (min–max) | p50 ms | p99 ms | proxy CPU | upstream CPU | load CPU | RSS MiB at end |  marks |", "|---|---|---|---|---|---|---|---|---|"] if rss else \
+                 ["", f"### {cell}", "", "| proxy | req/s median (min–max) | p50 ms | p99 ms | proxy CPU | upstream CPU | load CPU | marks |", "|---|---|---|---|---|---|---|---|"]
         for name, recs in by.items():
             r = [x["rps"] for x in recs if x["rps"] is not None]
             marks = sorted({m for x in recs for m in x.get("marks", [])})
@@ -443,9 +624,11 @@ def table(res):
             er = sum(x["errors"] for x in recs)
             extra = ([f"non-2xx {n2}"] if n2 else []) + ([f"socket errors {er}"] if er else [])
             lc = [x.get("load_cpu") for x in recs if x.get("load_cpu") is not None]
+            rs = [x["rss_kib"] for x in recs if "rss_kib" in x]
             lines.append(f"| {name} | {med(r):,.0f} ({min(r):,.0f}–{max(r):,.0f}) | {med([x['p50'] for x in recs]):.2f} | "
                          f"{med([x['p99'] for x in recs]):.2f} | {med([x.get('proxy_cpu', x.get('cpu_proxy_cpu', 0)) for x in recs]):.0%} | "
-                         f"{med([x.get('up_cpu', x.get('cpu_up_cpu', 0)) for x in recs]):.0%} | {(f'{med(lc):.0%}' if lc else '')} | {', '.join(marks + extra)} |")
+                         f"{med([x.get('up_cpu', x.get('cpu_up_cpu', 0)) for x in recs]):.0%} | {(f'{med(lc):.0%}' if lc else '')} | "
+                         + (f"{med(rs) / 1024:.1f} | " if rss else "") + f"{', '.join(marks + extra)} |")
     if res["memory"]:
         lines += ["", "### C6 memory", "", "| proxy | RSS before (MiB) | RSS with 100 idle connections (MiB) | connections still open |", "|---|---|---|---|"]
         for name, m in res["memory"].items():
@@ -453,6 +636,13 @@ def table(res):
                 lines.append(f"| {name} | {m.get('before_kib', 0) / 1024:.1f} | – | {m['error']} |")
             else:
                 lines.append(f"| {name} | {m['before_kib'] / 1024:.1f} | {m['after_kib'] / 1024:.1f} | {m['still_open']} |")
+    if res.get("handshake_latency"):
+        h = res["handshake_latency"]
+        lines += ["", f"### C7b one full handshake to an idle gateway: p50 {h['p50']:.2f} ms, p99 {h['p99']:.2f} ms ({h['n']} handshakes, Python's ssl as the client)"]
+    if res.get("tls"):
+        lines += ["", "### TLS as negotiated by a default OpenSSL client", ""] + [f"- {k}: {v}" for k, v in res["tls"].items()]
+    if res.get("machine"):
+        lines += ["", "### Machine", ""] + [f"- {k}: {v}" for k, v in res["machine"].items()]
     for name, why in res["notworking"].items():
         lines += ["", f"**{name}: not working in this setup** — {why}"]
     return "\n".join(lines) + "\n"

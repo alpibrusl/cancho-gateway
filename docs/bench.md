@@ -73,7 +73,7 @@ proposed after the results and marked as such.
 
 ## 6. What the comparison does not mean
 
-- lexsys-gateway does **less** than every other proxy here: no TLS, no HTTP/2, no client keep-alive (its client connections close after
+- lexsys-gateway does **less** than every other proxy here: no TLS (*corrected 2026-10-12: TLS 1.3 was built on 2026-10-08, and its cost is section 11; every cell of sections 8 to 10 is plain HTTP*), no HTTP/2, no client keep-alive (its client connections close after
   each response, so C1, C3, C4 and C5 force it to accept and close a connection per request while the others do not), no load balancing,
   no health checks beyond a passive circuit, no hot reload, no metrics. A number in its favour is not a claim that it is a better proxy.
 - Each competitor does **more** beyond the plain reverse proxy it is configured as; their feature sets are not part of this table.
@@ -85,6 +85,7 @@ proposed after the results and marked as such.
 
 `python3 bench/run.py --help`. It needs the tools above on `PATH` (or `--bin NAME=PATH`), builds the gateway with `cancho` (`CANCHO`; before the rename of 2026-10-07, `lex-sys` and `LEX_SYS`), writes
 the configs from `bench/conf/` into a scratch directory, and writes `results.json` and a markdown table.
+Section 11's run: `python3 bench/run.py --proxies cancho,cancho-tlsplain,cancho-tls --cells C1,C3,C4,C6,C7,C8 --runs 5` (also needs `openssl` and `curl`), then `python3 bench/tls_lowrate.py --work <the same directory>`.
 
 
 ## 8. Results (measured 2026-10-06; sections 1 to 7 above are unchanged)
@@ -232,7 +233,7 @@ highest.
 
 ### 8.5 Memory (C6)
 
-Resident set before and with 100 idle connections held for 3 s: lexsys-gateway 1.9 MiB (no change), nginx 11.8, HAProxy 14.9, Caddy
+Resident set before and with 100 idle connections held for 3 s (*the gateway's figure is 2.6 MiB on `main` of 2026-10-12, section 11.5*): lexsys-gateway 1.9 MiB (no change), nginx 11.8, HAProxy 14.9, Caddy
 32.2 to 32.7, Envoy 58.9 to 59.6, Traefik 83.5 to 83.9 MiB. All 100 connections stayed open. The gateway's number is small because it
 allocates its slab and queues at start and touches few pages; this cell does **not** show memory under load, and the gateway's session
 limit is about 127 (design.md), so 100 is near its ceiling while the others are far from theirs.
@@ -241,7 +242,7 @@ limit is about 127 (design.md), so 100 is near its ceiling while the others are 
 
 - It says that on this machine, one core, loopback, tiny bodies, lexsys-gateway sits between nginx/HAProxy and Envoy/Caddy/Traefik, and
   that its worst cell against nginx is the 16 KiB POST (0.42×).
-- It does not say anything about TLS, HTTP/2, many upstreams, real networks, long-lived connections, or the gateway under the
+- It does not say anything about TLS (section 11 measures it: the gateway serves about a 170th of its plain rate over TLS, because every request is a handshake), HTTP/2, many upstreams, real networks, long-lived connections, or the gateway under the
   200+ concurrent connections it cannot hold. Caddy is 2.6.2 and Traefik 3.6.0, both older than current.
 - No pass or fail criterion is adopted here (section 5). If one is proposed from these data it must be marked as proposed after them.
 
@@ -411,4 +412,107 @@ was not repeated enough to rank them); Kong 7, Envoy 7, Traefik 16 and Caddy 22 
   against about 5 for nginx and 4 for HAProxy, which reuse the client connection. What is left is client keep-alive, which is a design decision (smuggling and framing across requests), not tuning.
 - **C4 (0.47 of nginx):** not yet profiled; the 16 KiB body moves through 16 KiB reads and 32 KiB queues and is copied twice; whether that explains a 2× gap is a hypothesis.
 - **The nginx and HAProxy swings between the two runs are unexplained**; a third run on a quieter machine would say whether they are the neighbours or the harness.
-- Memory (C6), unchanged by the change: gateway 1.9 MiB, nginx 11.8, HAProxy 14.9, Caddy 32, Envoy 59, Traefik 83, **Kong 156 MiB**, with 100 idle connections.
+- Memory (C6), unchanged by the change: gateway 1.9 MiB, nginx 11.8, HAProxy 14.9, Caddy 32, Envoy 59, Traefik 83, **Kong 156 MiB**, with 100 idle connections. *(Corrected 2026-10-12, section 11.5: the gateway's figure on `main` is now 2.6 MiB; the others were not measured again.)*
+
+## 11. Gate 9: what TLS costs (measured 2026-10-12; sections 1 to 10 above are unchanged except for the corrections marked in 6, 8.5, 8.6 and 10.5)
+
+`docs/tls.md` section 8, gate 9, asked for the cost against the plain gateway in the same rounds. The protocol below was written with the harness change and before the recorded run; trial runs
+changed four things in it, each named where it applies (the handshake cell, the client-bound mark, the bulk cell's length, the rate limits). The raw results are `bench/results/2026-10-12-tls.json`
+(its `commit` is the harness commit the run started from; `src/` is `3560c05`'s, unchanged, and the harness changed after it only by lengthening C8, 11.2). The tables on `docs/evidence.html` are drawn from it by `scripts/figures.py`.
+
+### 11.1 What is compared
+
+Three proxies, one core each, started afresh for every run and rotated through the rounds like every other proxy here:
+
+| name | what it is |
+|---|---|
+| `cancho` | the gateway as in section 1: one plain listener, no TLS configured |
+| `cancho-tlsplain` | the **TLS build**: the same sources with `tls_listen`, one identity, and `listen`; measured on its **plain** port |
+| `cancho-tls` | the same process as `cancho-tlsplain`, measured on its **TLS** port |
+
+The same upstream (nginx, core 1), the same pinning, the same sanity requests (over TLS for the last), the same wrk on cores 2 and 3. In the TLS build `tls_rate` and `tls_handshakes` are set to their ceilings (100,000 a second
+and 1,000): the defaults (50 a second, 32 at once) are a bound for a public edge and would hold every TLS cell to 50 requests/s, which is a finding (11.5), not a measurement of cost. A first trial printed the plain
+gateway's number for the TLS proxy, because wrk was handed no scheme or port of the proxy's own; the harness passes both now.
+
+### 11.2 The cells
+
+- **C1, C3, C4 over TLS:** as in section 3 (`GET /`, a 64 KiB `GET /big`, a 16 KiB `POST /post`; 64 connections; 10 s after a 3 s warm-up; 5 interleaved rounds), with wrk given `https://`.
+  **The gateway has no client keep-alive** (it closes after each response), so wrk's keep-alive connections are closed after every request and these cells are "a new connection, and over TLS a full handshake, per
+  request" by construction, the same as C2. **The steady-state, per-request cost of an established TLS connection cannot be measured here**: there is no such request. What can be measured is the per-byte cost of an
+  established connection: C8.
+- **C6 over TLS:** 100 connections that have each *completed a TLS handshake* (Python's `ssl`, no verification), held 3 s, as C6 holds 100 plain ones. A bare TCP connection to the TLS port would sit in the handshake
+  queue, not in a session.
+- **C7, handshakes only (new):** `openssl s_time -new -time 10 -tls1_3`, four processes at once on the two load cores (3 s warm-up discarded), no request sent: how many full handshakes a second the gateway
+  completes and how much of its CPU each costs (`/proc` ticks over the run, divided by the handshakes counted). *(The first version ran one `s_time`, which connects one at a time and so measured a round trip, 132 a second with
+  the gateway at 79% of its core; four at once saturate it.)* **C7b:** the time of one handshake, one at a time, to an idle gateway, 300 of them from Python's `ssl` (so it includes Python's own work).
+  `bench/tls_lowrate.py` measures the gateway's CPU per handshake at paced rates of 20, 50 and 100 a second (`bench/results/2026-10-12-tls-lowrate.txt`).
+- **C8, steady state per byte (new):** one connection, one 64 MiB response (`/huge` on the upstream, one more `location` in `bench/conf/nginx-upstream.conf` that no other cell asks for), by `curl` on a load core, 20
+  transfers one after another in each round (the first version took 5, and the CPU, counted in 10 ms ticks, was too coarse); the gateway's CPU is read per GiB moved. Plain and TLS, same build. The upstream's and curl's CPU are
+  not sampled in this cell; the gateway's CPU over the run was about 95% of its core over TLS and 88% plain, so it is the limit in both.
+- **RSS under load (new, every cell):** the resident set of the proxy's process at the end of the timed run (`rss_kib` in each record).
+
+### 11.3 The machine, the certificate, the cipher
+
+One shared Firecracker VM: Intel Xeon @ 2.8 GHz (AES-NI and AVX2 present), 4 vCPU, 16 GiB, Linux 6.18.44; proxy on core 0, upstream on core 1, clients on cores 2 and 3 (section 2). wrk 4.1.0, curl 8.5.0 and
+`openssl s_time` all use OpenSSL 3.0.13. Certificate: ECDSA P-256 (`prime256v1`), self-signed, `CN=bench.example`, `ecdsa-with-SHA256`, one identity (the only type the gateway's TLS engine has); nobody verifies it
+(wrk, `curl -k`); no session resumption (the engine has none). What a default OpenSSL client negotiates with the running listener (`openssl s_client -tls1_3`, recorded in the JSON): **TLS 1.3,
+`TLS_AES_128_GCM_SHA256`, key exchange X25519, signature ECDSA with SHA-256**. The engine chooses, so the other two suites it has (AES-256-GCM, ChaCha20-Poly1305) were not measured; wrk's and curl's own negotiated suites are
+not printed by them and are assumed to be `s_client`'s, which links the same library. The shared machine drifted during the run as it did in section 9: in rounds 2 and 3 the plain gateway's own C1 fell to
+25 and 27 thousand and its CPU to 85%, which is why every ratio below is **paired within a round**.
+
+### 11.4 Validity
+
+No run of any cell had a non-2xx response or a socket error. Over TLS wrk used 71% to 98% of its two cores, and the CLIENT-BOUND rule of section 4 would have marked most of the runs; **it is replaced for `https://` by a
+mark called WRK-SPIN, and the numbers are quoted**, because the rule's premise is false there: wrk polls a connection that is still handshaking. Measured by hand once during this work (not recorded in `bench/results`):
+`wrk -t1 -c1` over TLS made 126 requests/s and used 3.81 s of CPU in 4 s (95% of a core), while one client handshake costs about 1 ms of CPU (`s_time`: 1.92 s for 1,806 handshakes), about 13% of that. What bounds
+the TLS cells is the gateway: its CPU was 98 to 100% in every one, the upstream's at most 1%.
+
+### 11.5 Results (medians of 5 rounds, min and max in brackets; the same figures are in the JSON and on `docs/evidence.html`)
+
+| cell | plain build | TLS build, plain port | TLS build, **TLS port** | TLS ÷ plain build (paired per round) |
+|---|---|---|---|---|
+| C1 requests/s | 26,991 (25,150–29,687) | 23,412 (22,240–27,482) | **157** (150–160) | **0.0059** (0.0054–0.0063), 1 in 170 |
+| C1 p50 / p99 ms | 1.94 / 5.94 | 1.79 / 7.65 | **192 / 377** | |
+| C1 gateway CPU per request | 34 µs | 36 µs | **6.2 ms** | |
+| C3 requests/s (64 KiB) | 8,548 (8,049–9,688) | 8,202 (7,827–8,225) | **149** (145–158) | **0.0176** (0.0154–0.0187), 1 in 57 |
+| C3 p50 / p99 ms | 7.11 / 13.20 | 7.28 / 15.14 | **280 / 447** | |
+| C4 requests/s (16 KiB POST) | 10,865 (10,353–11,085) | 10,493 (9,844–11,296) | **159** (152–161) | **0.0147** (0.0139–0.0155), 1 in 68 |
+| C4 p50 / p99 ms | 5.53 / 11.74 | 5.87 / 11.89 | **190 / 377** | |
+| C7 handshakes/s, flat out | | | **167** (164–172), gateway at 98% | |
+| C7 gateway CPU per handshake | | | **5.9 ms** (5.75–5.97) | |
+| C7b one handshake, idle gateway | | | p50 7.5, p99 13.5 ms (Python client) | |
+| `tls_lowrate.py`, CPU per handshake | | | 7.0 ms at 20/s (14% of the core), 6.9 at 50/s (34%), 6.9 at 100/s (69%) | |
+| C8 one connection, 64 MiB, MiB/s | 695 (668–739) | 673 (628–761) | **199** (196–200) | 0.29 |
+| C8 gateway CPU per GiB | 1.41 s | 1.47 s | **5.01 s** | 3.6× |
+| C6 RSS idle / with 100 idle connections, MiB | 2.6 / 2.6 | 2.9 / 2.9 | **3.1 / 13.9** (100 completed handshakes) | |
+| RSS after the load, MiB (C1 / C3 / C4) | 3.6 / 5.4 / 7.8 | 3.9 / 5.7 / 8.4 | **20.7 / 27.0 / 36.2** | |
+
+**Plainly.**
+
+- **Over TLS the gateway serves about 157 requests a second from a core: a 170th of what it serves plain on C1, a 57th on C3 and a 68th on C4.** The cost is the handshake, 5.9 to 7 ms of the gateway's CPU each, and
+  because it keeps no client connection open **every request is a handshake**. Of the 6.2 ms a request costs on C1, 5.9 is the handshake; the 64 KiB response of C3 adds 0.36 ms, about what C8's 5.0 s a GiB gives for
+  64 KiB (0.31 ms), and the 16 KiB body of C4 adds nothing the noise does not hide.
+- **The latency is queueing, not a slow handshake:** with 64 clients and 157 requests a second each waits about 64 ÷ 157 = 0.4 s for its turn and the median is about half that. One client alone, to an idle gateway,
+  sees a handshake in 7.5 ms (p99 13.5, Python's client included).
+- **An established connection, by the byte (C8):** TLS moves 199 MiB/s against 695 plain and costs 3.6 times the CPU for the bytes (5.0 against 1.4 s a GiB). That agrees with the 3.6 to 4.2 times `docs/tls.md`
+  section 1 quotes for cancho's own server and with the informal "about three" of its section 10; it is only the part of the cost that a connection which stayed open would pay, and **this gateway's connections do
+  not stay open**.
+- **The default `tls_rate = 50` is below the gateway's ceiling, on purpose:** it allows 34% of the core to handshakes at this machine's 6.9 ms; the flat-out ceiling is 167 a second. A deployment at the default
+  serves at most 50 new HTTPS connections, so at most 50 requests, a second.
+- **The TLS build's plain port is not clearly different from the plain build:** paired, 0.90 (0.80–1.02) on C1, 0.93 (0.85–1.02) on C3, 0.99 (0.91–1.06) on C4, and 0.3 MiB more at idle. Two of the three are inside the
+  VM's drift; whether C1 carries a real cost of up to 10% for what a TLS-capable build keeps on the plain path is **not resolved** by this run.
+- **Memory:** 0.3 MiB more at idle for a build that can serve TLS (2.6 against 2.9) and 3.1 after one TLS request; 110 KiB for each established TLS connection (100 of them: 13.9 MiB, the figure section 10 of
+  `docs/tls.md` gave informally); and **17 to 28 MiB more than the plain build after a 64-connection load** (C1 to C4). `docs/tls.md` section 4 estimated about 23 MiB more with all 256 slots touched; the C4 figure is above
+  it by 5 MiB. The cause was not investigated.
+- **The plain build's idle memory is 2.6 MiB on this commit, not the 1.9 MiB of sections 8 and 10:** the slices since (TLS, WebSocket, rate limiting, authentication) grew it. The others' figures were not measured again.
+- **The handshake is 5.9 ms here (7 ms at low rates), not the 12.0 ms of `docs/tls.md` section 10's informal measurement,** which this run does not reproduce and which is not explained (that run's machine and
+  clients were different). The informal figure had set the default `tls_rate` and its "60% of a core" comment; both are corrected in `docs/tls.md` and `scripts/generate.py`, the default value is not changed.
+
+### 11.6 What this does not say
+
+- Nothing about how nginx, HAProxy or Caddy do the same: no other proxy was run with TLS here, so "slow for a TLS terminator" is not established; what is is the 170 times against the gateway's own plain port.
+- One cipher suite, one key type, one core, loopback, no verification, no resumption (none exists), no client certificates, no network latency, no failure paths (a refused or aborted handshake costs differently).
+- Not measured: several cores (the gateway has one thread), TLS to the upstreams (there is none), the by-client index of `docs/tls.md` question 5, and what the memory excess over 23 MiB is.
+- The p99 values over TLS rest on about 1,500 requests a run.
+- **Whether a client keep-alive would change this is the obvious next measurement, and it is a design decision** (`docs/proxy.md`: framing across requests): with it the cost of a request would approach C8's
+  per-byte figure and the 3.6 to 4.2 times of cancho's own server, instead of 170.
