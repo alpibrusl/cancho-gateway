@@ -67,6 +67,8 @@ m("r14", "src/b64.cho", "a[62] = byte_of('+');", "a[62] = byte_of('-');", "unit"
 m("r15", "src/websocket.cho", 'k = out.put(out, k, "\\r\\nVia: 1.1 cancho-gateway\\r\\nX-Request-Id: ");', 'k = out.put(out, k, "\\r\\nServer: upstream\\r\\nVia: 1.1 cancho-gateway\\r\\nX-Request-Id: ");', "unit", "the 101 head carries a field nobody checked")
 # ---- the other modules
 m("f01", "src/forward.cho", 'if copy && upgrade && is(name, "sec-websocket-extensions") {', 'if copy && false && is(name, "sec-websocket-extensions") {', "unit", "Sec-WebSocket-Extensions is forwarded")
+m("d01", "src/forward.cho", 'if copy && upgrade && is(name, "sec-websocket-extensions") {', 'if copy && false && is(name, "sec-websocket-extensions") {', ["an_offer_of_permessage_deflate_in_any_spelling_is_never_passed_on_or_accepted"], "the permessage-deflate offer reaches the upstream (docs/websocket-deflate.md)")
+m("d02", "src/wsframe.cho", "if b0 / 16 % 8 != 0 {", "if b0 / 16 % 8 != 0 && b0 / 16 % 8 != 4 {", ["an_offer_of_permessage_deflate_in_any_spelling_is_never_passed_on_or_accepted"], "RSV1 is admitted: a compressed frame would be relayed unread (docs/websocket-deflate.md)")
 m("f02", "src/forward.cho", 'k = out.put(out, k, "Connection: Upgrade\\r\\nUpgrade: websocket\\r\\n");', 'k = out.put(out, k, "Connection: close\\r\\n");', "unit", "the upstream is not told it is an upgrade")
 m("f03", "src/response.cho", "if code < 100 || code == 101 && !upgrade {", "if code < 100 {", "unit", "a 101 is accepted for every request")
 m("f04", "src/problem.cho", 'k = out.put(out, k, "\\r\\nSec-WebSocket-Version: 13");', 'k = out.put(out, k, "");', "unit", "a 426 does not name the version")
