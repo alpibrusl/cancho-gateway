@@ -17,9 +17,9 @@ name = "ocpp"
 path_prefix = "/ocpp"
 upstream = "csms"
 websocket = true
-subprotocols = ["ocpp1.6", "ocpp2.0.1"]   # a charger that offers neither is refused at the edge
+subprotocols = ["ocpp1.6", "ocpp2.0.1", "ocpp2.1"]   # a charger that offers none of them is refused at the edge
 ws_max_message_bytes = 65536              # an OCPP-J message is a small JSON text: a longer one is refused with Close 1009, counted over its fragments
-ws_ocpp = ["1.6", "2.0.1"]                # every text message must be an OCPP-J frame (CALL, CALLRESULT, CALLERROR; docs/ocpp.md): anything else is Close 1007; a binary message is 1008
+ws_ocpp = ["1.6", "2.0.1", "2.1"]         # every text message must be an OCPP-J frame (CALL, CALLRESULT, CALLERROR; SEND and CALLRESULTERROR only on a connection that negotiated ocpp2.1; docs/ocpp.md): anything else is Close 1007; a binary message is 1008
 # no `origins`: a browser (it always sends Origin) is refused here; a charger sends none and is admitted
 
 [[route]]

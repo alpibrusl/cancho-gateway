@@ -3,7 +3,7 @@
 
     python3 scripts/demo_ws_upstream.py 9000
 
-It accepts a WebSocket with the subprotocol `ocpp1.6` or `ocpp2.0.1`, answers BootNotification and Heartbeat calls (OCPP-J: `[2, id, action, payload]`
+It accepts a WebSocket with the subprotocol `ocpp1.6`, `ocpp2.0.1` or `ocpp2.1`, answers BootNotification and Heartbeat calls (OCPP-J: `[2, id, action, payload]`
 is answered `[3, id, payload]`), answers anything else with a CALLERROR, and answers an ordinary HTTP request with `csms: ok`. It prints the head of every
 request it receives, so you can see what the gateway forwarded. Nothing here is part of the gateway, and it is not an OCPP implementation.
 """
@@ -60,7 +60,7 @@ class Handler(socketserver.StreamRequestHandler):
             self.wfile.write(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(body) + body)
             return
         offered = [t.strip() for t in headers.get("sec-websocket-protocol", "").split(",")]
-        chosen = next((t for t in offered if t in ("ocpp1.6", "ocpp2.0.1")), None)
+        chosen = next((t for t in offered if t in ("ocpp1.6", "ocpp2.0.1", "ocpp2.1")), None)
         accept = base64.b64encode(hashlib.sha1(headers["sec-websocket-key"].encode() + GUID).digest()).decode()
         out = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n" % accept
         if chosen:

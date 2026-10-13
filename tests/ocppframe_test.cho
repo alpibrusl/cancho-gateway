@@ -64,6 +64,13 @@ fn fresh[&t](ws: &!t [int], on: bool) -> [] int {
     return 0;
 }
 
+// A validated tunnel negotiated as the OCPP version bit `ver` (1 for 1.6, 2 for 2.0.1, 4 for 2.1, 0 for a version not known).
+fn fresh_ver[&t](ws: &!t [int], ver: int) -> [] int {
+    wsframe.init(ws, 0);
+    wsframe.enable_ocpp_version(ws, ver);
+    return 0;
+}
+
 // What a drive saw: bytes forwarded, the rule (0 none), 1 if the violation was at a frame boundary, bytes left waiting.
 fn drive[&t, &w, &d](ws: &!t [int], work: &!w [byte], data: &d [byte], dir: int, c1: int, c2: int) -> [] (int, int, int, int) {
     var have = 0;
@@ -136,8 +143,8 @@ fn bytewise[&t, &w, &d](ws: &!t [int], work: &!w [byte], data: &d [byte], dir: i
 
 // `data`, a whole stream in direction `dir`, has the verdict `rule` (0: valid and forwarded whole) however it is cut: whole, in three pieces at every pair of cut points (a stride
 // for the long ones) and byte by byte. A refusal fed whole forwards nothing and is at a frame boundary (the frame is never half sent); cut, never more than the stream.
-fn verdict_everywhere[&t, &w, &d](ws: &!t [int], work: &!w [byte], data: &d [byte], dir: int, rule: int, lead: int) -> [] int {
-    fresh(ws, true);
+fn verdict_everywhere_ver[&t, &w, &d](ws: &!t [int], work: &!w [byte], data: &d [byte], dir: int, rule: int, lead: int, ver: int) -> [] int {
+    fresh_ver(ws, ver);
     let (f0, r0, bd0, h0) = drive(ws, work, data, dir, len(data), len(data));
     test.assert_eq(r0, rule);
     if rule == 0 {
@@ -155,7 +162,7 @@ fn verdict_everywhere[&t, &w, &d](ws: &!t [int], work: &!w [byte], data: &d [byt
     while c1 <= len(data) {
         var c2 = c1;
         while c2 <= len(data) {
-            fresh(ws, true);
+            fresh_ver(ws, ver);
             let (f, r, bd, h) = drive(ws, work, data, dir, c1, c2);
             test.assert_eq(r, rule);
             test.assert(f <= len(data));
@@ -166,13 +173,17 @@ fn verdict_everywhere[&t, &w, &d](ws: &!t [int], work: &!w [byte], data: &d [byt
         }
         c1 = c1 + step;
     }
-    fresh(ws, true);
+    fresh_ver(ws, ver);
     let (fb, rb) = bytewise(ws, work, data, dir);
     test.assert_eq(rb, rule);
     if rule == 0 {
         test.assert_eq(fb, len(data));
     }
     return 0;
+}
+
+fn verdict_everywhere[&t, &w, &d](ws: &!t [int], work: &!w [byte], data: &d [byte], dir: int, rule: int, lead: int) -> [] int {
+    return verdict_everywhere_ver(ws, work, data, dir, rule, lead, 1);
 }
 
 // The message `msg` as one text frame, client's and server's, has verdict `rule`.
@@ -185,6 +196,20 @@ fn verdict[&m](msg: &m [byte], rule: int) -> [] int {
         verdict_everywhere(ws, work, buf[0..n], 0, rule, 0);
         n = frame(buf, 0, 1, 1, false, 0, msg);
         verdict_everywhere(ws, work, buf[0..n], 1, rule, 0);
+    }
+    return 0;
+}
+
+// The same, for a tunnel negotiated as the version bit `ver`.
+fn verdict_ver[&m](msg: &m [byte], rule: int, ver: int) -> [] int {
+    region a {
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
+        let work = alloc_slice[a](len(msg) + 64, byte_of(0));
+        let buf = alloc_slice[a](len(msg) + 64, byte_of(0));
+        var n = frame(buf, 0, 1, 1, true, 305419896, msg);
+        verdict_everywhere_ver(ws, work, buf[0..n], 0, rule, 0, ver);
+        n = frame(buf, 0, 1, 1, false, 0, msg);
+        verdict_everywhere_ver(ws, work, buf[0..n], 1, rule, 0, ver);
     }
     return 0;
 }
@@ -273,7 +298,15 @@ fn test_the_state_block_holds_the_recogniser_and_nothing_is_on_by_default() -> [
             i = i + 1;
         }
         wsframe.enable_ocpp(ws);
-        test.assert_eq(ws[wsframe.dir_base(0) + 27], 1);
+        // the kind (1, the low four bits) with the negotiated version (1 for 1.6) packed above it
+        test.assert_eq(ws[wsframe.dir_base(0) + 27], 17);
+        test.assert_eq(ws[wsframe.dir_base(1) + 27], 17);
+        wsframe.enable_ocpp_version(ws, 4);
+        test.assert_eq(ws[wsframe.dir_base(0) + 27], 65);
+        test.assert_eq(ws[wsframe.dir_base(1) + 27], 65);
+        wsframe.enable_ocpp_version(ws, 2);
+        test.assert_eq(ws[wsframe.dir_base(1) + 27], 33);
+        wsframe.enable_ocpp_version(ws, 0);
         test.assert_eq(ws[wsframe.dir_base(1) + 27], 1);
     }
     return 0;
@@ -948,5 +981,298 @@ fn test_random_mutations_have_one_verdict_however_the_stream_is_cut() -> [] int 
 fn const_pick[&b](m: &!b [byte], at: int, k: int) -> [] int {
     let pool = "[]{}\",:\\-+.eE0123456789tfnaulsr ";
     m[at] = pool[k];
+    return 0;
+}
+
+// ---- OCPP 2.1 (docs/ocpp.md section 13): message types 5 and 6, valid only on a tunnel negotiated as 2.1 ----
+
+fn r21() -> [] int {
+    return 4;
+}
+
+fn good21[&m](msg: &m [byte]) -> [] int {
+    return verdict_ver(msg, 0, r21());
+}
+
+fn bad21[&m](msg: &m [byte], rule: int) -> [] int {
+    return verdict_ver(msg, rule, r21());
+}
+
+// A message of type 5 or 6 on a tunnel that is not 2.1: the type, whichever of 1.6, 2.0.1 or "not known" it is.
+fn not21[&m](msg: &m [byte]) -> [] int {
+    verdict_ver(msg, r_type(), 1);
+    verdict_ver(msg, r_type(), 2);
+    verdict_ver(msg, r_type(), 3);
+    verdict_ver(msg, r_type(), 0);
+    return 0;
+}
+
+fn test_types_5_and_6_are_valid_on_a_2_1_tunnel_at_every_split() -> [] int {
+    good21("[5,\"19223201\",\"FormatViolation\",\"bad payload\",{}]");
+    good21("[5,\"a\",\"C\",\"\",{}]");
+    good21("[5,\"a\",\"C\",\"d\",{\"x\":[1,{\"y\":null}]}]");
+    good21("[6,\"19223201\",\"NotifyPeriodicEventStream\",{\"id\":1,\"data\":[]}]");
+    good21("[6,\"a\",\"B\",{}]");
+    good21(" [ 5 , \"a\" , \"C\" , \"d\" , { } ] ");
+    good21(" [ 6 , \"a\" , \"B\" , { } ] ");
+    // and 2.1 still has the three types of 1.6 and 2.0.1
+    good21("[2,\"a\",\"B\",{}]");
+    good21("[3,\"a\",{}]");
+    good21("[4,\"a\",\"C\",\"d\",{}]");
+    return 0;
+}
+
+fn test_types_5_and_6_are_refused_as_the_type_on_every_other_version() -> [] int {
+    not21("[5,\"a\",\"C\",\"d\",{}]");
+    not21("[6,\"a\",\"B\",{}]");
+    not21(" [ 5 , \"a\" , \"C\" , \"d\" , { } ] ");
+    // the type decides at the digit, whatever follows: a well-formed body does not save it, a malformed one does not change the tag
+    not21("[5]");
+    not21("[6]");
+    not21("[5,");
+    not21("[6,\"a\",1,[]]");
+    // the three types that exist everywhere are valid on each version
+    verdict_ver("[2,\"a\",\"B\",{}]", 0, 1);
+    verdict_ver("[2,\"a\",\"B\",{}]", 0, 2);
+    verdict_ver("[3,\"a\",{}]", 0, 1);
+    verdict_ver("[3,\"a\",{}]", 0, 2);
+    verdict_ver("[4,\"a\",\"C\",\"d\",{}]", 0, 1);
+    verdict_ver("[4,\"a\",\"C\",\"d\",{}]", 0, 2);
+    return 0;
+}
+
+fn test_a_2_1_tunnel_refuses_what_is_not_a_type_it_has() -> [] int {
+    bad21("[7,\"a\",\"B\",{}]", r_type());
+    bad21("[1,\"a\",\"B\",{}]", r_type());
+    bad21("[0,\"a\",\"B\",{}]", r_type());
+    bad21("[9,\"a\",\"B\",{}]", r_type());
+    bad21("[55,\"a\",\"C\",\"d\",{}]", r_type());
+    bad21("[66,\"a\",\"B\",{}]", r_type());
+    bad21("[56,\"a\",\"B\",{}]", r_type());
+    bad21("[5.0,\"a\",\"C\",\"d\",{}]", r_type());
+    bad21("[6e0,\"a\",\"B\",{}]", r_type());
+    bad21("[05,\"a\",\"C\",\"d\",{}]", r_type());
+    bad21("[06,\"a\",\"B\",{}]", r_type());
+    bad21("[-5,\"a\",\"C\",\"d\",{}]", r_type());
+    bad21("[\"5\",\"a\",\"C\",\"d\",{}]", r_type());
+    bad21("[\"6\",\"a\",\"B\",{}]", r_type());
+    bad21("[5x,\"a\",\"C\",\"d\",{}]", r_type());
+    bad21("[]", r_type());
+    return 0;
+}
+
+fn test_type_5_has_the_shape_of_a_callerror_and_type_6_the_shape_of_a_call() -> [] int {
+    // CALLRESULTERROR: five elements
+    bad21("[5]", r_arity());
+    bad21("[5,\"a\"]", r_arity());
+    bad21("[5,\"a\",\"C\"]", r_arity());
+    bad21("[5,\"a\",\"C\",\"d\"]", r_arity());
+    bad21("[5,\"a\",\"C\",\"d\",{},{}]", r_arity());
+    bad21("[5,\"a\",\"C\",\"d\",{},]", r_arity());
+    bad21("[5,\"\",\"C\",\"d\",{}]", r_id());
+    bad21("[5,1,\"C\",\"d\",{}]", r_id());
+    bad21("[5,\"1234567890123456789012345678901234567\",\"C\",\"d\",{}]", r_id());
+    bad21("[5,\"a\\\"b\",\"C\",\"d\",{}]", r_id());
+    bad21("[5,\"a\",\"C-D\",\"d\",{}]", r_code());
+    bad21("[5,\"a\",\"\",\"d\",{}]", r_code());
+    bad21("[5,\"a\",1,\"d\",{}]", r_code());
+    bad21("[5,\"a\",\"C\",1,{}]", r_code());
+    bad21("[5,\"a\",\"C\",{},{}]", r_code());
+    bad21("[5,\"a\",\"C\",\"d\",[]]", r_payload());
+    bad21("[5,\"a\",\"C\",\"d\",null]", r_payload());
+    bad21("[5,\"a\",\"C\",\"d\",\"x\"]", r_payload());
+    bad21("[5,\"a\",\"C\",\"d\",{\"a\":}]", r_json());
+    bad21("[5,\"a\",\"C\",\"d\",{}]x", r_json());
+    bad21("[5,\"a\",\"C\",\"d\",{}", r_json());
+    // SEND: four elements, an action, an object
+    bad21("[6]", r_arity());
+    bad21("[6,\"a\"]", r_arity());
+    bad21("[6,\"a\",\"B\"]", r_arity());
+    bad21("[6,\"a\",\"B\",]", r_arity());
+    bad21("[6,\"a\",\"B\",{},{}]", r_arity());
+    bad21("[6,\"\",\"B\",{}]", r_id());
+    bad21("[6,1,\"B\",{}]", r_id());
+    bad21("[6,\"a\",\"B-C\",{}]", r_action());
+    bad21("[6,\"a\",\"\",{}]", r_action());
+    bad21("[6,\"a\",1,{}]", r_action());
+    bad21("[6,\"a\",\"B\",[]]", r_payload());
+    bad21("[6,\"a\",\"B\",null]", r_payload());
+    bad21("[6,\"a\",\"B\",{\"a\":tru}]", r_json());
+    // SEND has no CALLRESULT-shaped three-element form, and a CALLRESULTERROR has no four-element form
+    bad21("[6,\"a\",{}]", r_action());
+    bad21("[5,\"a\",\"C\",{}]", r_code());
+    return 0;
+}
+
+fn test_types_5_and_6_obey_the_same_nesting_bound_as_the_others() -> [] int {
+    region a {
+        let m = alloc_slice[a](400, byte_of(0));
+        var n = cat(m, 0, "[6,\"a\",\"B\",");
+        var i = 0;
+        while i < 33 {
+            n = cat(m, n, "{\"a\":");
+            i = i + 1;
+        }
+        n = cat(m, n, "1");
+        while i > 0 {
+            n = cat(m, n, "}");
+            i = i - 1;
+        }
+        n = cat(m, n, "]");
+        // the payload's own braces are level 1: 33 levels are refused, 32 are the bound
+        bad21(m[0..n], 25);
+        n = cat(m, 0, "[5,\"a\",\"C\",\"d\",");
+        i = 0;
+        while i < 32 {
+            n = cat(m, n, "{\"a\":");
+            i = i + 1;
+        }
+        n = cat(m, n, "1");
+        while i > 0 {
+            n = cat(m, n, "}");
+            i = i - 1;
+        }
+        n = cat(m, n, "]");
+        good21(m[0..n]);
+    }
+    return 0;
+}
+
+fn test_a_stream_of_2_1_messages_restarts_the_machine_and_the_version_stays() -> [] int {
+    region a {
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
+        let work = alloc_slice[a](400, byte_of(0));
+        let buf = alloc_slice[a](400, byte_of(0));
+        var n = frame(buf, 0, 1, 1, true, 99, "[6,\"a\",\"B\",{}]");
+        n = frame(buf, n, 1, 1, true, 100, "[5,\"a\",\"C\",\"d\",{}]");
+        n = frame(buf, n, 1, 1, true, 101, "[2,\"b\",\"B\",{}]");
+        n = frame(buf, n, 1, 1, true, 102, "[3,\"b\",{}]");
+        verdict_everywhere_ver(ws, work, buf[0..n], 0, 0, 0, 4);
+        // the same stream on 1.6 is refused at the first message, nothing forwarded
+        verdict_everywhere_ver(ws, work, buf[0..n], 0, r_type(), 0, 1);
+        // a 1.6 message first, then a type 6: the version is the tunnel's, not the first message's; the first goes, the second is refused at a boundary
+        n = frame(buf, 0, 1, 1, true, 99, "[2,\"a\",\"B\",{}]");
+        let lead = n;
+        n = frame(buf, n, 1, 1, true, 100, "[6,\"a\",\"B\",{}]");
+        verdict_everywhere_ver(ws, work, buf[0..n], 0, r_type(), lead, 1);
+        verdict_everywhere_ver(ws, work, buf[0..n], 0, r_type(), lead, 2);
+        verdict_everywhere_ver(ws, work, buf[0..n], 0, 0, 0, 4);
+    }
+    return 0;
+}
+
+fn test_a_2_1_message_fragmented_with_a_ping_between_is_one_message() -> [] int {
+    region a {
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
+        let work = alloc_slice[a](400, byte_of(0));
+        let buf = alloc_slice[a](400, byte_of(0));
+        var n = frame(buf, 0, 0, 1, true, 7, "[6,\"a\",");
+        n = frame(buf, n, 1, 9, true, 8, "");
+        n = frame(buf, n, 0, 0, true, 9, "\"B\",{\"k");
+        n = frame(buf, n, 1, 0, true, 10, "\":1}]");
+        verdict_everywhere_ver(ws, work, buf[0..n], 0, 0, 0, 4);
+        verdict_everywhere_ver(ws, work, buf[0..n], 0, r_type(), 0, 1);
+        // the type digit alone in the first fragment: the version still decides
+        n = frame(buf, 0, 0, 1, true, 7, "[5");
+        n = frame(buf, n, 1, 0, true, 9, ",\"a\",\"C\",\"d\",{}]");
+        verdict_everywhere_ver(ws, work, buf[0..n], 0, 0, 0, 4);
+        verdict_everywhere_ver(ws, work, buf[0..n], 0, r_type(), 0, 2);
+    }
+    return 0;
+}
+
+fn test_a_binary_message_is_refused_on_2_1_as_on_the_others() -> [] int {
+    region a {
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
+        let work = alloc_slice[a](100, byte_of(0));
+        let buf = alloc_slice[a](100, byte_of(0));
+        let n = frame(buf, 0, 1, 2, true, 5, "[6,\"a\",\"B\",{}]");
+        verdict_everywhere_ver(ws, work, buf[0..n], 0, r_binary(), 0, 4);
+    }
+    return 0;
+}
+
+// Every message of the 1.6 corpus has the same verdict on a 2.1 tunnel as on a 1.6 one, except the ones that begin with the digit 5 or 6; and a message accepted on a 1.6 or 2.0.1 tunnel is
+// accepted on 2.1 (2.1 is a superset), however the stream is cut. Random mutations of 2.1 messages: one verdict at every cut, and a refusal on 1.6 where 2.1 accepts is always `ws.ocpp-type`.
+fn test_random_mutations_of_2_1_messages_have_one_verdict_and_2_1_is_a_superset() -> [] int {
+    region a {
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
+        let work = alloc_slice[a](800, byte_of(0));
+        let buf = alloc_slice[a](800, byte_of(0));
+        let m = alloc_slice[a](600, byte_of(0));
+        var seed = 424242;
+        var round = 0;
+        var accepted21 = 0;
+        var type_only = 0;
+        while round < 3000 {
+            var n = 0;
+            seed = next(seed);
+            if seed / 65536 % 2 == 0 {
+                n = cat(m, 0, "[5,\"id-1\",\"FormatViolation\",\"why \\u00e9\",{\"a\":[1,2.5e3,{\"b\":null}]}]");
+            } else {
+                n = cat(m, 0, "[6,\"id-1\",\"NotifyPeriodicEventStream\",{\"a\":[1,2.5e3,{\"b\":null}],\"c\":\"x\"}]");
+            }
+            seed = next(seed);
+            var edits = seed / 65536 % 4;
+            while edits > 0 && n > 0 {
+                seed = next(seed);
+                let at = seed / 65536 % n;
+                seed = next(seed);
+                let how = seed / 65536 % 3;
+                seed = next(seed);
+                let v = seed / 65536 % 128;
+                if how == 0 {
+                    m[at] = byte_of(v);
+                } else if how == 1 && n < 500 {
+                    copy_into(m[at + 1..n + 1], m[at..n]);
+                    m[at] = byte_of(v);
+                    n = n + 1;
+                } else if n > 0 {
+                    copy_into(m[at..n - 1], m[at + 1..n]);
+                    n = n - 1;
+                }
+                edits = edits - 1;
+            }
+            let f = frame(buf, 0, 1, 1, true, 12345, m[0..n]);
+            fresh_ver(ws, 4);
+            let (fw, rw, bd, hw) = drive(ws, work, buf[0..f], 0, f, f);
+            fresh_ver(ws, 1);
+            let (f1, r1, bd1, h1) = drive(ws, work, buf[0..f], 0, f, f);
+            if rw == 0 {
+                test.assert_eq(fw, f);
+                accepted21 = accepted21 + 1;
+            } else {
+                test.assert_eq(fw, 0);
+                test.assert(rw >= 17 && rw <= 25 || rw == 11);
+            }
+            // 2.1 accepts a superset of 1.6: a message 1.6 accepts, 2.1 accepts; where they differ, 2.1 accepts and 1.6 says the type, or both refuse and 1.6 said the type at the first byte
+            if r1 == 0 {
+                test.assert_eq(rw, 0);
+            }
+            if rw != r1 {
+                test.assert_eq(r1, r_type());
+                type_only = type_only + 1;
+            }
+            seed = next(seed);
+            let c1 = seed / 65536 % (f + 1);
+            seed = next(seed);
+            var c2 = c1;
+            if f > c1 {
+                c2 = c1 + seed / 65536 % (f - c1 + 1);
+            }
+            fresh_ver(ws, 4);
+            let (f2, r2, bd2, h2) = drive(ws, work, buf[0..f], 0, c1, c2);
+            test.assert_eq(r2, rw);
+            fresh_ver(ws, 4);
+            let (f3, r3) = bytewise(ws, work, buf[0..f], 0);
+            test.assert_eq(r3, rw);
+            fresh_ver(ws, 2);
+            let (f4, r4) = bytewise(ws, work, buf[0..f], 0);
+            test.assert_eq(r4, r1);
+            round = round + 1;
+        }
+        test.assert(accepted21 > 100);
+        test.assert(type_only > 100);
+    }
     return 0;
 }
