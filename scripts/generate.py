@@ -850,7 +850,9 @@ def main():
     if "--check" in flags:
         stale = [n for n, t in outputs.items() if not (target / n).exists() or (target / n).read_text() != t]
         for n in stale:
-            print("FAIL %s is stale: run scripts/generate.py %s" % ((target / n).relative_to(ROOT), args[0]))
+            shown = (target / n).resolve()
+            shown = shown.relative_to(ROOT) if shown.is_relative_to(ROOT) else shown
+            print("FAIL %s is stale: run scripts/generate.py %s%s" % (shown, args[0], " --out %s" % out_dir if out_dir else ""))
         return 1 if stale else 0
     target.mkdir(parents=True, exist_ok=True)
     for n, t in outputs.items():
