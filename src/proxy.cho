@@ -29,6 +29,8 @@ import gateway.adminloop;
 import gateway.tlsio;
 import gateway.websocket;
 import gateway.wsframe;
+import gateway.slots;
+import gateway.wstunnel;
 
 // The proxy core, first slice (task #5, docs/proxy.md): one thread, one poller, memory sized at start.
 //
@@ -91,710 +93,6 @@ import gateway.wsframe;
 // The id is the connection's own when it is accepted, and the client's if its route trusts one and it sent a valid one (docs/headers.md).
 // The access-log line is built from these when the session ends (docs/observability.md).
 
-// What `k` is watched for now: room to write if output is queued, input if the phase wants it.
-fn settle[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> [poll] int {
-    let st = contents(core.state);
-    let p = shared.stride() * k;
-    if st[p] != 1 {
-        return 0;
-    }
-    if st[p + 1] == 4 {
-        adminloop.admin_settle(tab, core, k);
-        return 0;
-    }
-    if st[p + 1] == 1 && st[p + tlsio.f_mode()] == tlsio.m_queued() {
-        // Accepted and waiting its turn for a handshake: not watched, its ClientHello waits in the kernel.
-        return 0;
-    }
-    var want = 0;
-    if st[p + 5] > 0 || st[p + 1] == 1 && shared.tls_pending(core, k) {
-        want = 2;
-    }
-    if st[p + 1] == 1 {
-        // A client is read while its head or its body is arriving, or while it is lingering after a refusal; afterwards only a
-        // hang-up matters, and the loop does not look for one (an HTTP client may half-close after its request).
-        if st[p + 3] == 0 || st[p + 3] == 5 || st[p + 3] == 3 && st[p + 10] == 0 && st[p + 4] < shared.buf_size() && st[p + 14] == 0 || st[p + 3] == 6 && st[p + 4] < shared.buf_size() && st[p + 14] == 0 {
-            want = want + 1;
-        }
-        if want % 2 == 1 && st[p + tlsio.f_cin()] > 0 && st[p + tlsio.f_mode()] != 0 {
-            // Ciphertext is held that the engine has not yet taken: the socket has nothing to add, and watching it would spin.
-            want = want - 1;
-        }
-    } else if st[p + 1] == 3 {
-        // Idle in the pool: anything it says, or its closing, means it is no longer fit for use.
-        want = 1;
-    } else if st[p + 3] == 0 {
-        want = 2;
-    } else if st[p + 14] == 0 && st[p + 4] < shared.buf_size() {
-        want = want + 1;
-    }
-    if want != st[p + 6] {
-        conns.rewatch(tab, core.poller, k, shared.token_of(k), want);
-        st[p + 6] = want;
-    }
-    return 0;
-}
-
-// Close slot `k`, whatever it is, and forget it.
-fn close_slot[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> [] int {
-    conns.close(tab, k);
-    contents(core.state)[shared.stride() * k] = 0;
-    return 0;
-}
-
-// An idle connection to upstream `idx`, or -1.
-fn pool_find[&c](core: &c shared.Core, idx: int) -> [] int {
-    let st = contents(core.state);
-    var k = 0;
-    while k < shared.slot_limit() {
-        if st[shared.stride() * k] == 1 && st[shared.stride() * k + 1] == 3 && st[shared.stride() * k + 11] == idx {
-            return k;
-        }
-        k = k + 1;
-    }
-    return 0 - 1;
-}
-
-// Upstream `u` has finished a response and may carry another request: keep it, if the pool has room, else close it.
-fn pool_return[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, now: int) -> [poll] int {
-    let st = contents(core.state);
-    let p = shared.stride() * u;
-    if shared.pool_max() == 0 || shared.idle_count(core, st[p + 11]) >= shared.pool_max() {
-        close_slot(tab, core, u);
-        return 0;
-    }
-    st[p + 1] = 3;
-    st[p + 2] = 0 - 1;
-    st[p + 3] = 1;
-    st[p + 4] = 0;
-    st[p + 5] = 0;
-    st[p + 7] = now + shared.idle_ms();
-    st[p + 8] = 0;
-    st[p + 14] = 0;
-    st[p + 16] = 0;
-    st[p + 17] = 0;
-    st[p + 18] = 0;
-    st[p + 19] = 0;
-    st[p + 20] = 0;
-    st[p + 22] = 0;
-    settle(tab, core, u);
-    return 0;
-}
-
-// The oldest idle connection is closed to make room. Answers 1 if there was one.
-fn evict_idle[&t, &c](tab: &!t conns.Table, core: &!c shared.Core) -> [] int {
-    let st = contents(core.state);
-    var oldest = 0 - 1;
-    var k = 0;
-    while k < shared.slot_limit() {
-        if st[shared.stride() * k] == 1 && st[shared.stride() * k + 1] == 3 && (oldest < 0 || st[shared.stride() * k + 7] < st[shared.stride() * oldest + 7]) {
-            oldest = k;
-        }
-        k = k + 1;
-    }
-    if oldest < 0 {
-        return 0;
-    }
-    close_slot(tab, core, oldest);
-    return 1;
-}
-
-// May a request go to upstream `idx` now? 0: yes, the circuit is closed. 1: yes, as the single trial after the open period.
-// 2: no, the circuit is open, or a trial is already in flight.
-fn circuit_admit[&c](core: &!c shared.Core, idx: int, now: int) -> [] int {
-    let h = contents(core.health);
-    let b = 4 * idx;
-    if shared.circuit_threshold() == 0 || h[b + 1] == 0 {
-        return 0;
-    }
-    if now < h[b + 1] {
-        return 2;
-    }
-    // Half open: one request at a time, and a trial that never reports back does not hold the circuit shut for ever.
-    if h[b + 2] != 0 && now < h[b + 2] {
-        return 2;
-    }
-    h[b + 2] = now + shared.connect_ms() + shared.upstream_ms();
-    return 1;
-}
-
-// Upstream `idx` answered: the failures are forgotten and the circuit, if open, closes.
-fn health_ok[&c](core: &!c shared.Core, idx: int) -> [] int {
-    let h = contents(core.health);
-    let b = 4 * idx;
-    h[b] = 0;
-    h[b + 1] = 0;
-    h[b + 2] = 0;
-    return 0;
-}
-
-// Upstream `idx` failed (it would not connect, did not answer in time, hung up without answering on a fresh connection, or said
-// something unreadable). Enough in a row opens the circuit, and its idle pooled connections go. The count is not reset when the
-// circuit opens, so a failed trial after the open period reopens it at once.
-fn health_fail[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, idx: int, now: int) -> [] int {
-    metrics.upstream_failed(contents(core.stats), idx);
-    if shared.circuit_threshold() == 0 {
-        return 0;
-    }
-    let h = contents(core.health);
-    let st = contents(core.state);
-    let b = 4 * idx;
-    h[b] = h[b] + 1;
-    if h[b] >= shared.circuit_threshold() {
-        h[b + 1] = now + shared.circuit_open_ms();
-        h[b + 2] = 0;
-        var k = 0;
-        while k < shared.slot_limit() {
-            if st[shared.stride() * k] == 1 && st[shared.stride() * k + 1] == 3 && st[shared.stride() * k + 11] == idx {
-                close_slot(tab, core, k);
-            }
-            k = k + 1;
-        }
-    }
-    return 0;
-}
-
-// Upstream `u` has hung up, failed, or been written to in vain. If it was a pooled connection that died before saying anything and
-// the request may be sent again (no body, idempotent) and has not been, it is sent again on a fresh connection; otherwise
-// the client is answered 502, or, if the response was under way, simply closed.
-fn upstream_lost[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, now: int) -> [conn_write, poll] int {
-    let st = contents(core.state);
-    let p = shared.stride() * u;
-    let client = st[p + 2];
-    if client < 0 || st[shared.stride() * client] != 1 {
-        close_slot(tab, core, u);
-        return 0;
-    }
-    let pc = shared.stride() * client;
-    if st[p + 16] >= 1 {
-        shared.drop_session(tab, core, client);
-        return 0;
-    }
-    if st[p + 20] == 0 && st[p + 16] == 0 {
-        // A fresh connection that hung up before answering: the upstream's failing, not a pooled connection going stale.
-        health_fail(tab, core, st[p + 11], now);
-    }
-    if st[p + 4] == 0 && st[p + 20] == 1 && st[pc + 16] == 1 && st[pc + 17] == 0 {
-        close_slot(tab, core, u);
-        st[pc + 2] = 0 - 1;
-        st[pc + 3] = 1;
-        st[pc + 17] = 1;
-        st[pc + 7] = now + shared.connect_ms();
-        return 0;
-    }
-    refuse(tab, core, client, 502, "proxy.upstream-closed", now);
-    return 0;
-}
-
-// Write what is queued for `k`, and, once nothing is left and `k` is to close, close it (a refusal first lingers). Answers 1 if
-// the session ended or the upstream was replaced (the write failed, or `k` has closed).
-fn flush[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: int) -> [conn_write, poll] int {
-    let st = contents(core.state);
-    let pd = contents(core.pends);
-    let p = shared.stride() * k;
-    let base = k * shared.pend_size();
-    if st[p] != 1 {
-        return 0;
-    }
-    if st[p + 5] == 0 && shared.tls_drain(tab, core, k) < 0 {
-        shared.drop_session(tab, core, k);
-        return 1;
-    }
-    if st[p + 5] > 0 {
-        match shared.client_write(tab, core, k, pd[base..base + st[p + 5]]) {
-            Sent::Wrote(n) => {
-                copy_into(pd[base..base + st[p + 5] - n], pd[base + n..base + st[p + 5]]);
-                st[p + 5] = st[p + 5] - n;
-            }
-            Sent::Again => {
-            }
-            Sent::Failed(e) => {
-                if st[p + 1] == 2 {
-                    upstream_lost(tab, core, k, now);
-                } else {
-                    shared.drop_session(tab, core, k);
-                }
-                return 1;
-            }
-        }
-    }
-    if st[p + 5] == 0 && st[p + 8] == 1 && !shared.tls_pending(core, k) {
-        if st[p + 1] == 1 && st[p + 3] == 4 {
-            // A final answer is out while the client may still be sending: linger, reading and discarding, until it stops or
-            // the time is up.
-            st[p + 3] = 5;
-            st[p + 8] = 0;
-            st[p + 7] = now + shared.linger_ms();
-            // The lingering cap: the request's own total deadline, or three seconds, whichever comes first.
-            if st[p + 12] == 0 || st[p + 12] > now + 3000 {
-                st[p + 12] = now + 3000;
-            }
-            settle(tab, core, k);
-            return 0;
-        }
-        shared.drop_session(tab, core, k);
-        return 1;
-    }
-    return 0;
-}
-
-// Refuse the request of client `k` with `status` and `rule`: the upstream, if any, is closed, and a problem+json response is
-// queued and the connection closed once it is sent (the poller reports the socket writable at once). If a response has already
-// begun there is nothing honest to send: the session just ends.
-fn refuse[&t, &c, &r](tab: &!t conns.Table, core: &!c shared.Core, k: int, status: int, rule: &r [byte], now: int) -> [conn_write, poll] int {
-    return refuse_as(tab, core, k, status, rule, rule, now);
-}
-
-// `refuse`, where the response says `rule` and the access log and the counters say `shown`: a token refused for any of eleven reasons is one answer to the client and eleven in the log
-// (docs/jwt.md section 9).
-fn refuse_as[&t, &c, &r, &l](tab: &!t conns.Table, core: &!c shared.Core, k: int, status: int, rule: &r [byte], shown: &l [byte], now: int) -> [conn_write, poll] int {
-    let st = contents(core.state);
-    let pd = contents(core.pends);
-    let p = shared.stride() * k;
-    shared.release_trial(core, k);
-    if st[p + 13] == 1 {
-        shared.drop_session(tab, core, k);
-        return 0;
-    }
-    let peer = st[p + 2];
-    if peer >= 0 && st[shared.stride() * peer] == 1 {
-        conns.close(tab, peer);
-        st[shared.stride() * peer] = 0;
-    }
-    st[p + 2] = 0 - 1;
-    // The record of the refusal, for the access log: its status and rule, and that the gateway made it.
-    st[p + 29] = status;
-    shared.flag_set(core, k, 1);
-    shared.meta_put(core, k, 68, 40, 1, shown);
-    let base = k * shared.pend_size();
-    // A 401 names how to authenticate: the challenge of the route that refused it (docs/auth.md section 7.2).
-    var challenge = "";
-    if status == 401 && st[p + 31] > 0 {
-        challenge = route.auth_challenge(st[p + 31] - 1);
-    }
-    let n = problem.response_challenge(pd[base..base + shared.pend_size()], status, rule, shared.meta_get(core, k, 4, 0), st[p + shared.retry_after()], challenge);
-    if n < 0 {
-        shared.drop_session(tab, core, k);
-        return 0;
-    }
-    st[p + 5] = n;
-    st[p + 27] = st[p + 27] + n;
-    st[p + 8] = 1;
-    st[p + 3] = 4;
-    st[p + 4] = 0;
-    st[p + 7] = now + shared.flush_ms();
-    settle(tab, core, k);
-    return 0;
-}
-
-// The upstream's response is complete: the client's connection ends once what is queued for it has been written, and the
-// upstream goes back to the pool if it may carry another request (its framing allows it, nothing is left unread, the request's
-// body was fully sent and the upstream did not hang up), else it is closed.
-fn finish_response[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, now: int) -> [conn_write, poll] int {
-    let st = contents(core.state);
-    let pu = shared.stride() * u;
-    let client = st[pu + 2];
-    let pc = shared.stride() * client;
-    let reuse = st[pu + 19] == 1 && st[pu + 4] == 0 && st[pc + 10] == 1 && st[pu + 14] == 0;
-    st[pc + 2] = 0 - 1;
-    st[pc + 8] = 1;
-    shared.flag_set(core, client, 2);
-    if st[pc + 10] == 0 {
-        // The upstream answered before the request body was all sent: the client may still be sending, so it lingers.
-        st[pc + 3] = 4;
-    }
-    if reuse {
-        pool_return(tab, core, u, now);
-    } else {
-        close_slot(tab, core, u);
-    }
-    if flush(tab, core, client, now) == 0 {
-        settle(tab, core, client);
-    }
-    return 0;
-}
-
-// Where client `k`'s accept value is in the meta area.
-fn k_accept(k: int) -> [] int {
-    return k * shared.meta_size() + shared.ws_accept_at();
-}
-
-// The upstream `u` answered an upgrade request with a `101` whose head is the first `r` bytes of its buffer (docs/websocket.md sections 6 and 7): check it against what
-// the request called for; if it passes, tell the client, and from here both connections are a tunnel and nothing is framed.
-fn upgrade_answered[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, r: int, now: int) -> [conn_write, poll] int {
-    let st = contents(core.state);
-    let bf = contents(core.bufs);
-    let pd = contents(core.pends);
-    let tb = contents(core.table);
-    let m = contents(core.meta);
-    let pu = shared.stride() * u;
-    let client = st[pu + 2];
-    let pc = shared.stride() * client;
-    let ub = u * shared.buf_size();
-    let cb = client * shared.pend_size();
-    let accept = k_accept(client);
-    let view = bf[ub..ub + st[pu + 4]];
-    let verdict = websocket.check_response(view[0..r], tb, m[accept..accept + 28], st[pc + shared.ws_mask()], route.subprotocols(st[pc + 31] - 1));
-    if verdict < 0 {
-        health_fail(tab, core, st[pu + 11], now);
-        refuse(tab, core, client, websocket.status(0 - verdict), websocket.tag(0 - verdict), now);
-        return 0;
-    }
-    health_ok(core, st[pu + 11]);
-    let n = websocket.upgrade_response(view[0..r], tb, pd[cb + st[pc + 5]..cb + shared.pend_size()], shared.meta_get(core, client, 4, 0));
-    if n < 0 {
-        shared.drop_session(tab, core, client);
-        return 0;
-    }
-    st[pc + 5] = st[pc + 5] + n;
-    st[pc + 27] = st[pc + 27] + n;
-    st[pc + 13] = 1;
-    st[pc + 26] = now;
-    st[pc + 29] = 101;
-    // The tunnel's clocks replace the request's: idle (reset by every byte that moves) and lifetime (not).
-    st[pc + 3] = 6;
-    st[pc + 7] = now + deploy.ws_idle_ms();
-    st[pc + 12] = now + deploy.ws_lifetime_ms();
-    st[pc + shared.ws_mode()] = 2;
-    st[pu + 16] = 2;
-    copy_into(bf[ub..ub + st[pu + 4] - r], bf[ub + r..ub + st[pu + 4]]);
-    st[pu + 4] = st[pu + 4] - r;
-    wsframe.init(contents(core.wsf)[ws_at(client)..ws_at(client) + wsframe.state_len()], now);
-    if route.ws_ocpp(st[pc + 31] - 1) > 0 {
-        // The route validates OCPP-J frames (docs/ocpp.md): both directions' recognisers are switched on.
-        wsframe.enable_ocpp(contents(core.wsf)[ws_at(client)..ws_at(client) + wsframe.state_len()]);
-    }
-    metrics.ws_opened(contents(core.stats));
-    return tunnel_down(tab, core, u, now);
-}
-
-// The state of client `k`'s tunnel (`wsframe`: `state_len()` ints in `core.wsf`, set when the 101 is relayed), docs/websocket-frames.md section 11.
-fn ws_at(k: int) -> [] int {
-    return k * wsframe.state_len();
-}
-
-// Clear the "relayed whole" mark of client `pc`'s record: its tunnel did not end by a peer's closing (a truncated frame, or the gateway's own close).
-fn not_ok[&c](core: &!c shared.Core, pc: int) -> [] int {
-    let st = contents(core.state);
-    if shared.flag_has(st[pc + 30], 2) {
-        st[pc + 30] = st[pc + 30] - 2;
-    }
-    return 0;
-}
-
-// The gateway starts closing client `client`'s tunnel for `cause` (docs/websocket-frames.md section 7): the plan is made (`wsframe.begin_close`), the cause is the access log's rule and a
-// Ping that went unanswered is counted. Nothing is written yet: `tunnel_run` does that, at the frames' boundaries.
-fn tunnel_mark[&c](core: &!c shared.Core, client: int, cause: int, offender: int, now: int) -> [] int {
-    let w = contents(core.wsf)[ws_at(client)..ws_at(client) + wsframe.state_len()];
-    wsframe.begin_close(w, cause, offender, now, deploy.ws_close_ms());
-    shared.meta_put(core, client, 68, 40, 1, wsframe.tag(cause));
-    not_ok(core, shared.stride() * client);
-    if cause == wsframe.rule_pong_timeout() {
-        metrics.ws_pong_timeout(contents(core.stats));
-    }
-    if wsframe.is_ocpp(cause) {
-        metrics.ws_ocpp_violation(contents(core.stats));
-    }
-    return 0;
-}
-
-// The tunnel, one direction (docs/websocket-frames.md sections 2, 6 and 7): `dir` 0 moves what the client has sent to the upstream's queue, 1 what the upstream has said to the client's, as far
-// as there is room, and each byte goes through `wsframe.scan` first, which says how many of them may go. What the parser holds back stays in the read buffer. Answers 0, 1 if the session ended, or 2
-// if the gateway has just begun to close the tunnel (the caller then runs both directions).
-//
-// Closing, from here: until the Close frame for this direction's destination has been placed, the direction forwards up to its next frame boundary and no further; the frame is then written at that
-// boundary. After it, and for a side that has sent its Close, what the source says is read, parsed for its Close, and discarded.
-fn tunnel_pump[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, client: int, dir: int, now: int) -> [conn_write, poll] int {
-    let st = contents(core.state);
-    let bf = contents(core.bufs);
-    let pd = contents(core.pends);
-    let pc = shared.stride() * client;
-    let u = st[pc + 2];
-    if u < 0 || st[shared.stride() * u] != 1 {
-        shared.drop_session(tab, core, client);
-        return 1;
-    }
-    let pu = shared.stride() * u;
-    var src = client;
-    var dst = u;
-    if dir == 1 {
-        src = u;
-        dst = client;
-    }
-    let ps = shared.stride() * src;
-    let pt = shared.stride() * dst;
-    let w = contents(core.wsf)[ws_at(client)..ws_at(client) + wsframe.state_len()];
-    let b = wsframe.dir_base(dir);
-    let sb = src * shared.buf_size();
-    let qb = dst * shared.pend_size();
-    let maxmsg = route.ws_max_message(st[pc + 31] - 1);
-    var sent_at = wsframe.t_sent_client();
-    var done_at = wsframe.t_done_upstream();
-    var code_at = wsframe.t_code_client();
-    if dir == 0 {
-        sent_at = wsframe.t_sent_upstream();
-        done_at = wsframe.t_done_client();
-        code_at = wsframe.t_code_upstream();
-    }
-    var moving = true;
-    while moving {
-        moving = false;
-        let cs = w[0];
-        let avail = st[ps + 4];
-        if cs == 1 && w[sent_at] != 0 {
-            // Closing and this direction's Close is out (or will not be sent): read what the source says, look for its Close, discard.
-            if avail > 0 {
-                var used = avail;
-                if w[b + 18] == 0 {
-                    used = wsframe.scan(w, dir, bf[sb..sb + avail], 1099511627776, false, false);
-                    if w[b + 14] == 1 || w[b + 14] == 2 {
-                        w[done_at] = 1;
-                        w[b + 18] = 1;
-                        used = avail;
-                    }
-                }
-                copy_into(bf[sb..sb + avail - used], bf[sb + used..sb + avail]);
-                st[ps + 4] = avail - used;
-                moving = used > 0 && st[ps + 4] > 0;
-            }
-        } else {
-            let room = shared.pend_size() - st[pt + 5];
-            var take = avail;
-            if take > room {
-                take = room;
-            }
-            var stop = cs == 1;
-            if cs == 0 && dir == 1 && wsframe.ping_due(w, now, deploy.ws_ping_ms()) {
-                stop = true;
-            }
-            var n = 0;
-            if take > 0 || stop {
-                n = wsframe.scan(w, dir, bf[sb..sb + take], maxmsg, stop, dir == 0);
-            }
-            var ev = 0;
-            if take > 0 || stop {
-                ev = w[b + 14];
-            }
-            if n > 0 {
-                copy_into(pd[qb + st[pt + 5]..qb + st[pt + 5] + n], bf[sb..sb + n]);
-                copy_into(bf[sb..sb + avail - n], bf[sb + n..sb + avail]);
-                st[ps + 4] = avail - n;
-                st[pt + 5] = st[pt + 5] + n;
-                if dir == 0 {
-                    st[pc + 28] = st[pc + 28] + n;
-                } else {
-                    st[pc + 27] = st[pc + 27] + n;
-                }
-                st[pc + 7] = now + deploy.ws_idle_ms();
-                if flush(tab, core, dst, now) == 1 {
-                    return 1;
-                }
-            }
-            if ev == 1 {
-                // A frame that breaks a rule of section 3: what went before it has gone on, it has not, and the tunnel is closed (unless it already is).
-                if cs != 1 {
-                    tunnel_mark(core, client, w[b + 15], dir, now);
-                } else {
-                    w[b + 18] = 1;
-                    w[done_at] = 1;
-                    if w[b + 17] == 0 {
-                        w[sent_at] = 2;
-                    }
-                }
-                return 2;
-            }
-            if ev == 2 {
-                // A Close frame went by (it was forwarded): the first of the tunnel's names its code; a peer's Close starts the wait for the other's.
-                if w[8] == 0 {
-                    w[8] = w[b + 15];
-                }
-                if cs == 0 {
-                    w[0] = 2;
-                    w[1] = now + deploy.ws_close_ms();
-                } else {
-                    w[done_at] = 1;
-                }
-                moving = st[ps + 4] > 0;
-            } else if ev == 3 {
-                // The client's answer to the gateway's own Ping: heard, not forwarded.
-                copy_into(bf[sb..sb + st[ps + 4] - 14], bf[sb + 14..sb + st[ps + 4]]);
-                st[ps + 4] = st[ps + 4] - 14;
-                w[9] = 0;
-                st[pc + 7] = now + deploy.ws_idle_ms();
-                moving = st[ps + 4] > 0;
-            } else if ev == 0 && n > 0 && st[ps + 4] > 0 && shared.pend_size() - st[pt + 5] > 0 {
-                moving = true;
-            }
-            if ev == 0 && w[b] == 0 {
-                // At a frame boundary: the place for a frame of the gateway's own, if one is due and there is room for it.
-                let room2 = shared.pend_size() - st[pt + 5];
-                if cs == 1 && w[sent_at] == 0 {
-                    if dir == 0 && room2 >= wsframe.close_masked_len() {
-                        let m = wsframe.put_close_masked(pd[qb + st[pt + 5]..qb + st[pt + 5] + wsframe.close_masked_len()], w[code_at]);
-                        st[pt + 5] = st[pt + 5] + m;
-                        w[sent_at] = 1;
-                        if flush(tab, core, dst, now) == 1 {
-                            return 1;
-                        }
-                        moving = true;
-                    } else if dir == 1 && room2 >= wsframe.close_len() {
-                        let m = wsframe.put_close(pd[qb + st[pt + 5]..qb + st[pt + 5] + wsframe.close_len()], w[code_at]);
-                        st[pt + 5] = st[pt + 5] + m;
-                        st[pc + 27] = st[pc + 27] + m;
-                        w[sent_at] = 1;
-                        if flush(tab, core, dst, now) == 1 {
-                            return 1;
-                        }
-                        moving = true;
-                    }
-                } else if cs == 0 && dir == 1 && wsframe.ping_due(w, now, deploy.ws_ping_ms()) && room2 >= wsframe.ping_len() {
-                    let m = wsframe.put_ping(pd[qb + st[pt + 5]..qb + st[pt + 5] + wsframe.ping_len()], now);
-                    st[pt + 5] = st[pt + 5] + m;
-                    st[pc + 27] = st[pc + 27] + m;
-                    w[9] = 1;
-                    w[10] = now;
-                    w[11] = now;
-                    metrics.ws_pinged(contents(core.stats));
-                    if flush(tab, core, dst, now) == 1 {
-                        return 1;
-                    }
-                    moving = st[ps + 4] > 0;
-                }
-            }
-        }
-    }
-    if w[14] > 0 {
-        metrics.ws_messages(contents(core.stats), w[14]);
-        w[14] = 0;
-    }
-    if st[ps + 14] == 1 && w[0] == 1 && (st[ps + 4] == 0 || w[sent_at] != 0) {
-        // A side went away while the gateway was closing: it will not answer, and no Close can reach it; the other is still waited for. A direction cut off inside a frame cannot be given one either.
-        w[done_at] = 1;
-        var to_src = wsframe.t_sent_upstream();
-        if dir == 0 {
-            to_src = wsframe.t_sent_client();
-        }
-        if w[to_src] == 0 {
-            w[to_src] = 2;
-        }
-        if w[b] == 1 && w[sent_at] == 0 {
-            w[sent_at] = 2;
-        }
-        st[ps + 4] = 0;
-    } else if st[ps + 14] == 1 && w[0] != 1 && w[13] == 0 {
-        // The source has ended. Bytes the parser still holds (a header, or the start of a Pong) or a payload that was cut off make it a truncated frame; otherwise it is the ending of slice 1.
-        var cut = w[b] == 1;
-        if st[ps + 4] > 0 && shared.pend_size() - st[pt + 5] > 0 {
-            cut = true;
-        }
-        if cut {
-            shared.meta_put(core, client, 68, 40, 1, wsframe.tag(wsframe.rule_truncated()));
-            not_ok(core, pc);
-            st[ps + 4] = 0;
-        }
-        if st[ps + 4] == 0 {
-            if dir == 0 && st[pu + 5] == 0 {
-                shared.drop_session(tab, core, client);
-                return 1;
-            }
-            if dir == 1 {
-                st[pc + 8] = 1;
-                if flush(tab, core, client, now) == 1 {
-                    return 1;
-                }
-            }
-        }
-    }
-    if w[0] == 1 {
-        // Both sides have answered (or will not), or have not been sent a Close that could be: finished once what is queued is written.
-        let fc = w[wsframe.t_sent_client()] == 2 || w[wsframe.t_sent_client()] == 1 && w[wsframe.t_done_client()] == 1;
-        let fu = w[wsframe.t_sent_upstream()] == 2 || w[wsframe.t_sent_upstream()] == 1 && w[wsframe.t_done_upstream()] == 1;
-        if fc && fu {
-            w[13] = 1;
-        }
-    } else if w[0] == 2 && w[wsframe.dir_base(0) + wsframe.d_closed()] == 1 && w[wsframe.dir_base(1) + wsframe.d_closed()] == 1 {
-        w[13] = 1;
-    }
-    if w[13] == 1 {
-        if w[0] == 1 {
-            not_ok(core, pc);
-        } else if w[0] == 2 {
-            shared.flag_set(core, client, 2);
-        }
-        if st[pu + 5] > 0 && flush(tab, core, u, now) == 1 {
-            return 1;
-        }
-        if st[pu + 5] == 0 {
-            if w[0] == 1 && w[wsframe.dir_base(0) + wsframe.d_offender()] == 1 && st[pc + 3] == 6 {
-                // The client broke a rule and may still be sending: closing now would reset the connection and could destroy the Close frame it is owed, so the upstream goes and the
-                // client lingers, its input read and thrown away, as after a refusal (docs/websocket-frames.md section 7).
-                close_slot(tab, core, u);
-                st[pc + 2] = 0 - 1;
-                st[pc + 3] = 4;
-            }
-            st[pc + 8] = 1;
-            if flush(tab, core, client, now) == 1 {
-                return 1;
-            }
-        }
-    }
-    settle(tab, core, client);
-    settle(tab, core, u);
-    return 0;
-}
-
-// Run the tunnel of client `client` after something happened to direction `dir`: that direction first; then, if the gateway has begun to close the tunnel (a direction answered 2, or a Close
-// frame is still to be placed), both directions, until the closing has done what it can.
-fn tunnel_run[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, client: int, dir: int, now: int) -> [conn_write, poll] int {
-    var r = tunnel_pump(tab, core, client, dir, now);
-    var again = 0;
-    while r != 1 && again < 3 {
-        let wk = contents(core.wsf)[ws_at(client)..ws_at(client) + wsframe.state_len()];
-        if r != 2 && !(again == 0 && wk[0] == 1 && (wk[wsframe.t_sent_client()] == 0 || wk[wsframe.t_sent_upstream()] == 0)) {
-            return 0;
-        }
-        again = again + 1;
-        let r0 = tunnel_pump(tab, core, client, 0, now);
-        r = r0;
-        if r0 != 1 {
-            let r1 = tunnel_pump(tab, core, client, 1, now);
-            if r1 == 1 {
-                r = 1;
-            } else if r0 == 2 || r1 == 2 {
-                r = 2;
-            } else {
-                r = 0;
-            }
-        }
-    }
-    return 0;
-}
-
-// The gateway closes client `client`'s tunnel for `cause` (a rule of `wsframe`) and starts doing it.
-fn tunnel_close[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, client: int, cause: int, now: int) -> [conn_write, poll] int {
-    if contents(core.wsf)[ws_at(client)] == 0 {
-        tunnel_mark(core, client, cause, 0 - 1, now);
-        tunnel_run(tab, core, client, 0, now);
-    }
-    return 0;
-}
-
-// The tunnel, upstream to client: what the upstream `u` has said goes to its client's queue as far as there is room and as the frame parser allows, and is written.
-fn tunnel_down[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, now: int) -> [conn_write, poll] int {
-    let st = contents(core.state);
-    let client = st[shared.stride() * u + 2];
-    if client < 0 || st[shared.stride() * client] != 1 {
-        close_slot(tab, core, u);
-        return 0;
-    }
-    return tunnel_run(tab, core, client, 1, now);
-}
-
-// The tunnel, client to upstream.
-fn tunnel_up[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: int) -> [conn_write, poll] int {
-    return tunnel_run(tab, core, k, 0, now);
-}
-
 // Move what the upstream `u` has said to its client: first its head (parsed, rewritten, interim responses passed on), then its
 // body as its framing says, as far as the client's queue has room.
 fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, now: int) -> [conn_write, poll] int {
@@ -806,14 +104,14 @@ fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, no
     let pu = shared.stride() * u;
     let client = st[pu + 2];
     if client < 0 || st[shared.stride() * client] != 1 {
-        close_slot(tab, core, u);
+        slots.close_slot(tab, core, u);
         return 0;
     }
     let pc = shared.stride() * client;
     let ub = u * shared.buf_size();
     let cb = client * shared.pend_size();
     if st[pu + 16] == 2 {
-        return tunnel_down(tab, core, u, now);
+        return wstunnel.tunnel_down(tab, core, u, now);
     }
     var going = true;
     while going {
@@ -828,12 +126,12 @@ fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, no
                     r = response.parse(view, tb);
                 }
                 if r < 0 {
-                    health_fail(tab, core, st[pu + 11], now);
-                    refuse(tab, core, client, response.status(0 - r), response.tag(0 - r), now);
+                    slots.health_fail(tab, core, st[pu + 11], now);
+                    slots.refuse(tab, core, client, response.status(0 - r), response.tag(0 - r), now);
                     return 0;
                 }
                 if r > 0 && response.code(tb) == 101 {
-                    return upgrade_answered(tab, core, u, r, now);
+                    return wstunnel.upgrade_answered(tab, core, u, r, now);
                 }
                 if r > 0 && shared.pend_size() - st[pc + 5] >= r + 64 {
                     if response.interim(tb) {
@@ -843,7 +141,7 @@ fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, no
                         st[pc + 27] = st[pc + 27] + r;
                         st[pc + 13] = 1;
                     } else {
-                        health_ok(core, st[pu + 11]);
+                        slots.health_ok(core, st[pu + 11]);
                         let m = forward.rewrite_response(view[0..r], tb, pd[cb + st[pc + 5]..cb + shared.pend_size()], shared.meta_get(core, client, 4, 0));
                         if m < 0 {
                             shared.drop_session(tab, core, client);
@@ -872,11 +170,11 @@ fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, no
                     st[pu + 4] = st[pu + 4] - r;
                     if st[pu + 16] == 1 && st[pu + 17] == 0 {
                         // A response with no body is complete with its head.
-                        finish_response(tab, core, u, now);
+                        slots.finish_response(tab, core, u, now);
                         return 0;
                     }
                     // Body bytes that came in the same read follow the head in the same write: one send instead of two.
-                    if st[pu + 4] == 0 && flush(tab, core, client, now) == 1 {
+                    if st[pu + 4] == 0 && slots.flush(tab, core, client, now) == 1 {
                         return 0;
                     }
                     going = true;
@@ -916,10 +214,10 @@ fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, no
                 st[pc + 27] = st[pc + 27] + used;
                 let before = st[pc + 5];
                 if done {
-                    finish_response(tab, core, u, now);
+                    slots.finish_response(tab, core, u, now);
                     return 0;
                 }
-                if flush(tab, core, client, now) == 1 {
+                if slots.flush(tab, core, client, now) == 1 {
                     return 0;
                 }
                 going = st[pc + 5] < before && st[pu + 4] > 0;
@@ -930,14 +228,14 @@ fn pump_response[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, no
     if st[pu + 14] == 1 && st[pu + 4] == 0 {
         if st[pu + 16] == 1 && st[pu + 17] == 3 {
             // A body that runs until the connection closes ends here.
-            finish_response(tab, core, u, now);
+            slots.finish_response(tab, core, u, now);
         } else {
-            upstream_lost(tab, core, u, now);
+            slots.upstream_lost(tab, core, u, now);
         }
         return 0;
     }
-    settle(tab, core, client);
-    settle(tab, core, u);
+    slots.settle(tab, core, client);
+    slots.settle(tab, core, u);
     return 0;
 }
 
@@ -953,7 +251,7 @@ fn pump_request[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now
         return 0;
     }
     if st[p + 3] == 6 {
-        return tunnel_up(tab, core, k, now);
+        return wstunnel.tunnel_up(tab, core, k, now);
     }
     let pu = shared.stride() * u;
     var moving = true;
@@ -981,7 +279,7 @@ fn pump_request[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now
                     let slot_chunks = ch[k * chunked.state_len()..k * chunked.state_len() + chunked.state_len()];
                     let n = chunked.advance(bf[cb..cb + take], slot_chunks);
                     if n < 0 {
-                        refuse(tab, core, k, framing.status(0 - n), framing.tag(0 - n), now);
+                        slots.refuse(tab, core, k, framing.status(0 - n), framing.tag(0 - n), now);
                         return 0;
                     }
                     used = n;
@@ -1000,7 +298,7 @@ fn pump_request[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now
                     st[p + 4] = st[p + 4] - used;
                 }
                 let before = st[pu + 5];
-                if flush(tab, core, u, now) == 1 {
+                if slots.flush(tab, core, u, now) == 1 {
                     return 0;
                 }
                 moving = st[p + 10] == 0 && st[pu + 5] < before && st[p + 4] > 0;
@@ -1008,11 +306,11 @@ fn pump_request[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now
         }
     }
     // A request with no body to forward still has its head waiting.
-    if st[pu + 5] > 0 && flush(tab, core, u, now) == 1 {
+    if st[pu + 5] > 0 && slots.flush(tab, core, u, now) == 1 {
         return 0;
     }
-    settle(tab, core, k);
-    settle(tab, core, u);
+    slots.settle(tab, core, k);
+    slots.settle(tab, core, u);
     return 0;
 }
 
@@ -1040,7 +338,7 @@ fn unauthenticated[&t, &c, &v, &b](tab: &!t conns.Table, core: &!c shared.Core, 
             let verdict = jwt.verify(cred, routes_table.jwt_keys_blob(), route.jwt_keys(sel), route.jwt_aud(sel), route.jwt_iss(sel), route.jwt_leeway(sel), (contents(core.ids)[2] + now) / 1000);
             if verdict < 0 {
                 metrics.jwt_refused(contents(core.stats), sel, 0 - verdict);
-                refuse_as(tab, core, k, 401, "auth.invalid", jwt.tag(0 - verdict), now);
+                slots.refuse_as(tab, core, k, 401, "auth.invalid", jwt.tag(0 - verdict), now);
                 return true;
             }
             st[p + shared.auth_slot()] = 100 + verdict;
@@ -1064,7 +362,7 @@ fn unauthenticated[&t, &c, &v, &b](tab: &!t conns.Table, core: &!c shared.Core, 
         return false;
     }
     metrics.auth_refused(contents(core.stats), sel, rule);
-    refuse(tab, core, k, auth.status(rule), auth.tag(rule), now);
+    slots.refuse(tab, core, k, auth.status(rule), auth.tag(rule), now);
     return true;
 }
 
@@ -1101,17 +399,17 @@ fn rate_limited[&t, &c, &v, &b](tab: &!t conns.Table, core: &!c shared.Core, k: 
     if verdict > ratelimit.route_offset() {
         st[p + shared.retry_after()] = verdict - ratelimit.route_offset();
         metrics.rate_route_refused(contents(core.stats), sel);
-        refuse(tab, core, k, 429, "limit.rate-route", now);
+        slots.refuse(tab, core, k, 429, "limit.rate-route", now);
         return true;
     }
     if verdict > 0 {
         st[p + shared.retry_after()] = verdict;
         metrics.rate_refused(contents(core.stats), sel, false);
-        refuse(tab, core, k, 429, "limit.rate", now);
+        slots.refuse(tab, core, k, 429, "limit.rate", now);
     } else {
         st[p + shared.retry_after()] = 0 - verdict;
         metrics.rate_refused(contents(core.stats), sel, true);
-        refuse(tab, core, k, 429, "limit.rate-table", now);
+        slots.refuse(tab, core, k, 429, "limit.rate-table", now);
     }
     return true;
 }
@@ -1127,11 +425,11 @@ fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: 
     let view = bf[base..base + st[p + 4]];
     let r = framing.judge(view, tb);
     if r == 0 {
-        settle(tab, core, k);
+        slots.settle(tab, core, k);
         return 0;
     }
     if r < 0 {
-        refuse(tab, core, k, framing.status(0 - r), framing.tag(0 - r), now);
+        slots.refuse(tab, core, k, framing.status(0 - r), framing.tag(0 - r), now);
         return 0;
     }
     // The head is good: keep what the access log will say about it (the head's buffer is reused as the request goes on).
@@ -1139,7 +437,7 @@ fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: 
     shared.meta_put(core, k, 124, 128, 3, http.path(view, tb));
     let sel = route.select(http.header(view, tb, "host"), http.method(view, tb), http.path(view, tb));
     if sel < 0 {
-        refuse(tab, core, k, route.status(0 - sel), route.tag(0 - sel), now);
+        slots.refuse(tab, core, k, route.status(0 - sel), route.tag(0 - sel), now);
         return 0;
     }
     // The route is known: the access log names it and its upstream even if the request is refused from here on.
@@ -1153,15 +451,15 @@ fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: 
         // A WebSocket upgrade (docs/websocket.md section 4): all of it is checked here, before anything else is decided about the request. It has no body (`ws.body`).
         let w = websocket.judge(view, tb, route.subprotocols(sel), route.origins(sel));
         if w < 0 {
-            refuse(tab, core, k, websocket.status(0 - w), websocket.tag(0 - w), now);
+            slots.refuse(tab, core, k, websocket.status(0 - w), websocket.tag(0 - w), now);
             return 0;
         }
         if shared.tunnels(core, false) >= deploy.ws_max_tunnels() {
-            refuse(tab, core, k, websocket.status(10), websocket.tag(10), now);
+            slots.refuse(tab, core, k, websocket.status(10), websocket.tag(10), now);
             return 0;
         }
         let m = contents(core.meta);
-        let at = k_accept(k);
+        let at = wstunnel.k_accept(k);
         websocket.accept_for(view, tb, m[at..at + 28]);
         st[p + shared.ws_mode()] = 1;
         st[p + shared.ws_mask()] = w;
@@ -1172,7 +470,7 @@ fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: 
         st[p + 9] = 0 - 1;
         st[p + 10] = 0;
     } else if http.content_length(tb) > max_body {
-        refuse(tab, core, k, 413, "limit.body", now);
+        slots.refuse(tab, core, k, 413, "limit.body", now);
         return 0;
     } else if http.content_length(tb) > 0 {
         st[p + 9] = http.content_length(tb);
@@ -1186,9 +484,9 @@ fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: 
         return 0;
     }
     // Last of the checks the gateway makes itself: a request refused above never uses up the circuit's one trial.
-    let admit = circuit_admit(core, route.upstream(sel), now);
+    let admit = slots.circuit_admit(core, route.upstream(sel), now);
     if admit == 2 {
-        refuse(tab, core, k, 503, "proxy.circuit-open", now);
+        slots.refuse(tab, core, k, 503, "proxy.circuit-open", now);
         return 0;
     }
     st[p + 21] = 0;
@@ -1223,7 +521,7 @@ fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: 
     }
     st[p + 3] = 1;
     st[p + 7] = now + shared.connect_ms();
-    settle(tab, core, k);
+    slots.settle(tab, core, k);
     return 0;
 }
 
@@ -1261,11 +559,11 @@ fn attach[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, slot: int
         }
     }
     if failed > 0 {
-        close_slot(tab, core, slot);
+        slots.close_slot(tab, core, slot);
         if failed == 1 {
-            refuse(tab, core, k, 502, "proxy.head", now);
+            slots.refuse(tab, core, k, 502, "proxy.head", now);
         } else {
-            refuse(tab, core, k, forward.status(failed - 1), forward.tag(failed - 1), now);
+            slots.refuse(tab, core, k, forward.status(failed - 1), forward.tag(failed - 1), now);
         }
         return 1;
     }
@@ -1293,13 +591,13 @@ fn dial[&h, &n, &c](heap: &!h Heap, tab: conns.Table, net: &n Net(""), core: &!c
     let addr = deploy.upstream_addr(idx);
     if !egress.allowed(addr) {
         borrow mut table as &!tw in {
-            refuse(tw, core, k, 502, "proxy.egress", now);
+            slots.refuse(tw, core, k, 502, "proxy.egress", now);
         }
         return table;
     }
     var pooled = 0 - 1;
     if st[p + 17] == 0 {
-        pooled = pool_find(core, idx);
+        pooled = slots.pool_find(core, idx);
     }
     if pooled >= 0 {
         let q = shared.stride() * pooled;
@@ -1345,7 +643,7 @@ fn dial[&h, &n, &c](heap: &!h Heap, tab: conns.Table, net: &n Net(""), core: &!c
                     if slot >= 0 {
                         conns.close(tw, slot);
                     }
-                    refuse(tw, core, k, 503, "limit.connections", now);
+                    slots.refuse(tw, core, k, 503, "limit.connections", now);
                 }
                 return table;
             }
@@ -1371,21 +669,21 @@ fn dial[&h, &n, &c](heap: &!h Heap, tab: conns.Table, net: &n Net(""), core: &!c
                 let ignored = conns.nodelay(tw, slot);
                 if attach(tw, core, k, slot, now) == 0 {
                     if conns.watch(tw, core.poller, slot, shared.token_of(slot), 2) != 0 {
-                        close_slot(tw, core, slot);
-                        refuse(tw, core, k, 502, "proxy.connect", now);
+                        slots.close_slot(tw, core, slot);
+                        slots.refuse(tw, core, k, 502, "proxy.connect", now);
                     } else {
                         st[q + 6] = 2;
                         st[p + 3] = 2;
                         st[p + 7] = now + shared.connect_ms();
-                        settle(tw, core, k);
+                        slots.settle(tw, core, k);
                     }
                 }
             }
         }
         Dialed::Failed(e) => {
             borrow mut table as &!tw in {
-                health_fail(tw, core, idx, now);
-                refuse(tw, core, k, 502, "proxy.connect", now);
+                slots.health_fail(tw, core, idx, now);
+                slots.refuse(tw, core, k, 502, "proxy.connect", now);
             }
         }
     }
@@ -1406,8 +704,8 @@ fn read_client[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now:
                 head_ready(tab, core, k, now);
             } else if st[p + 3] == 6 {
                 // Heard from: the keepalive's clock (docs/websocket-frames.md section 6).
-                contents(core.wsf)[ws_at(k) + wsframe.t_heard()] = now;
-                tunnel_up(tab, core, k, now);
+                contents(core.wsf)[wstunnel.ws_at(k) + wsframe.t_heard()] = now;
+                wstunnel.tunnel_up(tab, core, k, now);
             } else {
                 pump_request(tab, core, k, now);
             }
@@ -1417,13 +715,13 @@ fn read_client[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now:
                 // The client closed the tunnel: what it sent is forwarded, then both ends close (cancho has no half-close).
                 st[p + 14] = 1;
                 shared.flag_set(core, k, 2);
-                tunnel_up(tab, core, k, now);
+                wstunnel.tunnel_up(tab, core, k, now);
             } else if st[p + 3] == 0 || st[p + 10] == 0 {
                 // It left before its request was whole.
                 shared.drop_session(tab, core, k);
             } else {
                 st[p + 14] = 1;
-                settle(tab, core, k);
+                slots.settle(tab, core, k);
             }
         }
         Received::Again => {
@@ -1477,7 +775,7 @@ fn step[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, readiness: 
     if st[p + 1] == 1 {
         if st[p + 3] == 4 {
             if readiness % 4 >= 2 {
-                flush(tab, core, k, now);
+                slots.flush(tab, core, k, now);
             } else {
                 shared.drop_session(tab, core, k);
             }
@@ -1505,7 +803,7 @@ fn step[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, readiness: 
             return 0;
         }
         if (st[p + 5] > 0 || st[p + tlsio.f_mode()] >= tlsio.m_handshake()) && readiness % 4 >= 2 {
-            if flush(tab, core, k, now) == 1 {
+            if slots.flush(tab, core, k, now) == 1 {
                 return 0;
             }
             // Room has opened for more of the response.
@@ -1524,7 +822,7 @@ fn step[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, readiness: 
     }
     if st[p + 1] == 3 {
         // Idle in the pool and heard from: it hung up, or spoke out of turn. Either way it is finished.
-        close_slot(tab, core, k);
+        slots.close_slot(tab, core, k);
         return 0;
     }
     // An upstream connection.
@@ -1536,8 +834,8 @@ fn step[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, readiness: 
     if st[p + 3] == 0 {
         let outcome = conns.connect_status(tab, k);
         if outcome != 0 {
-            health_fail(tab, core, st[p + 11], now);
-            refuse(tab, core, client, 502, "proxy.connect", now);
+            slots.health_fail(tab, core, st[p + 11], now);
+            slots.refuse(tab, core, client, 502, "proxy.connect", now);
             return 0;
         }
         st[p + 3] = 1;
@@ -1547,7 +845,7 @@ fn step[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, readiness: 
         return 0;
     }
     if st[p + 5] > 0 && readiness % 4 >= 2 {
-        if flush(tab, core, k, now) == 1 {
+        if slots.flush(tab, core, k, now) == 1 {
             return 0;
         }
         pump_request(tab, core, client, now);
@@ -1569,7 +867,7 @@ fn sweep[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, now: int) -> [conn
     while k < shared.slot_limit() {
         let p = shared.stride() * k;
         if st[p] == 1 && st[p + 1] == 3 && now >= st[p + 7] {
-            close_slot(tab, core, k);
+            slots.close_slot(tab, core, k);
         }
         if st[p] == 1 && st[p + 1] == 4 && now >= st[p + 7] {
             if st[p + 3] == 1 {
@@ -1588,36 +886,36 @@ fn sweep[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, now: int) -> [conn
         } else if st[p] == 1 && st[p + 1] == 1 && st[p + 3] == 6 {
             // A tunnel (docs/websocket-frames.md sections 6 and 7): once a close has begun, only its deadline matters; otherwise it is closed, with a Close frame at a frame boundary,
             // when it is older than `ws_max_lifetime_ms`, when nothing has moved for `ws_idle_timeout_ms`, or when its client has not answered a Ping; and a silent client is Pinged.
-            let wk = contents(core.wsf)[ws_at(k)..ws_at(k) + wsframe.state_len()];
+            let wk = contents(core.wsf)[wstunnel.ws_at(k)..wstunnel.ws_at(k) + wsframe.state_len()];
             if wk[0] != 0 {
                 if now >= wk[1] {
                     if wk[0] == 2 {
                         shared.meta_put(core, k, 68, 40, 1, wsframe.tag(wsframe.rule_close_timeout()));
-                        not_ok(core, p);
+                        wstunnel.not_ok(core, p);
                     }
                     shared.drop_session(tab, core, k);
                 }
             } else if st[p + 12] != 0 && now >= st[p + 12] {
-                tunnel_close(tab, core, k, wsframe.rule_lifetime(), now);
+                wstunnel.tunnel_close(tab, core, k, wsframe.rule_lifetime(), now);
             } else if st[p + 7] != 0 && now >= st[p + 7] {
-                tunnel_close(tab, core, k, wsframe.rule_idle(), now);
+                wstunnel.tunnel_close(tab, core, k, wsframe.rule_idle(), now);
             } else if wsframe.pong_expired(wk, now, deploy.ws_pong_ms()) {
-                tunnel_close(tab, core, k, wsframe.rule_pong_timeout(), now);
+                wstunnel.tunnel_close(tab, core, k, wsframe.rule_pong_timeout(), now);
             } else if wsframe.ping_due(wk, now, deploy.ws_ping_ms()) {
-                tunnel_run(tab, core, k, 1, now);
+                wstunnel.tunnel_run(tab, core, k, 1, now);
             }
         } else if st[p] == 1 && st[p + 1] == 1 {
             if st[p + 12] != 0 && now >= st[p + 12] {
-                refuse(tab, core, k, 504, "timeout.total", now);
+                slots.refuse(tab, core, k, 504, "timeout.total", now);
             } else if st[p + 7] != 0 && now >= st[p + 7] {
                 if st[p + 3] == 0 {
-                    refuse(tab, core, k, 408, "timeout.header", now);
+                    slots.refuse(tab, core, k, 408, "timeout.header", now);
                 } else if st[p + 3] == 1 || st[p + 3] == 2 {
-                    health_fail(tab, core, st[p + 11], now);
-                    refuse(tab, core, k, 504, "timeout.connect", now);
+                    slots.health_fail(tab, core, st[p + 11], now);
+                    slots.refuse(tab, core, k, 504, "timeout.connect", now);
                 } else if st[p + 3] == 3 {
-                    health_fail(tab, core, st[p + 11], now);
-                    refuse(tab, core, k, 504, "timeout.upstream", now);
+                    slots.health_fail(tab, core, st[p + 11], now);
+                    slots.refuse(tab, core, k, 504, "timeout.upstream", now);
                 } else {
                     shared.drop_session(tab, core, k);
                 }
@@ -1645,7 +943,7 @@ fn accept_all[&h, &l, &c](heap: &!h Heap, conn: conns.Table, listener: &!l Liste
                 if held + 2 > shared.slot_limit() {
                     var made = 0;
                     borrow mut table as &!et in {
-                        made = evict_idle(et, core);
+                        made = slots.evict_idle(et, core);
                     }
                     held = held - made;
                 }
@@ -1738,7 +1036,7 @@ fn tls_turn[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, now: int, now_u
             if st[p + 3] == 0 || st[p + 3] == 3 && st[p + 10] == 0 && st[p + 4] < shared.buf_size() && st[p + 14] == 0 || st[p + 3] == 6 && st[p + 4] < shared.buf_size() && st[p + 14] == 0 {
                 let before = st[p + tlsio.f_prog()];
                 read_client(tab, core, k, now);
-                settle(tab, core, k);
+                slots.settle(tab, core, k);
                 if st[p] != 1 || st[p + tlsio.f_prog()] != before {
                     moved = moved + 1;
                 }

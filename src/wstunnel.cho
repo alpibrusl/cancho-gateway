@@ -1,0 +1,415 @@
+edition 6;
+
+module gateway.wstunnel;
+
+import std.bytes;
+import std.conns;
+import std.http;
+import std.io;
+import std.signals as sg;
+import gateway.auth;
+import gateway.accesslog;
+import gateway.admin;
+import gateway.chunked;
+import gateway.deploy;
+import gateway.egress;
+import gateway.forward;
+import gateway.framing;
+import gateway.jwt;
+import gateway.metrics;
+import gateway.out;
+import gateway.problem;
+import gateway.ratelimit;
+import gateway.ipkey;
+import gateway.response;
+import gateway.route;
+import gateway.routes_table;
+import gateway.shared;
+import gateway.adminloop;
+import gateway.tlsio;
+import gateway.websocket;
+import gateway.wsframe;
+import gateway.slots;
+
+// The WebSocket tunnel (docs/websocket.md, docs/websocket-frames.md): the upgrade's answer, then the frames of both directions. Split from `proxy.cho`; the slot table's layout is documented there.
+
+// Where client `k`'s accept value is in the meta area.
+pub fn k_accept(k: int) -> [] int {
+    return k * shared.meta_size() + shared.ws_accept_at();
+}
+
+// The upstream `u` answered an upgrade request with a `101` whose head is the first `r` bytes of its buffer (docs/websocket.md sections 6 and 7): check it against what
+// the request called for; if it passes, tell the client, and from here both connections are a tunnel and nothing is framed.
+pub fn upgrade_answered[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, r: int, now: int) -> [conn_write, poll] int {
+    let st = contents(core.state);
+    let bf = contents(core.bufs);
+    let pd = contents(core.pends);
+    let tb = contents(core.table);
+    let m = contents(core.meta);
+    let pu = shared.stride() * u;
+    let client = st[pu + 2];
+    let pc = shared.stride() * client;
+    let ub = u * shared.buf_size();
+    let cb = client * shared.pend_size();
+    let accept = k_accept(client);
+    let view = bf[ub..ub + st[pu + 4]];
+    let verdict = websocket.check_response(view[0..r], tb, m[accept..accept + 28], st[pc + shared.ws_mask()], route.subprotocols(st[pc + 31] - 1));
+    if verdict < 0 {
+        slots.health_fail(tab, core, st[pu + 11], now);
+        slots.refuse(tab, core, client, websocket.status(0 - verdict), websocket.tag(0 - verdict), now);
+        return 0;
+    }
+    slots.health_ok(core, st[pu + 11]);
+    let n = websocket.upgrade_response(view[0..r], tb, pd[cb + st[pc + 5]..cb + shared.pend_size()], shared.meta_get(core, client, 4, 0));
+    if n < 0 {
+        shared.drop_session(tab, core, client);
+        return 0;
+    }
+    st[pc + 5] = st[pc + 5] + n;
+    st[pc + 27] = st[pc + 27] + n;
+    st[pc + 13] = 1;
+    st[pc + 26] = now;
+    st[pc + 29] = 101;
+    // The tunnel's clocks replace the request's: idle (reset by every byte that moves) and lifetime (not).
+    st[pc + 3] = 6;
+    st[pc + 7] = now + deploy.ws_idle_ms();
+    st[pc + 12] = now + deploy.ws_lifetime_ms();
+    st[pc + shared.ws_mode()] = 2;
+    st[pu + 16] = 2;
+    copy_into(bf[ub..ub + st[pu + 4] - r], bf[ub + r..ub + st[pu + 4]]);
+    st[pu + 4] = st[pu + 4] - r;
+    wsframe.init(contents(core.wsf)[ws_at(client)..ws_at(client) + wsframe.state_len()], now);
+    if route.ws_ocpp(st[pc + 31] - 1) > 0 {
+        // The route validates OCPP-J frames (docs/ocpp.md): both directions' recognisers are switched on.
+        wsframe.enable_ocpp(contents(core.wsf)[ws_at(client)..ws_at(client) + wsframe.state_len()]);
+    }
+    metrics.ws_opened(contents(core.stats));
+    return tunnel_down(tab, core, u, now);
+}
+
+// The state of client `k`'s tunnel (`wsframe`: `state_len()` ints in `core.wsf`, set when the 101 is relayed), docs/websocket-frames.md section 11.
+pub fn ws_at(k: int) -> [] int {
+    return k * wsframe.state_len();
+}
+
+// Clear the "relayed whole" mark of client `pc`'s record: its tunnel did not end by a peer's closing (a truncated frame, or the gateway's own close).
+pub fn not_ok[&c](core: &!c shared.Core, pc: int) -> [] int {
+    let st = contents(core.state);
+    if shared.flag_has(st[pc + 30], 2) {
+        st[pc + 30] = st[pc + 30] - 2;
+    }
+    return 0;
+}
+
+// The gateway starts closing client `client`'s tunnel for `cause` (docs/websocket-frames.md section 7): the plan is made (`wsframe.begin_close`), the cause is the access log's rule and a
+// Ping that went unanswered is counted. Nothing is written yet: `tunnel_run` does that, at the frames' boundaries.
+fn tunnel_mark[&c](core: &!c shared.Core, client: int, cause: int, offender: int, now: int) -> [] int {
+    let w = contents(core.wsf)[ws_at(client)..ws_at(client) + wsframe.state_len()];
+    wsframe.begin_close(w, cause, offender, now, deploy.ws_close_ms());
+    shared.meta_put(core, client, 68, 40, 1, wsframe.tag(cause));
+    not_ok(core, shared.stride() * client);
+    if cause == wsframe.rule_pong_timeout() {
+        metrics.ws_pong_timeout(contents(core.stats));
+    }
+    if wsframe.is_ocpp(cause) {
+        metrics.ws_ocpp_violation(contents(core.stats));
+    }
+    return 0;
+}
+
+// The tunnel, one direction (docs/websocket-frames.md sections 2, 6 and 7): `dir` 0 moves what the client has sent to the upstream's queue, 1 what the upstream has said to the client's, as far
+// as there is room, and each byte goes through `wsframe.scan` first, which says how many of them may go. What the parser holds back stays in the read buffer. Answers 0, 1 if the session ended, or 2
+// if the gateway has just begun to close the tunnel (the caller then runs both directions).
+//
+// Closing, from here: until the Close frame for this direction's destination has been placed, the direction forwards up to its next frame boundary and no further; the frame is then written at that
+// boundary. After it, and for a side that has sent its Close, what the source says is read, parsed for its Close, and discarded.
+fn tunnel_pump[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, client: int, dir: int, now: int) -> [conn_write, poll] int {
+    let st = contents(core.state);
+    let bf = contents(core.bufs);
+    let pd = contents(core.pends);
+    let pc = shared.stride() * client;
+    let u = st[pc + 2];
+    if u < 0 || st[shared.stride() * u] != 1 {
+        shared.drop_session(tab, core, client);
+        return 1;
+    }
+    let pu = shared.stride() * u;
+    var src = client;
+    var dst = u;
+    if dir == 1 {
+        src = u;
+        dst = client;
+    }
+    let ps = shared.stride() * src;
+    let pt = shared.stride() * dst;
+    let w = contents(core.wsf)[ws_at(client)..ws_at(client) + wsframe.state_len()];
+    let b = wsframe.dir_base(dir);
+    let sb = src * shared.buf_size();
+    let qb = dst * shared.pend_size();
+    let maxmsg = route.ws_max_message(st[pc + 31] - 1);
+    var sent_at = wsframe.t_sent_client();
+    var done_at = wsframe.t_done_upstream();
+    var code_at = wsframe.t_code_client();
+    if dir == 0 {
+        sent_at = wsframe.t_sent_upstream();
+        done_at = wsframe.t_done_client();
+        code_at = wsframe.t_code_upstream();
+    }
+    var moving = true;
+    while moving {
+        moving = false;
+        let cs = w[0];
+        let avail = st[ps + 4];
+        if cs == 1 && w[sent_at] != 0 {
+            // Closing and this direction's Close is out (or will not be sent): read what the source says, look for its Close, discard.
+            if avail > 0 {
+                var used = avail;
+                if w[b + 18] == 0 {
+                    used = wsframe.scan(w, dir, bf[sb..sb + avail], 1099511627776, false, false);
+                    if w[b + 14] == 1 || w[b + 14] == 2 {
+                        w[done_at] = 1;
+                        w[b + 18] = 1;
+                        used = avail;
+                    }
+                }
+                copy_into(bf[sb..sb + avail - used], bf[sb + used..sb + avail]);
+                st[ps + 4] = avail - used;
+                moving = used > 0 && st[ps + 4] > 0;
+            }
+        } else {
+            let room = shared.pend_size() - st[pt + 5];
+            var take = avail;
+            if take > room {
+                take = room;
+            }
+            var stop = cs == 1;
+            if cs == 0 && dir == 1 && wsframe.ping_due(w, now, deploy.ws_ping_ms()) {
+                stop = true;
+            }
+            var n = 0;
+            if take > 0 || stop {
+                n = wsframe.scan(w, dir, bf[sb..sb + take], maxmsg, stop, dir == 0);
+            }
+            var ev = 0;
+            if take > 0 || stop {
+                ev = w[b + 14];
+            }
+            if n > 0 {
+                copy_into(pd[qb + st[pt + 5]..qb + st[pt + 5] + n], bf[sb..sb + n]);
+                copy_into(bf[sb..sb + avail - n], bf[sb + n..sb + avail]);
+                st[ps + 4] = avail - n;
+                st[pt + 5] = st[pt + 5] + n;
+                if dir == 0 {
+                    st[pc + 28] = st[pc + 28] + n;
+                } else {
+                    st[pc + 27] = st[pc + 27] + n;
+                }
+                st[pc + 7] = now + deploy.ws_idle_ms();
+                if slots.flush(tab, core, dst, now) == 1 {
+                    return 1;
+                }
+            }
+            if ev == 1 {
+                // A frame that breaks a rule of section 3: what went before it has gone on, it has not, and the tunnel is closed (unless it already is).
+                if cs != 1 {
+                    tunnel_mark(core, client, w[b + 15], dir, now);
+                } else {
+                    w[b + 18] = 1;
+                    w[done_at] = 1;
+                    if w[b + 17] == 0 {
+                        w[sent_at] = 2;
+                    }
+                }
+                return 2;
+            }
+            if ev == 2 {
+                // A Close frame went by (it was forwarded): the first of the tunnel's names its code; a peer's Close starts the wait for the other's.
+                if w[8] == 0 {
+                    w[8] = w[b + 15];
+                }
+                if cs == 0 {
+                    w[0] = 2;
+                    w[1] = now + deploy.ws_close_ms();
+                } else {
+                    w[done_at] = 1;
+                }
+                moving = st[ps + 4] > 0;
+            } else if ev == 3 {
+                // The client's answer to the gateway's own Ping: heard, not forwarded.
+                copy_into(bf[sb..sb + st[ps + 4] - 14], bf[sb + 14..sb + st[ps + 4]]);
+                st[ps + 4] = st[ps + 4] - 14;
+                w[9] = 0;
+                st[pc + 7] = now + deploy.ws_idle_ms();
+                moving = st[ps + 4] > 0;
+            } else if ev == 0 && n > 0 && st[ps + 4] > 0 && shared.pend_size() - st[pt + 5] > 0 {
+                moving = true;
+            }
+            if ev == 0 && w[b] == 0 {
+                // At a frame boundary: the place for a frame of the gateway's own, if one is due and there is room for it.
+                let room2 = shared.pend_size() - st[pt + 5];
+                if cs == 1 && w[sent_at] == 0 {
+                    if dir == 0 && room2 >= wsframe.close_masked_len() {
+                        let m = wsframe.put_close_masked(pd[qb + st[pt + 5]..qb + st[pt + 5] + wsframe.close_masked_len()], w[code_at]);
+                        st[pt + 5] = st[pt + 5] + m;
+                        w[sent_at] = 1;
+                        if slots.flush(tab, core, dst, now) == 1 {
+                            return 1;
+                        }
+                        moving = true;
+                    } else if dir == 1 && room2 >= wsframe.close_len() {
+                        let m = wsframe.put_close(pd[qb + st[pt + 5]..qb + st[pt + 5] + wsframe.close_len()], w[code_at]);
+                        st[pt + 5] = st[pt + 5] + m;
+                        st[pc + 27] = st[pc + 27] + m;
+                        w[sent_at] = 1;
+                        if slots.flush(tab, core, dst, now) == 1 {
+                            return 1;
+                        }
+                        moving = true;
+                    }
+                } else if cs == 0 && dir == 1 && wsframe.ping_due(w, now, deploy.ws_ping_ms()) && room2 >= wsframe.ping_len() {
+                    let m = wsframe.put_ping(pd[qb + st[pt + 5]..qb + st[pt + 5] + wsframe.ping_len()], now);
+                    st[pt + 5] = st[pt + 5] + m;
+                    st[pc + 27] = st[pc + 27] + m;
+                    w[9] = 1;
+                    w[10] = now;
+                    w[11] = now;
+                    metrics.ws_pinged(contents(core.stats));
+                    if slots.flush(tab, core, dst, now) == 1 {
+                        return 1;
+                    }
+                    moving = st[ps + 4] > 0;
+                }
+            }
+        }
+    }
+    if w[14] > 0 {
+        metrics.ws_messages(contents(core.stats), w[14]);
+        w[14] = 0;
+    }
+    if st[ps + 14] == 1 && w[0] == 1 && (st[ps + 4] == 0 || w[sent_at] != 0) {
+        // A side went away while the gateway was closing: it will not answer, and no Close can reach it; the other is still waited for. A direction cut off inside a frame cannot be given one either.
+        w[done_at] = 1;
+        var to_src = wsframe.t_sent_upstream();
+        if dir == 0 {
+            to_src = wsframe.t_sent_client();
+        }
+        if w[to_src] == 0 {
+            w[to_src] = 2;
+        }
+        if w[b] == 1 && w[sent_at] == 0 {
+            w[sent_at] = 2;
+        }
+        st[ps + 4] = 0;
+    } else if st[ps + 14] == 1 && w[0] != 1 && w[13] == 0 {
+        // The source has ended. Bytes the parser still holds (a header, or the start of a Pong) or a payload that was cut off make it a truncated frame; otherwise it is the ending of slice 1.
+        var cut = w[b] == 1;
+        if st[ps + 4] > 0 && shared.pend_size() - st[pt + 5] > 0 {
+            cut = true;
+        }
+        if cut {
+            shared.meta_put(core, client, 68, 40, 1, wsframe.tag(wsframe.rule_truncated()));
+            not_ok(core, pc);
+            st[ps + 4] = 0;
+        }
+        if st[ps + 4] == 0 {
+            if dir == 0 && st[pu + 5] == 0 {
+                shared.drop_session(tab, core, client);
+                return 1;
+            }
+            if dir == 1 {
+                st[pc + 8] = 1;
+                if slots.flush(tab, core, client, now) == 1 {
+                    return 1;
+                }
+            }
+        }
+    }
+    if w[0] == 1 {
+        // Both sides have answered (or will not), or have not been sent a Close that could be: finished once what is queued is written.
+        let fc = w[wsframe.t_sent_client()] == 2 || w[wsframe.t_sent_client()] == 1 && w[wsframe.t_done_client()] == 1;
+        let fu = w[wsframe.t_sent_upstream()] == 2 || w[wsframe.t_sent_upstream()] == 1 && w[wsframe.t_done_upstream()] == 1;
+        if fc && fu {
+            w[13] = 1;
+        }
+    } else if w[0] == 2 && w[wsframe.dir_base(0) + wsframe.d_closed()] == 1 && w[wsframe.dir_base(1) + wsframe.d_closed()] == 1 {
+        w[13] = 1;
+    }
+    if w[13] == 1 {
+        if w[0] == 1 {
+            not_ok(core, pc);
+        } else if w[0] == 2 {
+            shared.flag_set(core, client, 2);
+        }
+        if st[pu + 5] > 0 && slots.flush(tab, core, u, now) == 1 {
+            return 1;
+        }
+        if st[pu + 5] == 0 {
+            if w[0] == 1 && w[wsframe.dir_base(0) + wsframe.d_offender()] == 1 && st[pc + 3] == 6 {
+                // The client broke a rule and may still be sending: closing now would reset the connection and could destroy the Close frame it is owed, so the upstream goes and the
+                // client lingers, its input read and thrown away, as after a refusal (docs/websocket-frames.md section 7).
+                slots.close_slot(tab, core, u);
+                st[pc + 2] = 0 - 1;
+                st[pc + 3] = 4;
+            }
+            st[pc + 8] = 1;
+            if slots.flush(tab, core, client, now) == 1 {
+                return 1;
+            }
+        }
+    }
+    slots.settle(tab, core, client);
+    slots.settle(tab, core, u);
+    return 0;
+}
+
+// Run the tunnel of client `client` after something happened to direction `dir`: that direction first; then, if the gateway has begun to close the tunnel (a direction answered 2, or a Close
+// frame is still to be placed), both directions, until the closing has done what it can.
+pub fn tunnel_run[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, client: int, dir: int, now: int) -> [conn_write, poll] int {
+    var r = tunnel_pump(tab, core, client, dir, now);
+    var again = 0;
+    while r != 1 && again < 3 {
+        let wk = contents(core.wsf)[ws_at(client)..ws_at(client) + wsframe.state_len()];
+        if r != 2 && !(again == 0 && wk[0] == 1 && (wk[wsframe.t_sent_client()] == 0 || wk[wsframe.t_sent_upstream()] == 0)) {
+            return 0;
+        }
+        again = again + 1;
+        let r0 = tunnel_pump(tab, core, client, 0, now);
+        r = r0;
+        if r0 != 1 {
+            let r1 = tunnel_pump(tab, core, client, 1, now);
+            if r1 == 1 {
+                r = 1;
+            } else if r0 == 2 || r1 == 2 {
+                r = 2;
+            } else {
+                r = 0;
+            }
+        }
+    }
+    return 0;
+}
+
+// The gateway closes client `client`'s tunnel for `cause` (a rule of `wsframe`) and starts doing it.
+pub fn tunnel_close[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, client: int, cause: int, now: int) -> [conn_write, poll] int {
+    if contents(core.wsf)[ws_at(client)] == 0 {
+        tunnel_mark(core, client, cause, 0 - 1, now);
+        tunnel_run(tab, core, client, 0, now);
+    }
+    return 0;
+}
+
+// The tunnel, upstream to client: what the upstream `u` has said goes to its client's queue as far as there is room and as the frame parser allows, and is written.
+pub fn tunnel_down[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, now: int) -> [conn_write, poll] int {
+    let st = contents(core.state);
+    let client = st[shared.stride() * u + 2];
+    if client < 0 || st[shared.stride() * client] != 1 {
+        slots.close_slot(tab, core, u);
+        return 0;
+    }
+    return tunnel_run(tab, core, client, 1, now);
+}
+
+// The tunnel, client to upstream.
+pub fn tunnel_up[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: int) -> [conn_write, poll] int {
+    return tunnel_run(tab, core, k, 0, now);
+}
