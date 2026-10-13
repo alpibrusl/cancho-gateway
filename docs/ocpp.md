@@ -15,8 +15,8 @@ slice does the larger thing and decides, below, why. The use case is unchanged: 
 - Refusals with a rule tag each (`ws.ocpp-*`), a Close frame (1007 for a message that is not a well-formed frame, 1008 for a message the route's policy refuses), a counter in the metrics (section 6).
 - Generator validation of the key, each refusal tagged and tested (section 7).
 
-**Not in this slice**, said once (section 10 expands, and "what is NOT validated" is section 5): action names against a list, payloads against JSON schema, uniqueId correlation, OCPP 2.1 (message types 5 and 6), the CALLERROR code against the specification's
-table, duplicate member names, any rule that needs a conversation rather than a message.
+**Not in this slice**, said once (section 10 expands, and "what is NOT validated" is section 5): action names against a list, payloads against JSON schema, uniqueId correlation, the CALLERROR code against the specification's
+table, duplicate member names, any rule that needs a conversation rather than a message. *(Corrected 2026-10-13: OCPP 2.1, message types 5 and 6, was listed here as not built; it is built, section 13, by a later slice on top of the seam of section 12.)*
 
 **What stays exactly as slice 2:** the frame parser and every rule of its section 3, `ws_max_message_bytes`, the UTF-8 check (it runs on the same byte first), ping and pong, the close handshake and its wait, the handshake and subprotocol negotiation, authentication
 and rate limiting. A route without `ws_ocpp` behaves byte for byte as before: the recogniser is not called.
@@ -82,9 +82,9 @@ policy refuses and the bytes might be well-formed.
 The order of checks is the order of the bytes: the first byte that cannot be part of a valid message decides the tag. One malformed message has one tag. The UTF-8 check of slice 2 runs on each byte before the recogniser sees it, so an invalid UTF-8 byte is `ws.frame-utf8` (1007) even where the recogniser
 would also have refused it. The Close code goes to the offending side and **1011 or 1001 to the other** by slice 2's table (section 7 there): a back office that sends a malformed frame is closed on, and its charger is told 1011.
 
-**Version and the key.** `ws_ocpp` is `"1.6"`, `"2.0.1"` or a list of them (`["1.6", "2.0.1"]`). The route's `subprotocols` must be **exactly** the matching `ocpp1.6` / `ocpp2.0.1` tokens (so the handshake of `docs/websocket.md` already refuses a client that offers none and an
+**Version and the key.** `ws_ocpp` is `"1.6"`, `"2.0.1"` or a list of them (`["1.6", "2.0.1"]`); *(since section 13: `"2.1"` too, and the three-element list)*. The route's `subprotocols` must be **exactly** the matching `ocpp1.6` / `ocpp2.0.1` tokens (so the handshake of `docs/websocket.md` already refuses a client that offers none and an
 upstream that answers another). The frame grammar above is **the same in both versions**: CALL, CALLRESULT and CALLERROR have the same shape in OCPP 1.6J and 2.0.1; what differs is the actions and the payloads, which this slice does not read. The key therefore pins the subprotocol and
-names the grammar; a later version with other message types (2.1 adds 5 and 6) is a new value of the same key, not a new key.
+names the grammar; a later version with other message types (2.1 adds 5 and 6) is a new value of the same key, not a new key. *(Section 13 does exactly that: the grammar above is the grammar of 1.6 and 2.0.1; on a connection negotiated as 2.1 two more message types exist.)*
 
 ## 4. The recogniser
 
@@ -113,7 +113,7 @@ Said once, and again in the examples and `AGENTS`-style summaries. This slice ch
 - **Direction**: a CALL of an action only a back office may send, arriving from a charger, is well-formed.
 - **The CALLERROR code against the specification's table**: only its grammar (the specification's list differs between versions and the gateway does not claim to know it).
 - **Duplicate member names in an object** and **numbers' magnitude** (`1e999` is well-formed JSON), and **a `\u` escape that is a lone surrogate** (the JSON grammar allows it; a decoder may not).
-- **OCPP 2.1** (message types 5, CALLRESULTERROR, and 6, SEND): refused as `ws.ocpp-type`, because `ws_ocpp` names no 2.1 grammar.
+- **OCPP 2.1** (message types 5, CALLRESULTERROR, and 6, SEND): refused as `ws.ocpp-type` by this slice, because `ws_ocpp` named no 2.1 grammar. *(Corrected: accepted on a connection negotiated as `ocpp2.1`, and still `ws.ocpp-type` on every other, section 13.)*
 - **Stricter than the specification, on purpose**: the id may not hold an escape or a non-ASCII byte and may not be empty; the action and code are letters and digits only. The specification calls the id a string of at most 36 characters; a charger that sends an id with an escape or an accented letter is refused here, and a charger that
   sends an empty id too. *This is a decision from reading the protocol and the fleets' habit of UUIDs and counters, not a measurement of a fleet; unknown whether any real charger does it.* The cost of being wrong is a refused charger; it is for the operator to turn `ws_ocpp` off for that route.
 - **Whitespace** between the tokens is accepted (it is JSON), so `[ 2 , "a" , "B" , { } ]` is valid; what the gateway forwards is always the original bytes.
@@ -130,8 +130,8 @@ TLS engine tags (`docs/websocket-frames.md` section 15) and then count a later `
 ## 7. Deployment key
 
 Per route, refused without `websocket = true` (tag **`config.websocket`**, with the line): **`ws_ocpp`**, a string `"1.6"` or `"2.0.1"`, or a list of one or both, distinct. And the route's `subprotocols` must be exactly the set `{"ocpp" + v}`; otherwise `config.websocket` names both keys. Refusals tested (`tests/generate_test.py`): a
-number, a boolean, an empty list, an empty string, `"1.5"`, `"2.1"`, `"ocpp1.6"` (the token, not the version), a duplicate, a list of three, a non-string in a list, `ws_ocpp` without `websocket`, no `subprotocols`, `subprotocols` with another token, with an extra one, with a missing one. The route table gets one more column (32, after the rate limit's):
-a bitmask, 1 for 1.6, 2 for 2.0.1, 0 for none; `--explain` says what each route validates. `deploy/examples/ocpp.toml` sets it.
+number, a boolean, an empty list, an empty string, `"1.5"`, `"2.1"` *(corrected: valid since section 13; `"2.2"` and `"2.1.0"` are refused)*, `"ocpp1.6"` (the token, not the version), a duplicate, a list of three, a non-string in a list, `ws_ocpp` without `websocket`, no `subprotocols`, `subprotocols` with another token, with an extra one, with a missing one. The route table gets one more column (32, after the rate limit's):
+a bitmask, 1 for 1.6, 2 for 2.0.1, 4 for 2.1 *(section 13)*, 0 for none; `--explain` says what each route validates. `deploy/examples/ocpp.toml` sets it.
 
 ## 8. Interaction with the other parts
 
@@ -162,8 +162,8 @@ a bitmask, 1 for 1.6, 2 for 2.0.1, 0 for none; `--explain` says what each route 
 | an action allow-list per route | `ws_ocpp_actions = [...]` bounded at 64 names of 64 bytes: a table in the binary, one comparison per CALL at element 2; refuses a typo and the other version's actions; needs the operator to keep it right |
 | JSON schema | needs the whole message parsed (design B) and the schemas, 30 to 60 documents per version; the largest piece of OCPP work and a different gateway |
 | id correlation, one outstanding CALL | a per-tunnel table or a 36-byte slot; conversation state in a gateway that holds none today |
-| OCPP 2.1 | a value `"2.1"` and types 5 and 6 in the grammar |
-| the upstream's choice of version | the negotiated subprotocol is not read by the recogniser; with several versions per route it could select the grammar |
+| OCPP 2.1 | *(built, section 13)* a value `"2.1"` and types 5 and 6 in the grammar |
+| the upstream's choice of version | *(built, section 13)* the negotiated subprotocol is read from the `101` and selects the grammar |
 | a per-message rate limit | slice 2's counter exists; a bucket per tunnel does not |
 
 ## 11. As built
@@ -218,7 +218,7 @@ Built 2026-10-12 on a branch of its own, against the pinned compiler (`2fcf4cd`)
 **Not done, and not known.**
 
 - **Whether any real charger sends an id with an escape, a non-ASCII byte or an empty id, or an action with a hyphen**: unknown (section 5); the gateway refuses them.
-- **The negotiated version is not read**: with `["1.6", "2.0.1"]` the same grammar is applied whichever the charger chose.
+- **The negotiated version is not read**: with `["1.6", "2.0.1"]` the same grammar is applied whichever the charger chose. *(Section 13 reads it: it matters for 2.1, because 5 and 6 exist there only. Between 1.6 and 2.0.1 the grammar is still the same.)*
 - **A violation by a peer while the gateway is already closing** is not tagged a second time (slice 2's rule), and a refusal that comes in a later read than its frame's header leaves the other side with half a frame (section 2).
 - **Interaction with PR #47** (rate limiting: route table, metrics, proxy): *(resolved: #46 and #47 merged first; `origin/main` `b095614` was merged into this branch, `ws_ocpp` became column 32, `worst_case()` kept both additions, the gate was run again on the merge, and `proxy.cho` has 20 lines left under the ceiling.)*
 
@@ -244,7 +244,7 @@ Built 2026-10-12 on a branch of its own, against the pinned compiler (`2fcf4cd`)
 
 What the seam does **not** make cheap: a grammar that needs to see a whole message (JSON schema, correlation of ids) cannot be a stream machine in seven ints; it needs a buffer the size of the message, which this program does not allocate (regions under 64 KiB, no heap growth after start). That is a different design, not a second kind.
 
-**OCPP versions inside kind 1.** The key is a list (`"1.6"`, `"2.0.1"`; a later `"2.1"` is "a new value of the same key", section 3), `route.ws_ocpp` answers a bitmask, and `kind_of_route` only asks whether it is nonzero, because the grammar is the same in every version supported. A version that changes the grammar (2.1 adds message types 5 and 6) is therefore a change *inside* `ocppframe.cho`, which would need the mask: the cheapest way is to pack it with the kind in the direction's eighth int (kind in the low bits, the mask above), written by `wsbind` and read by `ocppframe.step`; no new block, no new key.
+**OCPP versions inside kind 1.** The key is a list (`"1.6"`, `"2.0.1"`; a later `"2.1"` is "a new value of the same key", section 3), `route.ws_ocpp` answers a bitmask, and `kind_of_route` only asks whether it is nonzero, because the grammar is the same in every version supported. A version that changes the grammar (2.1 adds message types 5 and 6) is therefore a change *inside* `ocppframe.cho`, which would need the mask: the cheapest way is to pack it with the kind in the direction's eighth int (kind in the low bits, the mask above), written by `wsbind` and read by `ocppframe.step`; no new block, no new key. *(Built as section 13, with one correction to this paragraph: what is packed is the version the handshake **negotiated**, not the route's mask, because the route's mask cannot say which of its versions a connection is.)*
 
 **Measured, before and after the refactor** *(same machine, `tests/ocpp_bench.py`, 64 MiB each way, medians; the validated route in ms/MiB, plain route in brackets; this machine's run-to-run spread is about 10 %)*:
 
@@ -256,3 +256,104 @@ What the seam does **not** make cheap: a grammar that needs to see a whole messa
 | up, 4,991-byte | 9.37 (5.94) | 11.56 (5.78) | 9.69 (5.78) |
 
 No regression beyond the spread (the one high cell, 11.56, is 9.69 on the repeat). *Line counts:* `proxy.cho` 1,980 before, 1,278 after (`slots.cho` 357, `wstunnel.cho` 412, `wsvalidate.cho` 120, `wsbind.cho` 26; `wsframe.cho` 728 to 714).
+
+## 13. OCPP 2.1 (message types 5 and 6, selected by the negotiated subprotocol)
+
+*Added 2026-10-13, on the seam of section 12. Design first; the measured parts are marked and are in section 13.8.* The user requirement is that a route can serve OCPP 1.6 **and** 2.1. Sections 1 to 12 handled 1.6 and 2.0.1, which share one frame grammar. This section is what 2.1 changes in the frame, what the gateway does about it, and what could not be checked.
+
+### 13.1 What 2.1 changes in OCPP-J framing, and how sure that is
+
+| claim | status |
+|---|---|
+| 2.1 keeps the three frames of 1.6 and 2.0.1 unchanged: CALL `[2, id, action, payload]`, CALLRESULT `[3, id, payload]`, CALLERROR `[4, id, code, description, details]` | **from memory, and consistent with every implementer note found; not read in the specification** |
+| 2.1 adds **CALLRESULTERROR**, message type **5**: `[5, id, errorCode, errorDescription, errorDetails]`, an error answering a CALLRESULT the receiver could not process; it has the arity and the element kinds of a CALLERROR | **secondary sources only** (a library's documentation, `ocpp.hexdocs.pm`, which states the shape and the purpose, and the further check below); matches what the task brief and my memory say; **the specification's own text was not read** |
+| 2.1 adds **SEND**, message type **6**: `[6, id, action, payload]`, a message that is not answered and is not subject to the one-outstanding-CALL rule (its example is `NotifyPeriodicEventStream`); it has the arity and the element kinds of a CALL | **secondary source only**, as above |
+| the subprotocol token of 2.1 is `ocpp2.1` | **secondary sources agree (see the further check below); not checked against the specification or the IANA WebSocket Subprotocol registry** |
+
+**A further web check (2026-10-13), all SECONDARY sources, still not the OCA specification.** Third-party pages and libraries agree on these points: OCPP 2.1 lists five message types, CALL 2, CALLRESULT 3, CALLERROR 4, CALLRESULTERROR 5 and SEND 6 (the `ocpp.md` site's OCPP 2.1 pages); the subprotocol identifier is `ocpp2.1`; SEND is one-way, so the receiver must not answer it with a CALLRESULT or a CALLERROR (a Go library's documentation on pkg.go.dev, `seanlee0923/ocpp`); CALLRESULTERROR reports a CALLRESULT the recipient cannot process and mirrors CALLERROR's fields (message id, error code, description, details); and an issue in IZIVIA's `ocpp-toolkit` (issue 116) says implementations must reject message types that are not valid for the negotiated OCPP version, which is what this section does (types 5 and 6 refused on a connection negotiated as 1.6 or 2.0.1). That raises the confidence in the *existence*, the *numbers* and the *purpose* of the two types and in the token; it does **not** verify the exact array layouts, the error-code names, the id rules, or that a SEND's payload and a CALLRESULTERROR's details are always objects, which remain assumptions copied from the shapes of CALL and CALLERROR. The gateway does not enforce "SEND is not answered" (a conversation rule, section 5).
+
+**Could NOT be verified offline, so not relied on and not guessed.** There is no copy of the OCPP 2.1 specification (OCA's Part 4, OCPP-J) in the repository and none could be read here; the only external material reached was one library's documentation, through a web search, and its `frame` page itself could not be fetched. Therefore:
+
+- *that CALLRESULTERROR's `errorCode` is a code of the same table and grammar as CALLERROR's, that its `errorDescription` is any string and its `errorDetails` an object* (**uncertain**: assumed because the shape is said to be the same);
+- *that a SEND's `payload` is always an object* (**uncertain**: assumed because it is a request like a CALL);
+- *the length and the alphabet of the id in 2.1* (**uncertain**: the id rule of section 3 is applied unchanged, and it is already stricter than the 36-character text of 1.6 and 2.0.1, section 5);
+- *whether 2.1 changed anything else in the frame* (new error codes, a changed rule about ids of SEND, a rule that a receiver ignores a frame of an unknown type, which the same library documentation attributes to the specification, with an erratum of 2026-04 that was not seen). **Unknown.** The gateway does not ignore: an unknown type is `ws.ocpp-type`, as in section 3;
+- *whether a charger in the field sends 5 or 6 on a 2.1 connection at all, and with what ids*: unknown, as for every fleet question in section 5.
+
+**Decision under that uncertainty: acceptance stays strict.** The gateway accepts a type 5 as the grammar of type 4 and a type 6 as the grammar of type 2 (section 3, every restriction of it included), **only** on a connection negotiated as 2.1, and nothing more. If the specification turns out wider (an id of another kind, a payload that is not an object), the cost is a refused message, which the operator can handle by turning `ws_ocpp` off on the route, as section 5 says for the id; if it turns out narrower, the gateway forwards a message the back office's own parser refuses, which section 2 already says it must be able to do. A claim of the table above that is found false is corrected here, in place.
+
+### 13.2 The rules
+
+On a connection negotiated as 2.1, in both directions, a text message is valid if it is valid by section 3 **or** it is:
+
+```
+type 5   CALLRESULTERROR  [5, uniqueId, errorCode, errorDescription, errorDetails]    5 elements, the grammar of type 4 element by element
+type 6   SEND             [6, uniqueId, action, payload]                                4 elements, the grammar of type 2 element by element
+```
+
+The type digit is a single `5` or `6` as a JSON number token, as for 2, 3 and 4 (`[55`, `[5.0`, `[05`, `["5"` and the like stay `ws.ocpp-type`). Everything after the digit gives the refusals of the type whose shape it has: a CALLRESULTERROR with four elements is `ws.ocpp-code` (element 3 is the description, then the details are due: `{}` is not a string), with a payload that is not an object `ws.ocpp-payload`, and so on, the same tags, the same Close codes (1007; nesting past 32 levels 1008). **No new tag, no new rule number, no new counter**: the rule range 17 to 25 of `wsvalidate` is unchanged, `rule_count()` is still 25.
+
+On a connection negotiated as 1.6, as 2.0.1, or as anything the gateway cannot map to a version (cannot happen on a route with `ws_ocpp`, see 13.4; treated as "not 2.1"), the types 5 and 6 are **refused exactly as before this section**: `ws.ocpp-type`, Close 1007, at the type digit, whatever follows. Nothing about 1.6 and 2.0.1 changes: a test says that every case of the 1.6 corpus has the same verdict on those versions as it had.
+
+### 13.3 The key and the table
+
+`ws_ocpp` accepts `"2.1"` and lists of distinct versions of the three (`["1.6", "2.1"]`, `["1.6", "2.0.1", "2.1"]`). The route's `subprotocols` must be exactly the matching tokens `ocpp1.6`, `ocpp2.0.1`, `ocpp2.1` (section 7's rule, unchanged: the set is compared, the order is the operator's), and the handshake's exact-match rule (`docs/websocket.md`) applies to the new token as to the others: `OCPP2.1`, `ocpp2.1.0` and `ocpp2.2` are not served. The route table's column 32 is the bitmask, now `1 | 2 | 4`; **no new column**. The mask says which versions a route may serve. It cannot say which one a connection is, and that is the next section.
+
+### 13.4 Which version a connection is: the negotiated subprotocol
+
+Today (sections 3 and 11) a route with several versions applies one grammar to all of them. For 2.1 that is wrong: a charger that negotiated `ocpp1.6` must not be allowed to send a type 6 because the route also serves 2.1. Reading the code as it is before this section: the `Sec-WebSocket-Protocol` of the upstream's `101` is checked by `websocket.check_response` against the route's tokens **and** the client's offer (a token the client did not offer, or the route does not serve, is `ws.upstream-subprotocol` 502), and is the only place the choice is made. **The upstream chooses** among the tokens the client offered that the route serves; the client's order is a preference the upstream may ignore; the gateway checks the answer.
+
+So the gateway reads the choice where it is checked: `websocket.chosen_protocol` (the header of the checked `101`), `wsbind.negotiated` (the token to a version bit: `ocpp1.6` 1, `ocpp2.0.1` 2, `ocpp2.1` 4, anything else 0, compared exactly), and `wsvalidate`'s eighth int of each direction packs **the kind in the low four bits and the negotiated version bit above them** (`kind + 16 * version`): the packing section 12 proposed, with the correction that it is the negotiated version and not the route's mask (the mask is not about one connection). `ocppframe.element` asks `version(ws, o) == 4` where a message type digit is `5` or `6`, and nothing else in the recogniser reads it. The head of the `101` is overwritten when the first bytes after it are moved, so the version is taken **before** that move (this was read off the code, not found by a failing test: no mutant moves it). The state block is still 72 ints, the slab and the slot layout are unchanged, and a route without `ws_ocpp` still never calls the recogniser.
+
+What follows from the upstream choosing: on a route `["1.6", "2.1"]`, a charger that offers `ocpp1.6, ocpp2.1` is a 1.6 connection if the back office answers `ocpp1.6` and a 2.1 connection if it answers `ocpp2.1`; a charger that offers only `ocpp2.1` is 2.1; one that offers only `ocpp1.6` is 1.6. The version is fixed for the life of the tunnel, so a first message of 1.6 shape does not change it.
+
+### 13.5 What is not done
+
+- **Version-specific actions and payloads** are not read for any version (section 5): a `SEND` of an action 2.1 does not have is well-formed here.
+- **That a CALLRESULTERROR answers a CALLRESULT** and that SEND is unanswered: conversation rules, none kept (section 5).
+- **A 2.1 connection offering the tokens of the older versions to the upstream**: not changed; the gateway only reads the answer.
+- **Version negotiation errors other than the existing ones**: an upstream that answers a token the client did not offer is already `ws.upstream-subprotocol`.
+
+### 13.6 Gates, fixed before the code
+
+1. **Unit** (`tests/ocppframe_test.cho`): the version packed with the kind (values 17, 33, 65 and 1 for 1.6, 2.0.1, 2.1 and "not known", the kind readable beside it); types 5 and 6 valid on 2.1 at every pair of cut points and byte by byte, in both directions; the same messages `ws.ocpp-type` on 1.6, 2.0.1 and "not known" at every cut; every refusal of a type 5 and a type 6 by its tag; types 7, 1, 0, `55`, `5.0`, `"5"` still the type on 2.1; fragments with a ping between, the digit alone in the first fragment, a stream of messages (the version belongs to the connection, not the first message), a binary message; random mutations of 2.1 messages: one verdict at every cut, and 2.1 accepts a superset of 1.6 (a message 1.6 accepts, 2.1 accepts; where they differ 1.6 said `ws.ocpp-type`).
+2. **Generator** (`tests/generate_test.py`): `"2.1"` and the lists accepted with the matching subprotocols and masks 4, 5 and 7; refused: `"2.2"`, `"2.1.0"`, `"ocpp2.1"`, `2.1` (a number), duplicates, four entries, `"2.1"` with the other tokens, with the token missing, with an extra one, without `websocket`.
+3. **End to end** (`tests/ocpp_test.py`, a route for 2.1, one for `["1.6", "2.1"]` and one for all three): types 5 and 6 byte for byte on 2.1, whole, one byte at a time and in random pieces, in both directions; every refusal by its tag and Close code with nothing at the upstream; the upstream's refusals 1011; 1.6 and 2.0.1 routes refuse 5 and 6; **a connection negotiated as 1.6 on a route that also allows 2.1 refuses a type 6** (and one negotiated as 2.1 on the same route accepts it), with the choice made by the upstream (the recording upstream takes `pref-<token>` in the path), for the two-version and the three-version route; the handshake refuses `ocpp2.1` on routes that do not serve it and near misses of the token.
+4. **Differential against the reference grammar** (`tests/ocpp_test.py`, `ref`, written separately): the reference gains a `v21` flag; the gateway and the reference agree on every verdict, Close code and tag over mutations of a corpus that includes the 2.1 messages, on a 2.1 route with `v21` and on 1.6 and 2.0.1 routes without it; where the reference accepts, `json.loads` accepts and the shape is OCPP-J (types 5 and 6 included only for 2.1).
+5. **Mutants** on the new logic (`tests/ocpp_mutants.py`, v01 to v22, g07 to g09), each killed by a named test; the table in 13.8.
+6. **The authority report does not change** (no new capability); no source file over 2,000 lines (`ocppframe.cho` 470 to about 480, `tests/ocppframe_test.cho` about 1,290, `tests/ocpp_test.py` about 1,000); the existing suites pass; the cost of a recogniser that reads one more int is measured against section 12's numbers.
+
+### 13.7 What was found while building it
+
+| design | built | why |
+|---|---|---|
+| section 12: pack the route's mask with the kind | the **negotiated** version is packed | a route's mask lists what it may serve; with `["1.6", "2.1"]` it cannot say which one this tunnel is, and using it would let a 1.6 connection send a type 6 (the case the task singles out) |
+| read the choice from a new field | read from the checked `101` (`websocket.chosen_protocol`) | the choice is already validated there against the client's offer and the route's tokens; nothing new is stored in the slot or the route table |
+| the head of the `101` is still readable when the tunnel is switched on | it is not: `upgrade_answered` moves the bytes after the head over it first | the version is read before that move (`wstunnel.cho`) |
+| a first end-to-end test asserted the echo of a valid message sent just before a refused one | not asserted | the Close is decided in the same read as the echo; the same race section 11 already records. The test now asserts the Close, the tag and the exact bytes the upstream received |
+| the reference (`ref`) of the differential | gained `v21`; the 1.6 and 2.0.1 routes are run against the reference **without** it on a corpus that is full of 5s and 6s | so the refusal of 5 and 6 on the other versions is checked by 2,214 and 2,181 messages, not by a handful |
+
+### 13.8 As built, measured
+
+Built 2026-10-13 on `ccr-9dcd2e99-lb9flr-wsvalidate` (PR #50), pinned compiler `2fcf4cd`. Everything below was run on a shared development machine.
+
+**What exists.** `src/ocppframe.cho` (+~15 lines: `version`, the two digits), `src/wsvalidate.cho` (`set_kind` takes the version, `kind` masks it), `src/wsframe.cho` (`enable_validator(ws, kind, version)`, `enable_ocpp_version`), `src/websocket.cho` (`chosen_protocol`), `src/wsbind.cho` (`negotiated`), `src/wstunnel.cho` (one line to read the version, one argument), `scripts/generate.py` (`"2.1": 4`, the messages), `route.cho` (a comment). No new route column, state int, tag, rule number or metric. `proxy.cho` is untouched (1,278 lines). Largest files: `tests/ocppframe_test.cho` 1,278, `tests/ocpp_test.py` 1,052.
+
+**Gates.**
+
+| gate | status | where |
+|---|---|---|
+| 1 unit | **met** | `ocppframe_test.cho` 34 tests (25 before, 9 new): types 5 and 6 on 2.1 at every pair of cut points and byte by byte in both directions, the same on 1.6, 2.0.1 and "not known", every refusal of 5 and 6 by tag, the digit alone in a first fragment, a stream where the version outlives the first message, 3,000 random mutations of 2.1 messages with the superset property |
+| 2 generator | **met** | `generate_test.py`: `7 prefix cases, 453 refusal cases, 77 accepted, 0 failures` (399 and 62 before); masks 4, 5 and 7 in the compiled table and in `--explain` |
+| 3 end to end | **met** | `ocpp_test.py`: `23 tests, 0 failures` (10 before): 5 and 6 byte for byte whole, byte by byte and in random pieces; 26 refusals by tag and code with nothing at the upstream; from the upstream 1011; refused on the 1.6 and 2.0.1 routes; **ten negotiations on the two-version and three-version routes** where the upstream's choice decides (`ocpp1.6` negotiated and offered both: a type 6 is `ws.ocpp-type`; the same offer with `ocpp2.1` chosen: accepted); the sequence test; the counter; near-miss tokens refused at the handshake |
+| 4 differential | **met** | 2,650 messages on the 2.1 route against the reference with types 5 and 6 (1,037 accepted, 1,613 refused: `ws.ocpp-type` 167, `-json` 996, `-code` 133, `-id` 150, `-action` 99, `-payload` 53, `-arity` 11, `-depth` 4); 2,214 messages of the same corpus on the 1.6 route and 2,181 on the 2.0.1 route against the reference without them (`ws.ocpp-type` 954 and 918); the gateway and the reference agree on every verdict, Close code and tag; `json.loads` agrees wherever the reference accepts. The old 2,140-message differential is unchanged |
+| 5 mutants | **95 edits, 94 killed, 1 argued** | below |
+| 6 authority, lines, suites | **met** | `manifests/` re-recorded (three function names and the count); no file over 2,000 lines; the full sequence of `.github/workflows/ci.yml` was run, below |
+
+**Mutants** (`python3 tests/ocpp_mutants.py -j 3`): 70 of section 11 (their texts for `set_kind`, the generator's table adjusted) and 25 new: v01 to v13 in the recogniser, the packing and the unit helpers (the gate on the version both ways and at every threshold, 5 or 6 missing, the shape of 5 and of 6 swapped to each wrong shape, the version read from the wrong bits, the kind read with the version bits, the version never stored, a default of 2.1), v14 to v22 in the negotiation (each token mapped wrongly, the tunnel switched on with a constant 2.1 or 1.6, with the client's offer instead of the upstream's choice, the chosen protocol never read, the wrong header read), g07 to g09 in the generator (2.1 with another bit, not a version, a list of three refused). **All 25 are killed**; v14 to v22 are killed by the end-to-end suite only, which is what they are for. The one survivor is o07, equivalent as in section 11. *Not mutated:* the order of the version read and the move of the head (13.4).
+
+**The gate, as `.github/workflows/ci.yml` orders it**, run locally on this tree: `cancho fmt --check`, the generator checks and its test, `ipkey_vectors --check`, `cancho build`, the smuggling corpus (`--gateway`, `--prefixes`, `--chunked`, `--fuzz 1500`), `lab_corpus --check`, `response/run.py`, `route_test` (both), `proxy_test` (78), `admin_test` (16), `tls_test` (22), `websocket_test` (56), `wsframes_test` (25), `ocpp_test` (23), `ratelimit_test` (24), `auth_test` (14), `jwt_vectors --check`, `jwt_test` (16), `jwt_differential 1500` (0 disagreements), the header policy against nginx (114 comparisons, 36 listed differences, 0 failures), `cancho test`, `lines.py`, `authority.py --check` (after re-recording), `authority_test`, `figures --check`, `proof --check` (after regenerating), `check_site`. All passed in the final run except `authority.py --check` and `proof.py --check`, which correctly failed on the first run because the function names moved, and pass after `authority.py` and `proof.py` re-recorded them.
+
+**Cost.** The recogniser reads the version only at the first byte of a message (the type digit), so the hot per-byte path is unchanged: argued from the code, **not measured**. `tests/ocpp_bench.py` was not re-run.
+
+**Not done, not known.** Everything in 13.1 that is marked uncertain or unknown; that a real 2.1 charger or back office is compatible; version-specific actions and payloads; interoperability with a third-party 2.1 implementation (the tests use the repository's own client and recording upstream, and `websockets` only as in the earlier slices).

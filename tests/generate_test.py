@@ -170,7 +170,21 @@ REFUSALS = [
     ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = ""\n'),
     ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = []\n'),
     ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = "1.5"\n'),
-    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp2.1"]\nws_ocpp = "2.1"\n'),
+    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp2.1"]\nws_ocpp = "2.2"\n'),
+    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp2.1"]\nws_ocpp = "2.1.0"\n'),
+    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp2.1"]\nws_ocpp = "ocpp2.1"\n'),
+    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp2.1"]\nws_ocpp = 2.1\n'),
+    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp2.1"]\nws_ocpp = ["2.1", "2.1"]\n'),
+    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6", "ocpp2.0.1", "ocpp2.1"]\nws_ocpp = ["1.6", "2.0.1", "2.1", "1.6"]\n'),
+    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp2.1"]\nws_ocpp = ["2.1", "2.2"]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = "2.1"\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp2.0.1"]\nws_ocpp = "2.1"\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp2.1"]\nws_ocpp = "1.6"\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp2.1"]\nws_ocpp = ["1.6", "2.1"]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6", "ocpp2.1", "other"]\nws_ocpp = ["1.6", "2.1"]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6", "ocpp2.1"]\nws_ocpp = ["1.6", "2.0.1", "2.1"]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6", "ocpp2.0.1", "ocpp2.1"]\nws_ocpp = ["1.6", "2.1"]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nws_ocpp = "2.1"\n'),
     ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = "ocpp1.6"\n'),
     ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = " 1.6"\n'),
     ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = ["1.6", "1.6"]\n'),
@@ -355,6 +369,9 @@ ACCEPTED = [
     UP + R + 'path_prefix = "/ocpp"\nwebsocket = true\nsubprotocols = ["ocpp1.6", "ocpp2.0.1"]\nws_ocpp = ["1.6", "2.0.1"]\n',
     UP + R + 'path_prefix = "/ocpp"\nwebsocket = true\nsubprotocols = ["ocpp2.0.1", "ocpp1.6"]\nws_ocpp = ["1.6", "2.0.1"]\n',
     UP + R + 'path_prefix = "/ocpp"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = ["1.6"]\nws_max_message_bytes = 65536\n',
+    UP + R + 'path_prefix = "/ocpp"\nwebsocket = true\nsubprotocols = ["ocpp2.1"]\nws_ocpp = "2.1"\n',
+    UP + R + 'path_prefix = "/ocpp"\nwebsocket = true\nsubprotocols = ["ocpp1.6", "ocpp2.1"]\nws_ocpp = ["1.6", "2.1"]\n',
+    UP + R + 'path_prefix = "/ocpp"\nwebsocket = true\nsubprotocols = ["ocpp2.1", "ocpp2.0.1", "ocpp1.6"]\nws_ocpp = ["2.1", "1.6", "2.0.1"]\n',
     # rate limiting: the shortest form, every unit, every bound, every key
     UP + R + 'path_prefix = "/"\nrate_limit = "1/s"\n',
     UP + R + 'path_prefix = "/"\nrate_limit = "10/m"\nrate_burst = 2\n',
@@ -765,24 +782,27 @@ def frames_compiled(run, failures):
 
 
 def ocpp_compiled(run, failures):
-    """What `ws_ocpp` compiles (docs/ocpp.md section 7): the route's version mask in the table (1 for 1.6, 2 for 2.0.1, 3 for both, 0 for none), and what --explain says."""
+    """What `ws_ocpp` compiles (docs/ocpp.md section 7): the route's version mask in the table (1 for 1.6, 2 for 2.0.1, 4 for 2.1, the sum for several, 0 for none), and what --explain says."""
     def route(path, protocols, extra):
         return '[[route]]\nupstream = "a"\npath_prefix = "%s"\nwebsocket = true\nsubprotocols = [%s]\n%s' % (path, ", ".join('"%s"' % p for p in protocols), extra)
     text = (WS + '[[upstream]]\nname = "a"\naddr = "10.0.0.1:1"\n' + route("/a", ["ocpp1.6"], 'ws_ocpp = "1.6"\nws_max_message_bytes = 1111\n') +
             route("/b", ["ocpp2.0.1"], 'ws_ocpp = "2.0.1"\nws_max_message_bytes = 2222\n') +
             route("/c", ["ocpp2.0.1", "ocpp1.6"], 'ws_ocpp = ["1.6", "2.0.1"]\nws_max_message_bytes = 3333\n') +
-            route("/d", ["ocpp1.6"], 'ws_max_message_bytes = 4444\n') + '[[route]]\nupstream = "a"\npath_prefix = "/e"\n')
+            route("/d", ["ocpp1.6"], 'ws_max_message_bytes = 4444\n') + route("/g", ["ocpp2.1"], 'ws_ocpp = "2.1"\nws_max_message_bytes = 5555\n') +
+            route("/h", ["ocpp2.1", "ocpp1.6"], 'ws_ocpp = ["1.6", "2.1"]\nws_max_message_bytes = 6666\n') +
+            route("/i", ["ocpp1.6", "ocpp2.0.1", "ocpp2.1"], 'ws_ocpp = ["1.6", "2.0.1", "2.1"]\nws_max_message_bytes = 7777\n') + '[[route]]\nupstream = "a"\npath_prefix = "/e"\n')
     with tempfile.TemporaryDirectory() as tmp:
         f = pathlib.Path(tmp) / "d.toml"
         f.write_text(text)
         subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(f), "--out", tmp], check=True)
         table = (pathlib.Path(tmp) / "routes.cho").read_text()
         explained = run(text).stdout
-    for want in ("\\t1111\\t0\\t0\\t0\\t0\\t0\\t1\\n", "\\t2222\\t0\\t0\\t0\\t0\\t0\\t2\\n", "\\t3333\\t0\\t0\\t0\\t0\\t0\\t3\\n", "\\t4444\\t0\\t0\\t0\\t0\\t0\\t0\\n"):
+    for want in ("\\t1111\\t0\\t0\\t0\\t0\\t0\\t1\\n", "\\t2222\\t0\\t0\\t0\\t0\\t0\\t2\\n", "\\t3333\\t0\\t0\\t0\\t0\\t0\\t3\\n", "\\t4444\\t0\\t0\\t0\\t0\\t0\\t0\\n", "\\t5555\\t0\\t0\\t0\\t0\\t0\\t4\\n", "\\t6666\\t0\\t0\\t0\\t0\\t0\\t5\\n", "\\t7777\\t0\\t0\\t0\\t0\\t0\\t7\\n"):
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
             failures += 1
-    for want in ("messages up to 1111 bytes; validates OCPP-J frames (1.6)", "messages up to 2222 bytes; validates OCPP-J frames (2.0.1)", "messages up to 3333 bytes; validates OCPP-J frames (1.6, 2.0.1)"):
+    for want in ("messages up to 1111 bytes; validates OCPP-J frames (1.6)", "messages up to 2222 bytes; validates OCPP-J frames (2.0.1)", "messages up to 3333 bytes; validates OCPP-J frames (1.6, 2.0.1)",
+                 "messages up to 5555 bytes; validates OCPP-J frames (2.1)", "messages up to 6666 bytes; validates OCPP-J frames (1.6, 2.1)", "messages up to 7777 bytes; validates OCPP-J frames (1.6, 2.0.1, 2.1)"):
         if want not in explained:
             print("FAIL --explain must say %r: %r" % (want, explained[:800]))
             failures += 1

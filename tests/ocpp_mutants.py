@@ -92,8 +92,8 @@ m("w08", V, "    if rule == 17 || rule == 25 {\n        return 1008;", "    if r
 m("w09", V, "    if rule >= 18 && rule <= 24 {\n        return 1007;\n    }\n", "", 'unit', 'a malformed message is answered 1002')
 m("w10", V, 'return "ws.ocpp-code";', 'return "ws.ocpp-codes";', 'unit', 'a tag is misspelt')
 m("w11", V, "    if rule >= 17 && rule <= 25 {\n        return 1;", "    if rule >= 18 && rule <= 25 {\n        return 1;", ['the_counters_and_the_refusal_tags'], 'a binary refusal is not counted as an OCPP one')
-m("w12", F, "    wsvalidate.set_kind(ws, dir_base(1) + 20, kind);\n", "", 'unit', "the upstream's messages are not validated")
-m("w13", F, "    wsvalidate.set_kind(ws, dir_base(0) + 20, kind);\n", "", 'unit', "the client's messages are not validated")
+m("w12", F, "    wsvalidate.set_kind(ws, dir_base(1) + 20, kind, version);\n", "", 'unit', "the upstream's messages are not validated")
+m("w13", F, "    wsvalidate.set_kind(ws, dir_base(0) + 20, kind, version);\n", "", 'unit', "the client's messages are not validated")
 # ---- the tunnel
 m("p01", B, "    if route.ws_ocpp(index) > 0 {", "    if false {", ['every_refusal_by_the_client_is_closed_with_its_code_and_stays_off_the_upstream'], 'no tunnel is validated')
 m("p02", B, "    if route.ws_ocpp(index) > 0 {", "    if true {", ['a_route_without_ws_ocpp_forwards_what_slice_two_did'], 'every tunnel is validated')
@@ -108,8 +108,38 @@ m("g01", G, 'if sorted(protocols) != sorted("ocpp" + v for v in want):', "if Fal
 m("g02", G, 'not all(isinstance(v, str) and v in OCPP_VERSIONS for v in want)', 'not all(isinstance(v, str) for v in want)', "gen", "an unknown version is accepted")
 m("g03", G, "not 1 <= len(want) <= len(OCPP_VERSIONS)", "not 0 <= len(want) <= len(OCPP_VERSIONS)", "gen", "an empty list of versions is accepted")
 m("g04", G, '"ws_ocpp": ocpp, **rate', '"ws_ocpp": 0, **rate', "gen", "the table never switches validation on")
-m("g05", G, 'OCPP_VERSIONS = {"1.6": 1, "2.0.1": 2}', 'OCPP_VERSIONS = {"1.6": 1, "2.0.1": 1}', "gen", "the two versions have the same bit")
+m("g05", G, 'OCPP_VERSIONS = {"1.6": 1, "2.0.1": 2, "2.1": 4}', 'OCPP_VERSIONS = {"1.6": 1, "2.0.1": 1, "2.1": 4}', "gen", "the two versions have the same bit")
 m("g06", G, '    ocpp = sum(OCPP_VERSIONS[v] for v in want)', '    ocpp = 1', "gen", "the mask of a route is always 1")
+# ---- OCPP 2.1 (docs/ocpp.md section 13): the version packed with the kind, types 5 and 6, the negotiated version
+W = "src/websocket.cho"
+T = "src/wstunnel.cho"
+E21 = ['types_5_and_6_pass_byte_for_byte_on_a_2_1_connection_whole_in_single_bytes_and_in_random_pieces']
+NEG = ['the_negotiated_subprotocol_decides_on_a_route_that_allows_1_6_and_2_1']
+m("v01", O, "(c == 53 || c == 54) && version(ws, o) == 4 {", "(c == 53 || c == 54) && version(ws, o) >= 1 {", "unit", "types 5 and 6 are valid on every version")
+m("v02", O, "(c == 53 || c == 54) && version(ws, o) == 4 {", "(c == 53 || c == 54) && version(ws, o) >= 2 {", "unit", "types 5 and 6 are valid on 2.0.1 as well")
+m("v03", O, "(c == 53 || c == 54) && version(ws, o) == 4 {", "(c == 53 || c == 54) && version(ws, o) >= 3 {", "unit", "types 5 and 6 are valid on an unknown version")
+m("v04", O, "(c == 53 || c == 54) && version(ws, o) == 4 {", "(c == 53 || c == 54) && false {", "unit", "types 5 and 6 are never valid")
+m("v05", O, "(c == 53 || c == 54) && version(ws, o) == 4 {", "c == 53 && version(ws, o) == 4 {", "unit", "SEND (6) is not a message type")
+m("v06", O, "(c == 53 || c == 54) && version(ws, o) == 4 {", "c == 54 && version(ws, o) == 4 {", "unit", "CALLRESULTERROR (5) is not a message type")
+m("v07", O, "            ws[o + 4] = 4;\n            if c == 54 {", "            ws[o + 4] = 3;\n            if c == 54 {", "unit", "CALLRESULTERROR has the shape of a CALLRESULT")
+m("v08", O, "            if c == 54 {\n                ws[o + 4] = 2;", "            if c == 54 {\n                ws[o + 4] = 3;", "unit", "SEND has the shape of a CALLRESULT")
+m("v09", O, "            if c == 54 {\n                ws[o + 4] = 2;", "            if c == 54 {\n                ws[o + 4] = 4;", "unit", "SEND has the shape of a CALLERROR")
+m("v10", O, "    return ws[o + 7] / 16;", "    return ws[o + 7] / 32;", "unit", "the version is read from the wrong bits")
+m("v11", V, "    return ws[o + 7] % 16;", "    return ws[o + 7];", "unit", "the kind includes the version bits")
+m("v12", V, "    ws[o + 7] = kind + 16 * version;", "    ws[o + 7] = kind + 16;", "unit", "the version is never stored")
+m("v13", F, "    return enable_validator(ws, wsvalidate.kind_ocpp(), 1);", "    return enable_validator(ws, wsvalidate.kind_ocpp(), 4);", "unit", "a unit-test tunnel is negotiated as 2.1 by default")
+m("v14", B, "    if bytes.equal(token, \"ocpp2.1\") {\n        return 4;", "    if bytes.equal(token, \"ocpp2.1\") {\n        return 2;", E21, "the token ocpp2.1 negotiates 2.0.1")
+m("v15", B, "    if bytes.equal(token, \"ocpp2.1\") {", "    if bytes.equal(token, \"ocpp2.2\") {", E21, "the token ocpp2.1 negotiates nothing")
+m("v16", B, "    if bytes.equal(token, \"ocpp1.6\") {\n        return 1;", "    if bytes.equal(token, \"ocpp1.6\") {\n        return 4;", NEG, "the token ocpp1.6 negotiates 2.1")
+m("v17", B, "    if bytes.equal(token, \"ocpp2.0.1\") {\n        return 2;", "    if bytes.equal(token, \"ocpp2.0.1\") {\n        return 4;", ['types_5_and_6_are_the_type_on_a_1_6_or_2_0_1_connection', 'the_negotiated_subprotocol_decides_on_a_route_that_allows_1_6_and_2_1'], "the token ocpp2.0.1 negotiates 2.1")
+m("v18", T, "wsbind.kind_of_route(st[pc + 31] - 1), version);", "wsbind.kind_of_route(st[pc + 31] - 1), 4);", ['types_5_and_6_are_the_type_on_a_1_6_or_2_0_1_connection'], "every tunnel is negotiated as 2.1")
+m("v19", T, "wsbind.kind_of_route(st[pc + 31] - 1), version);", "wsbind.kind_of_route(st[pc + 31] - 1), 1);", E21, "every tunnel is negotiated as 1.6")
+m("v20", T, "wsbind.kind_of_route(st[pc + 31] - 1), version);", "wsbind.kind_of_route(st[pc + 31] - 1), st[pc + shared.ws_mask()]);", NEG, "the version is the client's offer, not the upstream's choice")
+m("v21", W, "    return value_of(src, table, sp);\n}\n\n// The head the client is sent", "    return src[0..0];\n}\n\n// The head the client is sent", E21, "the chosen subprotocol is never read")
+m("v22", W, "    let sp = first_named(src, table, table[2], \"sec-websocket-protocol\");\n    if sp < 0 {\n        return src[0..0];", "    let sp = first_named(src, table, table[2], \"sec-websocket-extensions\");\n    if sp < 0 {\n        return src[0..0];", E21, "the wrong header is read for the subprotocol")
+m("g07", G, 'OCPP_VERSIONS = {"1.6": 1, "2.0.1": 2, "2.1": 4}', 'OCPP_VERSIONS = {"1.6": 1, "2.0.1": 2, "2.1": 2}', "gen", "2.1 has the bit of 2.0.1")
+m("g08", G, 'OCPP_VERSIONS = {"1.6": 1, "2.0.1": 2, "2.1": 4}', 'OCPP_VERSIONS = {"1.6": 1, "2.0.1": 2}', "gen", "2.1 is not a version")
+m("g09", G, 'not 1 <= len(want) <= len(OCPP_VERSIONS)', 'not 1 <= len(want) <= 2', "gen", "a list of three versions is refused")
 
 def tree(tmp):
     for name in ("src", "scripts", "tests", "generated", "deploy"):

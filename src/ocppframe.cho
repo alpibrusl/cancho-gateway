@@ -8,7 +8,9 @@ module gateway.ocppframe;
 // The state is eight ints at offset `o` of the caller's block (`o` is the direction's base plus 20):
 //
 //     o+0 position   o+1 nesting stack (one bit a level, 1 an object)   o+2 depth   o+3 counter (characters of a restricted string, or hex digits still due)
-//     o+4 message type (0 not read yet)   o+5 index of the element in hand   o+6 1 if the string in hand is a member's name   o+7 1 if the direction is validated at all
+//     o+4 message shape (0 not read yet; 2 for a CALL or a SEND, 3 for a CALLRESULT, 4 for a CALLERROR or a CALLRESULTERROR)   o+5 index of the element in hand
+//     o+6 1 if the string in hand is a member's name   o+7 the direction's kind (low 4 bits, `wsvalidate`) packed with the OCPP version negotiated for the tunnel (16 times a bit: 1 for 1.6,
+//     2 for 2.0.1, 4 for 2.1; docs/ocpp.md section 13)
 //
 // The positions:
 //
@@ -21,7 +23,12 @@ module gateway.ocppframe;
 //
 // The rules it answers are `wsframe`'s numbers 17 to 25: 17 binary (judged at the frame header, not here), 18 json, 19 type, 20 arity, 21 id, 22 action, 23 payload, 24 code, 25 depth.
 
-// Ready for a new message: everything but the enabled flag.
+// The OCPP version bit negotiated for the tunnel of the direction at `o` (1 for 1.6, 2 for 2.0.1, 4 for 2.1, 0 if none is known), from the packed int `o+7`.
+pub fn version[&t](ws: &t [int], o: int) -> [] int {
+    return ws[o + 7] / 16;
+}
+
+// Ready for a new message: everything but the kind and the version.
 pub fn reset[&t](ws: &!t [int], o: int) -> [] int {
     var i = 0;
     while i < 7 {
@@ -156,6 +163,15 @@ fn element[&t](ws: &!t [int], o: int, c: int) -> [] int {
     if idx == 0 {
         if c == 50 || c == 51 || c == 52 {
             ws[o + 4] = c - 48;
+            ws[o] = 2;
+            return 0;
+        }
+        // OCPP 2.1 only (docs/ocpp.md section 13): 5 CALLRESULTERROR has the shape of a CALLERROR, 6 SEND the shape of a CALL. On a tunnel negotiated as anything else they are `ws.ocpp-type`.
+        if (c == 53 || c == 54) && version(ws, o) == 4 {
+            ws[o + 4] = 4;
+            if c == 54 {
+                ws[o + 4] = 2;
+            }
             ws[o] = 2;
             return 0;
         }

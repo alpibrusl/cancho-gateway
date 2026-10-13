@@ -61,6 +61,8 @@ pub fn upgrade_answered[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: 
         return 0;
     }
     slots.health_ok(core, st[pu + 11]);
+    // Which OCPP version this tunnel is, from the subprotocol the 101 chose (read now: the head is overwritten below).
+    let version = wsbind.negotiated(websocket.chosen_protocol(view[0..r], tb));
     let n = websocket.upgrade_response(view[0..r], tb, pd[cb + st[pc + 5]..cb + shared.pend_size()], shared.meta_get(core, client, 4, 0));
     if n < 0 {
         shared.drop_session(tab, core, client);
@@ -81,7 +83,7 @@ pub fn upgrade_answered[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: 
     st[pu + 4] = st[pu + 4] - r;
     wsframe.init(contents(core.wsf)[ws_at(client)..ws_at(client) + wsframe.state_len()], now);
     // The route's validator kind switches the per-message validation on in both directions (docs/websocket-frames.md section 16); kind 0 leaves the tunnel as it was.
-    wsframe.enable_validator(contents(core.wsf)[ws_at(client)..ws_at(client) + wsframe.state_len()], wsbind.kind_of_route(st[pc + 31] - 1));
+    wsframe.enable_validator(contents(core.wsf)[ws_at(client)..ws_at(client) + wsframe.state_len()], wsbind.kind_of_route(st[pc + 31] - 1), version);
     metrics.ws_opened(contents(core.stats));
     return tunnel_down(tab, core, u, now);
 }

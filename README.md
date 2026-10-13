@@ -34,7 +34,7 @@ discovery, clustering. WebSocket compression is not done, and OCPP message valid
 **WebSocket, built 2026-10-08 (slice 1).** A route with `websocket = true` (and `subprotocols`, `origins`) admits an RFC 6455 opening handshake after the
 checks of `docs/websocket.md` section 4, forwards it on a fresh connection without extensions, checks the upstream's `101` (including the
 `Sec-WebSocket-Accept` value), and then carries the connection as a **byte tunnel**: the same back-pressure buffers, an idle timeout, a maximum lifetime,
-a bound on concurrent tunnels, over plain TCP or the TLS listener (`wss`). The use case is OCPP-J (`ocpp1.6`, `ocpp2.0.1`) between EV chargers and a back office.
+a bound on concurrent tunnels, over plain TCP or the TLS listener (`wss`). The use case is OCPP-J (`ocpp1.6`, `ocpp2.0.1`, `ocpp2.1`) between EV chargers and a back office.
 
 **WebSocket frames, built 2026-10-12 (slice 2).** The tunnel now reads frames in both directions with a parser that holds no message (`docs/websocket-frames.md`): RFC 6455 section 5
 is enforced (reserved bits and opcodes, control frames, masking in the right direction, minimal lengths, fragmentation order), a message longer than the route's `ws_max_message_bytes`
@@ -44,12 +44,12 @@ peer's Close through. An optional **keepalive** (`ws_ping_ms`, `ws_pong_ms`) Pin
 seconds instead of at the idle timeout; the upstream never sees the gateway's Ping or its Pong. **Not done:** `permessage-deflate` (stripped, and why: `docs/websocket-deflate.md`), per-message rate limits,
 TLS to the upstream, and more than 127 concurrent tunnels (the slot table's size).
 
-**OCPP-J message validation, built 2026-10-12 (slice 3).** A route with `ws_ocpp = "1.6"`, `"2.0.1"` or a list of both (its `subprotocols` must be exactly the matching `ocpp...` tokens) checks that every
+**OCPP-J message validation, built 2026-10-12 (slice 3).** A route with `ws_ocpp = "1.6"`, `"2.0.1"`, `"2.1"` or a list of them (its `subprotocols` must be exactly the matching `ocpp...` tokens) checks that every
 text message, in both directions and after its fragments are put together, is a well-formed OCPP-J frame (`docs/ocpp.md`): a JSON array of the right length for its type (`[2, id, action, payload]`,
 `[3, id, payload]`, `[4, id, code, description, details]`), an id of 1 to 36 plain ASCII characters, an action that is 1 to 64 letters and digits, a payload that is a JSON object (well formed, nested at most
 32 deep). It is a streaming recogniser of eight ints a direction: no message is held, so a refusal that comes in the same read as its frame's header never reaches the other side, and one that comes later leaves
 the other side with a frame that never ends (the document says which). Refusals are a Close 1007 (not a frame) or 1008 (binary message, nesting past the bound), a tag `ws.ocpp-*` and a counter
-(`ocpp_violations`). **Not validated:** the action against the version's list, the payload against its JSON schema, the id against the call it answers, duplicate member names, OCPP 2.1.
+(`ocpp_violations`). **Not validated:** the action against the version's list, the payload against its JSON schema, the id against the call it answers, duplicate member names. **OCPP 2.1 (2026-10-13, `docs/ocpp.md` section 13):** a connection that negotiated `ocpp2.1` may also carry message types 5 (CALLRESULTERROR, `[5, id, code, description, details]`) and 6 (SEND, `[6, id, action, payload]`), which are refused as `ws.ocpp-type` on a connection that negotiated `ocpp1.6` or `ocpp2.0.1`, even when the route serves 2.1 too (the upstream's choice in the `101` decides, not the route). The shapes of 5 and 6 come from secondary sources and the specification's text was not read: the document says what is unverified, and acceptance is kept as strict as the grammar of types 4 and 2.
 
 **TLS, built 2026-10-08 (slice 1), reload and TLS-only the same day (slice 2).** This file used to say TLS "needs foreign code and would make the authority report unbounded". That
 reason stopped holding when cancho shipped a TLS 1.3 server written in cancho (`packages/tls`; cancho's own notes say it has not been

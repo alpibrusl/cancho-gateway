@@ -62,6 +62,33 @@ ws_max_message_bytes = 65536
 upstream = "up"
 
 [[route]]
+name = "o21"
+path_prefix = "/o21"
+websocket = true
+subprotocols = ["ocpp2.1"]
+ws_ocpp = "2.1"
+ws_max_message_bytes = 65536
+upstream = "up"
+
+[[route]]
+name = "o1621"
+path_prefix = "/o1621"
+websocket = true
+subprotocols = ["ocpp1.6", "ocpp2.1"]
+ws_ocpp = ["1.6", "2.1"]
+ws_max_message_bytes = 65536
+upstream = "up"
+
+[[route]]
+name = "oall"
+path_prefix = "/oall"
+websocket = true
+subprotocols = ["ocpp1.6", "ocpp2.0.1", "ocpp2.1"]
+ws_ocpp = ["1.6", "2.0.1", "2.1"]
+ws_max_message_bytes = 65536
+upstream = "up"
+
+[[route]]
 name = "obig"
 path_prefix = "/obig"
 websocket = true
@@ -84,7 +111,7 @@ path_prefix = "/"
 upstream = "up"
 """
 
-PROTOCOL = {"/o16": ("ocpp1.6",), "/o201": ("ocpp2.0.1",), "/oboth": ("ocpp1.6", "ocpp2.0.1"), "/obig": ("ocpp1.6",), "/plainws": ("ocpp1.6",)}
+PROTOCOL = {"/o16": ("ocpp1.6",), "/o201": ("ocpp2.0.1",), "/oboth": ("ocpp1.6", "ocpp2.0.1"), "/o21": ("ocpp2.1",), "/o1621": ("ocpp1.6", "ocpp2.1"), "/oall": ("ocpp1.6", "ocpp2.0.1", "ocpp2.1"), "/obig": ("ocpp1.6",), "/plainws": ("ocpp1.6",)}
 
 
 def go(gw, path):
@@ -221,17 +248,18 @@ def arr(m, i, depth):
         i = skip(m, i + 1)
 
 
-def check(m):
+def check(m, v21=False):
+    """`v21`: the connection was negotiated as OCPP 2.1 (docs/ocpp.md section 13): message types 5 (CALLRESULTERROR, the shape of a CALLERROR) and 6 (SEND, the shape of a CALL) exist."""
     i = skip(m, 0)
     if i >= len(m) or m[i] != 0x5B:
         raise Bad("json")
     i = skip(m, i + 1)
     if i >= len(m):
         raise Bad("json")
-    if m[i] not in b"234":
+    if m[i] not in (b"23456" if v21 else b"234"):
         raise Bad("type")
     ty = m[i] - 48
-    arity = {2: 4, 3: 3, 4: 5}[ty]
+    arity = {2: 4, 3: 3, 4: 5, 5: 5, 6: 4}[ty]
     i = skip(m, i + 1)
     if i >= len(m):
         raise Bad("json")
@@ -248,11 +276,11 @@ def check(m):
             raise Bad("arity")
         if idx == 1:
             i = restricted(m, i, 36, False, "id")
-        elif idx == 2 and ty == 2:
+        elif idx == 2 and ty in (2, 6):
             i = restricted(m, i, 64, True, "action")
-        elif idx == 2 and ty == 4:
+        elif idx == 2 and ty in (4, 5):
             i = restricted(m, i, 64, True, "code")
-        elif idx == 3 and ty == 4:
+        elif idx == 3 and ty in (4, 5):
             if m[i] != 0x22:
                 raise Bad("code")
             i = string(m, i)
@@ -276,10 +304,10 @@ def check(m):
         raise Bad("json")
 
 
-def ref(m):
-    """The tag the grammar of docs/ocpp.md section 3 gives `m`, or None if it is a valid message."""
+def ref(m, v21=False):
+    """The tag the grammar of docs/ocpp.md section 3 (and section 13 for a 2.1 connection) gives `m`, or None if it is a valid message."""
     try:
-        check(m)
+        check(m, v21)
         return None
     except Bad as e:
         return e.tag
@@ -355,6 +383,49 @@ REFUSED = [
     ("description-number", b'[4,"a","C",1,{}]', "ws.ocpp-code"),
     ("depth-33", b'[2,"a","B",' + b'{"a":' * 33 + b"1" + b"}" * 33 + b"]", "ws.ocpp-depth"),
     ("depth-arrays", b'[2,"a","B",{"a":' + b"[" * 40 + b"]" * 40 + b"}]", "ws.ocpp-depth"),
+]
+
+
+# OCPP 2.1 (docs/ocpp.md section 13): the messages of types 5 and 6, valid on a connection negotiated as 2.1 and the type on any other.
+VALID21 = [
+    b'[5,"19223201","FormatViolation","payload does not match the schema",{}]',
+    b'[5,"a","C","",{}]',
+    b'[5,"77","GenericError","caf\xc3\xa9 \xe2\x82\xac \\"quoted\\"",{"k":{"j":[[]]}}]',
+    b' [ 5 , "a b" , "RpcFrameworkError" , "d" , { "k" : [ 1 , -2.5e+3 , true , null ] } ] \n',
+    b'[6,"19223201","NotifyPeriodicEventStream",{"id":1,"pending":0,"basetime":"2025-01-01T00:00:00Z","data":[{"t":0.0,"v":"1.5"}]}]',
+    b'[6,"a","B",{}]',
+    b'[6,"123456789012345678901234567890123456","Get15118EVCertificate",{"k":[1,2,{"x":null}]}]',
+    b' [ 6 , "a" , "B" , { } ] ',
+]
+
+# (name, message, tag) on a 2.1 connection; each reaches one rule for types 5 and 6.
+REFUSED21 = [
+    ("c5-arity-4", b'[5,"a","C",{}]', "ws.ocpp-code"),
+    ("c5-arity-short", b'[5,"a","C","d"]', "ws.ocpp-arity"),
+    ("c5-arity-long", b'[5,"a","C","d",{},{}]', "ws.ocpp-arity"),
+    ("c5-id-empty", b'[5,"","C","d",{}]', "ws.ocpp-id"),
+    ("c5-id-37", b'[5,"' + b"1" * 37 + b'","C","d",{}]', "ws.ocpp-id"),
+    ("c5-code-dash", b'[5,"a","C-D","d",{}]', "ws.ocpp-code"),
+    ("c5-code-number", b'[5,"a",1,"d",{}]', "ws.ocpp-code"),
+    ("c5-description-number", b'[5,"a","C",1,{}]', "ws.ocpp-code"),
+    ("c5-details-array", b'[5,"a","C","d",[]]', "ws.ocpp-payload"),
+    ("c5-details-null", b'[5,"a","C","d",null]', "ws.ocpp-payload"),
+    ("c5-json", b'[5,"a","C","d",{"a":tru}]', "ws.ocpp-json"),
+    ("c5-trailing", b'[5,"a","C","d",{}]x', "ws.ocpp-json"),
+    ("s6-arity-3", b'[6,"a","B"]', "ws.ocpp-arity"),
+    ("s6-arity-5", b'[6,"a","B",{},{}]', "ws.ocpp-arity"),
+    ("s6-result-shape", b'[6,"a",{}]', "ws.ocpp-action"),
+    ("s6-id-number", b'[6,1,"B",{}]', "ws.ocpp-id"),
+    ("s6-action-dash", b'[6,"a","B-C",{}]', "ws.ocpp-action"),
+    ("s6-action-65", b'[6,"a","' + b"A" * 65 + b'",{}]', "ws.ocpp-action"),
+    ("s6-payload-array", b'[6,"a","B",[]]', "ws.ocpp-payload"),
+    ("s6-json", b'[6,"a","B",{"a":01}]', "ws.ocpp-json"),
+    ("s6-depth-33", b'[6,"a","B",' + b'{"a":' * 33 + b"1" + b"}" * 33 + b"]", "ws.ocpp-depth"),
+    ("type-7", b'[7,"a","B",{}]', "ws.ocpp-type"),
+    ("type-55", b'[55,"a","C","d",{}]', "ws.ocpp-type"),
+    ("type-5-float", b'[5.0,"a","C","d",{}]', "ws.ocpp-type"),
+    ("type-6-string", b'["6","a","B",{}]', "ws.ocpp-type"),
+    ("type-1", b'[1,"a","B",{}]', "ws.ocpp-type"),
 ]
 
 ROUTE_OF = ["/o16", "/o201", "/oboth"]
@@ -592,17 +663,230 @@ class Ocpp:
         s.close()
 
 
-class Differential:
-    def the_gateway_and_the_reference_agree_on_mutated_messages(gw, up):
-        rng = random.Random(20261012)
+class Ocpp21:
+    """OCPP 2.1 (docs/ocpp.md section 13): message types 5 and 6 exist only on a connection whose negotiated subprotocol is `ocpp2.1`, whatever else the route allows."""
+
+    def types_5_and_6_pass_byte_for_byte_on_a_2_1_connection_whole_in_single_bytes_and_in_random_pieces(gw, up):
+        rng = random.Random(21)
+        for k, mode in enumerate(("whole", "bytes", "random")):
+            path = "/o21/v-%d-%s/echo" % (k, mode)
+            n0 = len(gw.lines())
+            ws = go(gw, path)
+            assert ws.protocol == "ocpp2.1", ws.headers
+            stream = b"".join(cframe(1, m) for m in VALID21 + VALID)
+            if mode == "whole":
+                ws.sock.sendall(stream)
+            else:
+                i = 0
+                while i < len(stream):
+                    step = 1 if mode == "bytes" else rng.randrange(1, 40)
+                    ws.sock.sendall(stream[i:i + step])
+                    i += step
+                    time.sleep(0.0002)
+            for m in VALID21 + VALID:
+                ws.expect(1, m)
+            ws.sock.sendall(cframe(8, ft.close_payload(1000)))
+            expect_close(ws, 1000, echo=False)
+            drain(ws)
+            e = log_of(gw, n0, path)
+            assert e["rule"] == "" and e["outcome"] == "ok", e
+            assert bytes(up.conn(path).raw).startswith(stream)
+
+    def types_5_and_6_from_the_upstream_pass_on_a_2_1_connection(gw, up):
+        path = "/o21/fromup/script"
+        up.script[path] = b"".join(sframe(1, m) for m in VALID21)
+        n0 = len(gw.lines())
+        ws = go(gw, path)
+        for m in VALID21:
+            ws.expect(1, m)
+        ws.sock.sendall(cframe(8, ft.close_payload(1000)))
+        expect_close(ws, 1000, echo=False)
+        drain(ws)
+        e = log_of(gw, n0, path)
+        assert e["rule"] == "" and e["outcome"] == "ok", e
+
+    def every_malformed_type_5_and_6_by_the_client_is_closed_with_its_code_and_stays_off_the_upstream(gw, up):
+        for name, msg, tag in REFUSED21:
+            path = "/o21/c-%s/echo" % name
+            n0 = len(gw.lines())
+            ws = go(gw, path)
+            ws.sock.sendall(cframe(1, msg))
+            try:
+                expect_close(ws, code_for(tag), echo=False)
+            except AssertionError as e:
+                raise AssertionError("%s: %s" % (name, e))
+            assert drain(ws) == b"", name
+            e = log_of(gw, n0, path)
+            assert e["rule"] == tag and e["outcome"] == "aborted" and e["ws_close"] == code_for(tag), (name, e)
+            assert bytes(up.conn(path).raw) == ft.CLOSE_1001_MASKED, (name, bytes(up.conn(path).raw)[:80])
+
+    def a_malformed_type_5_or_6_by_the_upstream_is_1011_to_the_client(gw, up):
+        good = sframe(1, VALID21[0])
+        for name, msg, tag in (("c5-details-array", b'[5,"a","C","d",[]]', "ws.ocpp-payload"), ("s6-action-dash", b'[6,"a","B-C",{}]', "ws.ocpp-action"),
+                               ("type-7", b'[7,"a","B",{}]', "ws.ocpp-type")):
+            path = "/o21/u-%s/script" % name
+            up.script[path] = good + sframe(1, msg)
+            n0 = len(gw.lines())
+            ws = go(gw, path)
+            want = good + bytes([0x88, 0x02, 0x03, 0xF3])
+            got = bytes(ws.reader.buf)
+            ws.reader.buf.clear()
+            while len(got) < len(want):
+                d = ws.sock.recv(65536)
+                assert d, "%s: the connection ended after %r" % (name, got[:60])
+                got += d
+            assert got == want, (name, got[:80])
+            ws.sock.sendall(cframe(8, ft.close_payload(1011)))
+            assert drain(ws) == b"", name
+            e = log_of(gw, n0, path)
+            assert e["rule"] == tag and e["ws_close"] == 1011, (name, e)
+
+    def types_5_and_6_are_the_type_on_a_1_6_or_2_0_1_connection(gw, up):
+        for prefix in ("/o16", "/o201"):
+            for name, msg in (("c5", VALID21[0]), ("s6", VALID21[4]), ("s6-min", VALID21[5]), ("c5-ws", VALID21[3])):
+                path = "%s/no21-%s/echo" % (prefix, name)
+                n0 = len(gw.lines())
+                ws = go(gw, path)
+                ws.sock.sendall(cframe(1, msg))
+                expect_close(ws, 1007, echo=False)
+                assert drain(ws) == b""
+                e = log_of(gw, n0, path)
+                assert e["rule"] == "ws.ocpp-type" and e["ws_close"] == 1007, (prefix, name, e)
+                assert bytes(up.conn(path).raw) == ft.CLOSE_1001_MASKED
+            # and from the upstream
+            path = "%s/no21-up/script" % prefix
+            up.script[path] = sframe(1, VALID21[4])
+            n0 = len(gw.lines())
+            ws = go(gw, path)
+            expect_close(ws, 1011, echo=False)
+            drain(ws)
+            e = log_of(gw, n0, path)
+            assert e["rule"] == "ws.ocpp-type" and e["ws_close"] == 1011, (prefix, e)
+
+    def the_negotiated_subprotocol_decides_on_a_route_that_allows_1_6_and_2_1(gw, up):
+        # the upstream picks the first token of its order that the client offered (`pref-<token>` in the path moves one to the front)
+        cases = [
+            # (path, offered, negotiated)
+            ("/o1621/a/echo", ("ocpp1.6", "ocpp2.1"), "ocpp1.6"),
+            ("/o1621/pref-ocpp2.1/b/echo", ("ocpp1.6", "ocpp2.1"), "ocpp2.1"),
+            ("/o1621/c/echo", ("ocpp2.1",), "ocpp2.1"),
+            ("/o1621/d/echo", ("ocpp1.6",), "ocpp1.6"),
+            ("/o1621/pref-ocpp2.1/e/echo", ("ocpp1.6",), "ocpp1.6"),
+            ("/oall/a/echo", ("ocpp1.6", "ocpp2.0.1", "ocpp2.1"), "ocpp1.6"),
+            ("/oall/pref-ocpp2.0.1/b/echo", ("ocpp1.6", "ocpp2.0.1", "ocpp2.1"), "ocpp2.0.1"),
+            ("/oall/pref-ocpp2.1/c/echo", ("ocpp1.6", "ocpp2.0.1", "ocpp2.1"), "ocpp2.1"),
+            ("/oall/d/echo", ("ocpp2.1",), "ocpp2.1"),
+            ("/oall/e/echo", ("ocpp2.0.1",), "ocpp2.0.1"),
+        ]
+        for path, offered, negotiated in cases:
+            for msg in (VALID21[0], VALID21[4]):
+                p = path.replace("/echo", "-%s/echo" % msg[1:2].decode())
+                n0 = len(gw.lines())
+                ws = wt.connect_ws(gw, p, protocols=offered)
+                assert ws.protocol == negotiated, (p, offered, ws.protocol)
+                ws.sock.sendall(cframe(1, msg))
+                if negotiated == "ocpp2.1":
+                    ws.expect(1, msg)
+                    ws.sock.sendall(cframe(8, ft.close_payload(1000)))
+                    expect_close(ws, 1000, echo=False)
+                    drain(ws)
+                    e = log_of(gw, n0, p)
+                    assert e["rule"] == "" and e["outcome"] == "ok", (p, e)
+                else:
+                    expect_close(ws, 1007, echo=False)
+                    assert drain(ws) == b""
+                    e = log_of(gw, n0, p)
+                    assert e["rule"] == "ws.ocpp-type" and e["ws_close"] == 1007, (p, negotiated, e)
+                    assert bytes(up.conn(p).raw) == ft.CLOSE_1001_MASKED, (p, bytes(up.conn(p).raw)[:80])
+
+    def a_1_6_message_first_does_not_make_the_connection_1_6_nor_2_1(gw, up):
+        # the version is the connection's, not the first message's: a 1.6 CALL is valid on both, and the next message is judged by the negotiated version
+        for path, ok in (("/o1621/seq-a/echo", False), ("/o1621/pref-ocpp2.1/seq-b/echo", True)):
+            n0 = len(gw.lines())
+            ws = wt.connect_ws(gw, path, protocols=("ocpp1.6", "ocpp2.1"))
+            ws.sock.sendall(cframe(1, VALID[3]) + cframe(1, VALID21[5]) + cframe(1, VALID[4]))
+            if ok:
+                ws.expect(1, VALID[3])
+                ws.expect(1, VALID21[5])
+                ws.expect(1, VALID[4])
+                ws.sock.sendall(cframe(8, ft.close_payload(1000)))
+                expect_close(ws, 1000, echo=False)
+                drain(ws)
+            else:
+                expect_close(ws, 1007, echo=False)      # the echo of the first message may or may not come before the Close (section 11)
+                drain(ws)
+            e = log_of(gw, n0, path)
+            assert e["rule"] == ("" if ok else "ws.ocpp-type"), (path, e)
+            c = bytes(up.conn(path).raw)
+            assert c.startswith(cframe(1, VALID[3])) and (ok or c == cframe(1, VALID[3]) + ft.CLOSE_1001_MASKED), (path, c[:80])
+
+    def a_2_1_message_fragmented_with_pings_between_its_fragments_passes_and_a_binary_one_is_refused(gw, up):
+        path = "/o21/frag/echo"
+        n0 = len(gw.lines())
+        ws = go(gw, path)
+        m = VALID21[4]
+        stream = cframe(1, m[:2], fin=False) + cframe(9, b"p") + cframe(0, m[2:30], fin=False) + cframe(9, b"p") + cframe(0, m[30:])
+        ws.sock.sendall(stream)
+        got = b""
+        while True:
+            fin, op, payload = ws.reader.frame()
+            if op in (0, 1):
+                got += payload
+                if fin:
+                    break
+        assert got == m
+        ws.sock.sendall(cframe(8, ft.close_payload(1000)))
+        expect_close(ws, 1000, echo=False)
+        assert log_of(gw, n0, path)["rule"] == ""
+        path = "/o21/bin/echo"
+        n0 = len(gw.lines())
+        ws = go(gw, path)
+        ws.sock.sendall(cframe(2, m))
+        expect_close(ws, 1008, echo=False)
+        assert log_of(gw, n0, path)["rule"] == "ws.ocpp-binary"
+
+    def the_counter_counts_a_refused_2_1_message_and_nothing_else_changes(gw, up):
+        gw.wait_active(0)
+        m0 = gw.metrics()
+        ws = go(gw, "/o1621/cnt/echo")        # negotiated 1.6 (the upstream's default order)
+        assert ws.protocol == "ocpp1.6"
+        ws.sock.sendall(cframe(1, VALID21[4]))
+        expect_close(ws, 1007, echo=False)
+        drain(ws)
+        ws = go(gw, "/o21/cnt/echo")
+        ws.sock.sendall(cframe(1, VALID21[4]))
+        ws.expect(1, VALID21[4])
+        ws.sock.sendall(cframe(8, ft.close_payload(1000)))
+        expect_close(ws, 1000, echo=False)
+        drain(ws)
+        gw.wait_active(0)
+        m1 = gw.metrics()
+        assert m1["ws"]["ocpp_violations"] == m0["ws"]["ocpp_violations"] + 1, (m0["ws"], m1["ws"])
+        assert m1["refusals"].get("ws.ocpp-type", 0) == m0["refusals"].get("ws.ocpp-type", 0) + 1
+
+    def the_handshake_still_admits_only_the_routes_tokens(gw, up):
+        for path, offered in (("/o21/x", ("ocpp1.6",)), ("/o21/x", ("ocpp2.0.1",)), ("/o16/x", ("ocpp2.1",)), ("/o201/x", ("ocpp2.1",)), ("/o1621/x", ("ocpp2.0.1",)),
+                              ("/o1621/x", ("ocpp2.2",)), ("/o21/x", ("OCPP2.1",)), ("/o21/x", ("ocpp2.1.0",))):
+            raw, key = wt.request_bytes(path, protocols=offered)
+            s = wt.open_socket(gw)
+            s.sendall(raw)
+            head, rest = wt.read_head(s)
+            assert head.startswith(b"HTTP/1.1 4"), (path, offered, head[:60])
+            s.close()
+
+
+def differential(gw, up, prefix, v21, seed, corpus, extra_shapes, rounds):
+    """The gateway's verdict and tag on `prefix` (a route negotiated as 2.1 if `v21`) equal the reference's on every mutation of `corpus`."""
+    if True:
+        rng = random.Random(seed)
         pool = [b"[", b"]", b"{", b"}", b",", b'"', b":", b"\\", b"0", b"-", b"e", b"x", b" ", b"2", b"4", b"9", b".", b"\n", b"\xc3\xa9", b"t", b"n", b"u", b"E", b"+"]
-        cases = list(VALID)
-        for base in VALID:
+        cases = list(corpus)
+        for base in corpus:
             for i in range(len(base)):
                 if base[i] < 128:
                     cases.append(base[:i] + base[i + 1:])
-        for _ in range(1800):
-            base = rng.choice(VALID)
+        for _ in range(rounds):
+            base = rng.choice(corpus)
             m = bytearray(base)
             for _ in range(rng.choice((1, 1, 1, 2, 3))):
                 if not m:
@@ -621,8 +905,7 @@ class Differential:
                 continue
             cases.append(bytes(m))
         # a few of the shapes that mutation does not reach
-        cases += [b'[2,"a","B",' + b'{"a":' * d + b"1" + b"}" * d + b"]" for d in (1, 31, 32, 33)]
-        cases += [b'[2,"a","B",{"a":' + b"[" * d + b"]" * d + b"}]" for d in (30, 31, 32)]
+        cases += extra_shapes
         for i in range(0, 4):
             cases += [bytes(rng.randrange(32, 127) for _ in range(rng.randrange(0, 30))) for _ in range(40)]
         seen = set()
@@ -636,7 +919,7 @@ class Differential:
 
         def probe(i):
             m = todo[i]
-            path = "/o16/d%d/echo" % i
+            path = "%s/d%d/echo" % (prefix, i)
             for attempt in range(3):
                 try:
                     ws = go(gw, path)
@@ -667,14 +950,14 @@ class Differential:
         deadline = time.time() + 15
         tags = {}
         while time.time() < deadline:
-            tags = {l["path"]: l["rule"] for l in gw.lines()[n0:] if l.get("path", "").startswith("/o16/d")}
+            tags = {l["path"]: l["rule"] for l in gw.lines()[n0:] if l.get("path", "").startswith(prefix + "/d")}
             if len(tags) >= len(todo):
                 break
             time.sleep(0.1)
         valid = invalid = 0
         by_tag = {}
         for i, m in enumerate(todo):
-            want = ref(m)
+            want = ref(m, v21)
             kind, got = results[i]
             try:
                 strict_loads(m)
@@ -684,25 +967,48 @@ class Differential:
             if want is None:
                 assert loads_ok, ("the reference accepts what json.loads refuses", m)
                 shape = strict_loads(m)
-                assert isinstance(shape, list) and shape[0] in (2, 3, 4) and type(shape[0]) is int and len(shape) == {2: 4, 3: 3, 4: 5}[shape[0]], ("not OCPP-J", m)
+                assert isinstance(shape, list) and type(shape[0]) is int and shape[0] in ((2, 3, 4, 5, 6) if v21 else (2, 3, 4)) and len(shape) == {2: 4, 3: 3, 4: 5, 5: 5, 6: 4}[shape[0]], ("not OCPP-J", m)
                 assert kind == "echo" and got == m, ("the reference accepts, the gateway did not", m, kind, got)
-                assert tags.get("/o16/d%d/echo" % i) == "", (m, tags.get("/o16/d%d/echo" % i))
+                assert tags.get("%s/d%d/echo" % (prefix, i)) == "", (m, tags.get("%s/d%d/echo" % (prefix, i)))
                 valid += 1
             else:
                 assert kind == "close" and got == code_for(want), ("the reference refuses (%s), the gateway did not agree" % want, m, kind, got)
-                assert tags.get("/o16/d%d/echo" % i) == want, ("the tag", m, want, tags.get("/o16/d%d/echo" % i))
+                assert tags.get("%s/d%d/echo" % (prefix, i)) == want, ("the tag", m, want, tags.get("%s/d%d/echo" % (prefix, i)))
                 invalid += 1
                 by_tag[want] = by_tag.get(want, 0) + 1
             if not loads_ok:
                 assert want is not None, ("json.loads refuses and the reference accepts", m)
-        assert valid > 100 and invalid > 1000, (valid, invalid)
+        assert valid > 100 and invalid > (1000 if rounds > 1000 else 300), (valid, invalid)
         for tag in ("ws.ocpp-json", "ws.ocpp-type", "ws.ocpp-arity", "ws.ocpp-id", "ws.ocpp-action", "ws.ocpp-payload", "ws.ocpp-code", "ws.ocpp-depth"):
             assert by_tag.get(tag, 0) > 0, ("the corpus never reached", tag, by_tag)
-        print("      %d messages: %d accepted, %d refused %s" % (len(todo), valid, invalid, json.dumps(by_tag, sort_keys=True)))
+        print("      %s: %d messages: %d accepted, %d refused %s" % (prefix, len(todo), valid, invalid, json.dumps(by_tag, sort_keys=True)))
+        return by_tag
+
+
+
+
+SHAPES = [b'[2,"a","B",' + b'{"a":' * d + b"1" + b"}" * d + b"]" for d in (1, 31, 32, 33)] + [b'[2,"a","B",{"a":' + b"[" * d + b"]" * d + b"}]" for d in (30, 31, 32)]
+SHAPES21 = [b'[6,"a","B",' + b'{"a":' * d + b"1" + b"}" * d + b"]" for d in (1, 31, 32, 33)] + [b'[5,"a","C","d",' + b'{"a":' * d + b"1" + b"}" * d + b"]" for d in (31, 32, 33)]
+
+
+class Differential:
+    def the_gateway_and_the_reference_agree_on_mutated_messages(gw, up):
+        differential(gw, up, "/o16", False, 20261012, VALID, SHAPES, 1800)
+
+    def on_a_2_1_connection_the_gateway_and_the_reference_agree_on_mutated_messages_of_types_2_to_6(gw, up):
+        by_tag = differential(gw, up, "/o21", True, 20261013, VALID + VALID21, SHAPES + SHAPES21, 1800)
+        assert by_tag.get("ws.ocpp-type", 0) > 0
+
+    def a_1_6_connection_agrees_with_the_reference_that_has_no_types_5_and_6(gw, up):
+        # the same 2.1 corpus on a route that is not 2.1: the reference without v21 (everything that begins with 5 or 6 is the type)
+        differential(gw, up, "/o16", False, 20261014, VALID + VALID21, SHAPES + SHAPES21, 1200)
+
+    def a_2_0_1_connection_agrees_with_the_reference_that_has_no_types_5_and_6(gw, up):
+        differential(gw, up, "/o201", False, 20261015, VALID + VALID21, SHAPES + SHAPES21, 1200)
 
 
 def main():
-    groups = {"Ocpp": Ocpp, "Differential": Differential}
+    groups = {"Ocpp": Ocpp, "Ocpp21": Ocpp21, "Differential": Differential}
     wanted = sys.argv[1:]
     todo = []
     for gname, cls in groups.items():

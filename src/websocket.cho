@@ -443,6 +443,15 @@ pub fn check_response[&s, &t, &e, &p](src: &s [byte], table: &t [int], expected:
     return 0;
 }
 
+// The subprotocol a checked `101` chose (its `Sec-WebSocket-Protocol` value), or the empty slice if it has none. `check_response` has already said it is at most one and one the route serves.
+pub fn chosen_protocol[&s, &t](src: &s [byte], table: &t [int]) -> [] &s [byte] {
+    let sp = first_named(src, table, table[2], "sec-websocket-protocol");
+    if sp < 0 {
+        return src[0..0];
+    }
+    return value_of(src, table, sp);
+}
+
 // The head the client is sent for a checked `101`, into `out` from offset 0: only fields the checks have read (the accept value, the chosen subprotocol), then `Via` and the
 // request's id. Answers its length, or `0 - 1` if it does not fit.
 pub fn upgrade_response[&s, &t, &o, &d](src: &s [byte], table: &t [int], out: &!o [byte], id: &d [byte]) -> [] int {

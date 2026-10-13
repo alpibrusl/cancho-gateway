@@ -4,7 +4,7 @@ Status: **slice 1 built (2026-10-08).** Sections 1 to 12 are the decision, writt
 the build found the design false; a claim found false is corrected in place and marked *(corrected)*. Claims about cancho are about the pinned
 compiler (`cancho.toml`, `2fcf4cd`). **Slice 2 (frames, ping/pong, close handshake, message limit, UTF-8) is `docs/websocket-frames.md`**: it supersedes sections 7 and 8 and the "Not done" list below where they say that no frame is read.
 
-The use case is OCPP-J: EV chargers connect to a back office over a WebSocket (`ws`, or `wss` in production) and speak a subprotocol, `ocpp1.6` or `ocpp2.0.1`, for hours or weeks. The gateway sits in front of the
+The use case is OCPP-J: EV chargers connect to a back office over a WebSocket (`ws`, or `wss` in production) and speak a subprotocol, `ocpp1.6`, `ocpp2.0.1` or `ocpp2.1`, for hours or weeks. The gateway sits in front of the
 back office: it is where the strict parsing, the upstream set, the access log, the metrics and TLS already are. This slice makes the gateway carry the connection. It does **not** understand OCPP (*slice 3, `docs/ocpp.md`, checks the shape of the frames: not their meaning*) and does **not**
 read WebSocket frames.
 
@@ -50,7 +50,7 @@ Per route (all optional; `subprotocols` and `origins` are refused without `webso
 | key | type | default | meaning |
 |---|---|---|---|
 | `websocket` | bool | `false` | the route accepts WebSocket upgrades. A request without `Upgrade` is an ordinary request on the same route |
-| `subprotocols` | list of up to 8 tokens | `[]` | the subprotocols the route serves (`"ocpp1.6"`, `"ocpp2.0.1"`). Each is an RFC 9110 token of at most 64 bytes, no repeats. An empty list means the route serves **no** subprotocol (section 4, row 9) |
+| `subprotocols` | list of up to 8 tokens | `[]` | the subprotocols the route serves (`"ocpp1.6"`, `"ocpp2.0.1"`, `"ocpp2.1"`). Each is an RFC 9110 token of at most 64 bytes, no repeats. An empty list means the route serves **no** subprotocol (section 4, row 9) |
 | `origins` | list of up to 16 strings | `[]` | the `Origin` values a request may carry (section 4, row 10), each `scheme://host[:port]` exactly as a browser writes it (lowercase scheme and host, no path, no trailing slash) |
 
 A route with `websocket = true` whose `methods` exclude `GET` is refused (`config.websocket`): an upgrade is a `GET`.

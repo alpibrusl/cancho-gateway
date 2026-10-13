@@ -12,7 +12,7 @@ import gateway.ocppframe;
 // The interface is shaped by what the tunnel can do. A message is never held (the buffers are fixed and smaller than the message limit), so a validator is a *stream* machine: the parser calls
 // it `begin` at the first frame of a text message, `step` with each unmasked byte of the message once the UTF-8 automaton has accepted it, and `finish` when the message ends (its FIN frame's
 // last byte); `binary` is asked at the header of a binary message, which is never read. Each answers a verdict at once, and the first nonzero one closes the tunnel. Per direction the
-// validator owns eight ints at the offset `o` the caller passes (`wsframe`'s `dir_base(dir) + 20`): `o` to `o + 6` are its state, `o + 7` is the direction's kind.
+// validator owns eight ints at the offset `o` the caller passes (`wsframe`'s `dir_base(dir) + 20`): `o` to `o + 6` are its state, `o + 7` is the direction's kind with the tunnel's negotiated version packed above it.
 //
 // Kinds: 0 none (the default: nothing is stepped, nothing is refused, the ints are never written), 1 OCPP-J (`ws_ocpp` on the route). The rules a kind owns are a range of `wsframe`'s rule
 // numbers: kind 1 owns 17 to 25 (17 binary, 18 json, 19 type, 20 arity, 21 id, 22 action, 23 payload, 24 code, 25 depth).
@@ -33,15 +33,16 @@ pub fn kind_of_rule(rule: int) -> [] int {
     return 0;
 }
 
-// The direction at `o` is validated as `kind`.
-pub fn set_kind[&t](ws: &!t [int], o: int, kind: int) -> [] int {
-    ws[o + 7] = kind;
+// The direction at `o` is validated as `kind`, for a tunnel whose negotiated OCPP version is `version` (a bit: 1 for 1.6, 2 for 2.0.1, 4 for 2.1; 0 if none is known). They share the int
+// `o + 7`: the kind in the low four bits, the version above them (docs/ocpp.md section 13).
+pub fn set_kind[&t](ws: &!t [int], o: int, kind: int, version: int) -> [] int {
+    ws[o + 7] = kind + 16 * version;
     return 0;
 }
 
 // The kind of the direction at `o`.
 pub fn kind[&t](ws: &t [int], o: int) -> [] int {
-    return ws[o + 7];
+    return ws[o + 7] % 16;
 }
 
 // The first frame of a text message of a direction validated as `kind`: ready for a new message.
