@@ -89,6 +89,7 @@ m("l01", S, "        identity = auth.identity(st[p + auth_slot()]);", "        i
 m("l02", S, "    if st[p + auth_slot()] > 0 {\n        identity", "    if false {\n        identity", ["the_log_names_the_identity_last_and_never_the_key", "a_valid_key_the_route_does_not_allow_is_a_403"], "the log never names the caller")
 # ---- the proxy: end to end
 P = "src/proxy.cho"
+SL = "src/slots.cho"
 m("p01", P, "    if unauthenticated(tab, core, k, sel, view, tb, now) {\n        return 0;\n    }\n    if route.websocket(sel)", "    if false && unauthenticated(tab, core, k, sel, view, tb, now) {\n        return 0;\n    }\n    if route.websocket(sel)", ["each_bad_credential_is_refused_with_its_status_its_rule_and_its_challenge"], "authentication is never applied")
 m("p02", P, [("    if unauthenticated(tab, core, k, sel, view, tb, now) {\n        return 0;\n    }\n    if route.websocket(sel)", "    if route.websocket(sel)"),
              ("    if rate_limited(tab, core, k, sel, view, tb, now) {\n        return 0;\n    }", "    if rate_limited(tab, core, k, sel, view, tb, now) || unauthenticated(tab, core, k, sel, view, tb, now) {\n        return 0;\n    }")], ["authentication_comes_before_the_rate_limiter_and_the_identity_is_its_key"], "authentication comes after the rate limiter")
@@ -102,13 +103,13 @@ m("p08", P, " && route.auth_forward(st[p + 31] - 1) == 0 {", " {", ["auth_forwar
 m("p09", P, "st[p + 23] % 2 == 1, st[p + tlsio.f_mode()] != 0, shared.meta_get(core, k, 4, 0), strip);\n        } else {", 'st[p + 23] % 2 == 1, st[p + tlsio.f_mode()] != 0, shared.meta_get(core, k, 4, 0), "");\n        } else {', ["a_websocket_upgrade_is_authenticated_and_a_refused_one_takes_no_tunnel_place"], "the credential reaches a WebSocket upstream")
 m("p10", P, "    metrics.auth_refused(contents(core.stats), sel, rule);", "    metrics.auth_refused(contents(core.stats), sel, 1);", ["the_counters_agree_with_what_the_clients_were_told"], "every refusal is counted as missing")
 m("p11", P, "    metrics.auth_refused(contents(core.stats), sel, rule);\n", "", ["the_counters_agree_with_what_the_clients_were_told"], "a refusal is not counted")
-m("p12", P, "        challenge = route.auth_challenge(st[p + 31] - 1);", '        challenge = "";', ["each_bad_credential_is_refused_with_its_status_its_rule_and_its_challenge"], "a 401 invites no credential")
+m("p12", SL, "        challenge = route.auth_challenge(st[p + 31] - 1);", '        challenge = "";', ["each_bad_credential_is_refused_with_its_status_its_rule_and_its_challenge"], "a 401 invites no credential")
 m("p13", P, "        let cred = auth.credential(view, tb, header);", '        let cred = auth.credential(view, tb, "authorization");', ["a_valid_key_passes_and_the_credential_is_not_forwarded"], "the credential is always read from Authorization")
 m("p14", P, "    var rule = auth.parse_cap(view, tb, header, cap);", '    var rule = auth.parse_cap(view, tb, "authorization", cap);', ["each_bad_credential_is_refused_with_its_status_its_rule_and_its_challenge"], "the credential is always parsed from Authorization")
 m("p15", P, "auth.identity(st[p + shared.auth_slot()]), route.rate(sel)", 'auth.key_name(0 - 1), route.rate(sel)', ["authentication_comes_before_the_rate_limiter_and_the_identity_is_its_key"], "every caller shares the bucket of the empty key")
 m("p16", P, "auth.identity(st[p + shared.auth_slot()]), route.rate(sel)", "auth.identity(st[p + shared.auth_slot()] + 1), route.rate(sel)", ["authentication_comes_before_the_rate_limiter_and_the_identity_is_its_key"], "every caller spends its neighbour's bucket")
 m("p17", P, "            if found == 0 {\n                rule = 3;", "            if found < 0 {\n                rule = 3;", ["each_bad_credential_is_refused_with_its_status_its_rule_and_its_challenge"], "an unknown key is admitted as no one")
-m("p18", P, "    refuse(tab, core, k, auth.status(rule), auth.tag(rule), now);", "    refuse(tab, core, k, 401, auth.tag(rule), now);", ["a_valid_key_the_route_does_not_allow_is_a_403"], "a forbidden key is a 401")
+m("p18", P, "    slots.refuse(tab, core, k, auth.status(rule), auth.tag(rule), now);", "    slots.refuse(tab, core, k, 401, auth.tag(rule), now);", ["a_valid_key_the_route_does_not_allow_is_a_403"], "a forbidden key is a 401")
 # ---- the generator
 G = "scripts/generate.py"
 m("g01", G, 'KEY_DIGEST = re.compile(r"[0-9a-f]{64}")', 'KEY_DIGEST = re.compile(r"[0-9a-fA-F]{64}")', "gen", "an uppercase digest is accepted")

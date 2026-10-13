@@ -1,0 +1,120 @@
+edition 5;
+
+module gateway.wsvalidate;
+
+import gateway.ocppframe;
+
+// The seam between the WebSocket tunnel and a grammar that judges the messages going through it (docs/websocket-frames.md section 16, docs/ocpp.md section 12). Sans-io and pure: no
+// effect, no allocation, no buffer. The tunnel code (`wsframe.scan`, `wstunnel`, `proxy`) knows a route's *validator kind* and four things a validator says: a *verdict* (0, or the number of
+// the rule a byte, a message or a message type breaks), that rule's *tag* (the access log's and the counters'), the *Close code* the offender is sent, and nothing else. What a kind
+// is (its grammar, its state, the metrics counter it feeds) is behind this file: the OCPP-J grammar is `gateway.ocppframe`, the counter is `gateway.wsbind`.
+//
+// The interface is shaped by what the tunnel can do. A message is never held (the buffers are fixed and smaller than the message limit), so a validator is a *stream* machine: the parser calls
+// it `begin` at the first frame of a text message, `step` with each unmasked byte of the message once the UTF-8 automaton has accepted it, and `finish` when the message ends (its FIN frame's
+// last byte); `binary` is asked at the header of a binary message, which is never read. Each answers a verdict at once, and the first nonzero one closes the tunnel. Per direction the
+// validator owns eight ints at the offset `o` the caller passes (`wsframe`'s `dir_base(dir) + 20`): `o` to `o + 6` are its state, `o + 7` is the direction's kind.
+//
+// Kinds: 0 none (the default: nothing is stepped, nothing is refused, the ints are never written), 1 OCPP-J (`ws_ocpp` on the route). The rules a kind owns are a range of `wsframe`'s rule
+// numbers: kind 1 owns 17 to 25 (17 binary, 18 json, 19 type, 20 arity, 21 id, 22 action, 23 payload, 24 code, 25 depth).
+
+pub fn kind_none() -> [] int {
+    return 0;
+}
+
+pub fn kind_ocpp() -> [] int {
+    return 1;
+}
+
+// The kind that owns `rule`, or 0 if it is a rule of the frame layer or of the clocks.
+pub fn kind_of_rule(rule: int) -> [] int {
+    if rule >= 17 && rule <= 25 {
+        return 1;
+    }
+    return 0;
+}
+
+// The direction at `o` is validated as `kind`.
+pub fn set_kind[&t](ws: &!t [int], o: int, kind: int) -> [] int {
+    ws[o + 7] = kind;
+    return 0;
+}
+
+// The kind of the direction at `o`.
+pub fn kind[&t](ws: &t [int], o: int) -> [] int {
+    return ws[o + 7];
+}
+
+// The first frame of a text message of a direction validated as `kind`: ready for a new message.
+pub fn begin[&t](ws: &!t [int], o: int, kind: int) -> [] int {
+    if kind == 1 {
+        ocppframe.reset(ws, o);
+    }
+    return 0;
+}
+
+// The next byte `c` (0 to 255, unmasked, already valid UTF-8) of the message: 0, or the rule it breaks.
+pub fn step[&t](ws: &!t [int], o: int, kind: int, c: int) -> [] int {
+    if kind == 1 {
+        return ocppframe.step(ws, o, c);
+    }
+    return 0;
+}
+
+// The message has ended (its last fragment's last byte): 0, or the rule a message that ends here breaks.
+pub fn finish[&t](ws: &t [int], o: int, kind: int) -> [] int {
+    if kind == 1 && !ocppframe.complete(ws, o) {
+        return 18;
+    }
+    return 0;
+}
+
+// A binary message begins (judged at its header, never read): 0, or the rule that refuses it.
+pub fn binary(kind: int) -> [] int {
+    if kind == 1 {
+        return 17;
+    }
+    return 0;
+}
+
+// The tag of a rule this file owns (docs/ocpp.md section 3), or the empty string.
+pub fn tag(rule: int) -> [] &static [byte] {
+    if rule == 17 {
+        return "ws.ocpp-binary";
+    }
+    if rule == 18 {
+        return "ws.ocpp-json";
+    }
+    if rule == 19 {
+        return "ws.ocpp-type";
+    }
+    if rule == 20 {
+        return "ws.ocpp-arity";
+    }
+    if rule == 21 {
+        return "ws.ocpp-id";
+    }
+    if rule == 22 {
+        return "ws.ocpp-action";
+    }
+    if rule == 23 {
+        return "ws.ocpp-payload";
+    }
+    if rule == 24 {
+        return "ws.ocpp-code";
+    }
+    if rule == 25 {
+        return "ws.ocpp-depth";
+    }
+    return "";
+}
+
+// The Close code the offender of a rule this file owns is sent (1008 for a policy: binary and nesting; 1007 for a message that is not well formed), or 0 if the rule is not its.
+pub fn close_code(rule: int) -> [] int {
+    if rule == 17 || rule == 25 {
+        return 1008;
+    }
+    if rule >= 18 && rule <= 24 {
+        return 1007;
+    }
+    return 0;
+}

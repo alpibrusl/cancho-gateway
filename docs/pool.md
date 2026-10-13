@@ -14,7 +14,7 @@ connection the gateway must know **where a response ends**, so it now reads the 
   connection still closes after each response).
 - `forward.rewrite`: the request line is now sent as `HTTP/1.1` whatever the client spoke, and carries no `Connection` header
   (keep-alive is the default), unless pooling is off (`pool_idle_max = 0`), when it carries `Connection: close` as before.
-- `src/proxy.cho`: response framing, the pool, retry.
+- `src/proxy.cho`: response framing, retry; the pool (`pool_find`, `pool_return`, `evict_idle`) and the circuit moved to `src/slots.cho` when the tunnel was split out (`docs/websocket-frames.md` section 16).
 - Deployment keys: `pool_idle_max` (idle connections kept per upstream, 0 to 64, default 4; **0 turns pooling off**) and
   `idle_timeout_ms` (100 to 600000, default 5000).
 

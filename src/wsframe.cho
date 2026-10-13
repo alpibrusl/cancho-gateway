@@ -3,7 +3,7 @@ edition 5;
 module gateway.wsframe;
 
 import std.bytes;
-import gateway.ocppframe;
+import gateway.wsvalidate;
 
 // The frame parser of a WebSocket tunnel (task #15, slice 2, docs/websocket-frames.md). Sans-io and pure: no effect, no allocation. The caller owns the bytes and a block of
 // `state_len()` ints per tunnel and calls `scan` on the bytes it is about to move; `scan` answers how many of them may go on.
@@ -17,7 +17,7 @@ import gateway.ocppframe;
 //     13 1 once a Close frame has gone by   14 the event the last `scan` reported (0 none, 1 violation, 2 a Close frame went by, 3 the gateway's own Pong, 4 a header or Pong is
 //     incomplete)   15 its number (the rule, the Close code, or the bytes to drop)   16 1 if the frame in hand is validated as UTF-8   17 for a violation: 1 if the bytes
 //     `scan` answered end at a frame boundary   18 1 once the direction is junk (a violation was seen: everything from it is discarded)   19 1 if the direction's frames are the cause of the close
-//     20 to 27 the OCPP-J recogniser (`gateway.ocppframe`, docs/ocpp.md section 4); 27 is 1 if the direction's text messages are validated
+//     20 to 27 the validator of the direction's text messages (`gateway.wsvalidate`, docs/websocket-frames.md section 16): 20 to 26 its state, 27 its kind (0 none, 1 OCPP-J, docs/ocpp.md section 4)
 //
 // What `scan` does to its answer: it never answers more than the bytes it was given; a header is not answered (so not forwarded) until it is whole and has been judged; a frame that
 // violates a rule is not answered, and neither is anything after it. See the document for the rules (section 3) and for why a violation in the middle of a payload cannot be undone.
@@ -175,16 +175,25 @@ pub fn rule_count() -> [] int {
     return 25;
 }
 
-// The rules of docs/ocpp.md: 17 binary on an OCPP route, 18 to 24 a message that is not a well-formed OCPP-J frame, 25 nesting past the gateway's bound.
-pub fn is_ocpp(rule: int) -> [] bool {
-    return rule >= 17 && rule <= 25;
+// Is `rule` one of a validator's (`gateway.wsvalidate`), as opposed to a frame rule or a timer? Kept as `is_ocpp` for the tests of the OCPP rules.
+pub fn is_validated(rule: int) -> [] bool {
+    return wsvalidate.kind_of_rule(rule) != wsvalidate.kind_none();
 }
 
-// Validate the text messages of both directions of this tunnel as OCPP-J (the route has `ws_ocpp`).
-pub fn enable_ocpp[&t](ws: &!t [int]) -> [] int {
-    ws[dir_base(0) + 27] = 1;
-    ws[dir_base(1) + 27] = 1;
+pub fn is_ocpp(rule: int) -> [] bool {
+    return wsvalidate.kind_of_rule(rule) == wsvalidate.kind_ocpp();
+}
+
+// Validate the text messages of both directions of this tunnel as validator kind `kind` (`wsvalidate`; the route's, from `wsbind.kind_of_route`).
+pub fn enable_validator[&t](ws: &!t [int], kind: int) -> [] int {
+    wsvalidate.set_kind(ws, dir_base(0) + 20, kind);
+    wsvalidate.set_kind(ws, dir_base(1) + 20, kind);
     return 0;
+}
+
+// OCPP-J (kind 1); kept for the unit tests.
+pub fn enable_ocpp[&t](ws: &!t [int]) -> [] int {
+    return enable_validator(ws, wsvalidate.kind_ocpp());
 }
 
 pub fn tag(rule: int) -> [] &static [byte] {
@@ -236,34 +245,7 @@ pub fn tag(rule: int) -> [] &static [byte] {
     if rule == 16 {
         return "ws.lifetime";
     }
-    if rule == 17 {
-        return "ws.ocpp-binary";
-    }
-    if rule == 18 {
-        return "ws.ocpp-json";
-    }
-    if rule == 19 {
-        return "ws.ocpp-type";
-    }
-    if rule == 20 {
-        return "ws.ocpp-arity";
-    }
-    if rule == 21 {
-        return "ws.ocpp-id";
-    }
-    if rule == 22 {
-        return "ws.ocpp-action";
-    }
-    if rule == 23 {
-        return "ws.ocpp-payload";
-    }
-    if rule == 24 {
-        return "ws.ocpp-code";
-    }
-    if rule == 25 {
-        return "ws.ocpp-depth";
-    }
-    return "";
+    return wsvalidate.tag(rule);
 }
 
 // The Close code a peer that caused `rule` is sent (the codes of docs/websocket-frames.md section 7).
@@ -274,11 +256,9 @@ pub fn own_code(rule: int) -> [] int {
     if rule == 11 {
         return 1007;
     }
-    if rule == 17 || rule == 25 {
-        return 1008;
-    }
-    if rule >= 18 && rule <= 24 {
-        return 1007;
+    let vc = wsvalidate.close_code(rule);
+    if vc != 0 {
+        return vc;
     }
     if rule == 13 || rule == 15 || rule == 16 {
         return 1001;
@@ -445,9 +425,9 @@ pub fn scan[&t, &s](ws: &!t [int], dir: int, data: &s [byte], maxmsg: int, stop:
             }
             let op = ws[b + 2];
             let uon = ws[b + 16];
-            var oon = 0;
+            var von = 0;
             if uon == 1 {
-                oon = ws[b + 27];
+                von = wsvalidate.kind(ws, b + 20);
             }
             if take > 0 && (uon == 1 || op == 8) {
                 var need = ws[b + 8];
@@ -511,10 +491,10 @@ pub fn scan[&t, &s](ws: &!t [int], dir: int, data: &s [byte], maxmsg: int, stop:
                             hi = 191;
                         }
                     }
-                    if oon == 1 {
-                        let orule = ocppframe.step(ws, b + 20, c);
-                        if orule != 0 {
-                            return viol(ws, b, orule, fstart_or_zero(fstart), boundary_flag(fstart));
+                    if von != 0 {
+                        let vrule = wsvalidate.step(ws, b + 20, von, c);
+                        if vrule != 0 {
+                            return viol(ws, b, vrule, fstart_or_zero(fstart), boundary_flag(fstart));
                         }
                     }
                     if op == 8 && done_before + i < 2 {
@@ -534,9 +514,12 @@ pub fn scan[&t, &s](ws: &!t [int], dir: int, data: &s [byte], maxmsg: int, stop:
                     // The message ends inside a character.
                     return viol(ws, b, 11, fstart_or_zero(fstart), boundary_flag(fstart));
                 }
-                if oon == 1 && ws[b + 3] == 1 && !ocppframe.complete(ws, b + 20) {
-                    // The message ends before the grammar does (or never began).
-                    return viol(ws, b, 18, fstart_or_zero(fstart), boundary_flag(fstart));
+                if von != 0 && ws[b + 3] == 1 {
+                    // The message ends: the validator says whether it may end here.
+                    let vend = wsvalidate.finish(ws, b + 20, von);
+                    if vend != 0 {
+                        return viol(ws, b, vend, fstart_or_zero(fstart), boundary_flag(fstart));
+                    }
                 }
                 ws[b] = 0;
                 if op == 8 {
@@ -665,8 +648,11 @@ pub fn scan[&t, &s](ws: &!t [int], dir: int, data: &s [byte], maxmsg: int, stop:
                 if ws[b + 13] == 1 {
                     return viol(ws, b, 9, at, 1);
                 }
-                if op == 2 && ws[b + 27] == 1 {
-                    return viol(ws, b, 17, at, 1);
+                if op == 2 {
+                    let vbin = wsvalidate.binary(wsvalidate.kind(ws, b + 20));
+                    if vbin != 0 {
+                        return viol(ws, b, vbin, at, 1);
+                    }
                 }
                 if op < 8 && length > maxmsg - ws[b + 7] {
                     return viol(ws, b, 10, at, 1);
@@ -678,7 +664,7 @@ pub fn scan[&t, &s](ws: &!t [int], dir: int, data: &s [byte], maxmsg: int, stop:
                 var uon = 0;
                 if op == 1 {
                     uon = 1;
-                    ocppframe.reset(ws, b + 20);
+                    wsvalidate.begin(ws, b + 20, wsvalidate.kind(ws, b + 20));
                     ws[b + 8] = 0;
                     ws[b + 9] = 128;
                     ws[b + 10] = 191;

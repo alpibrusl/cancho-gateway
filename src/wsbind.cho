@@ -1,0 +1,26 @@
+edition 5;
+
+module gateway.wsbind;
+
+import gateway.metrics;
+import gateway.route;
+import gateway.wsvalidate;
+
+// What ties a validator kind (`gateway.wsvalidate`) to the rest of the gateway: the route table's column that selects it and the metrics counter its refusals feed. Everything here
+// that names a grammar is here, so that `wstunnel` and `proxy` need not (docs/websocket-frames.md section 16).
+
+// The validator kind of route `index`: OCPP-J if it has `ws_ocpp` (docs/ocpp.md), else none.
+pub fn kind_of_route(index: int) -> [] int {
+    if route.ws_ocpp(index) > 0 {
+        return wsvalidate.kind_ocpp();
+    }
+    return wsvalidate.kind_none();
+}
+
+// A tunnel is being closed for `rule`: count it in the validator's counter if the rule is a validator's (an RFC 6455 violation or a timer is not).
+pub fn count[&s](stats: &!s [int], rule: int) -> [] int {
+    if wsvalidate.kind_of_rule(rule) == wsvalidate.kind_ocpp() {
+        metrics.ws_ocpp_violation(stats);
+    }
+    return 0;
+}

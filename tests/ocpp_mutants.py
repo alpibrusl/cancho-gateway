@@ -31,6 +31,8 @@ def m(ident, path, old, new, kill, what):
 O = "src/ocppframe.cho"
 F = "src/wsframe.cho"
 P = "src/proxy.cho"
+V = "src/wsvalidate.cho"
+B = "src/wsbind.cho"
 G = "scripts/generate.py"
 MET = "src/metrics.cho"
 # ---- the recogniser (unit tests first)
@@ -79,23 +81,23 @@ m("o42", O, "    ws[o + 2] = ws[o + 2] + 1;\n    if c == 123 {", "    if c == 12
 m("o43", O, "        if c == 34 {\n            if ws[o + 3] == 0 {\n                return string_rule(ws, o);\n            }\n            ws[o] = 3;", "        if c == 34 {\n            if ws[o + 3] == 0 {\n                return string_rule(ws, o);\n            }\n            ws[o] = 11;", "unit", "an id is followed by an item separator, not an element separator")
 m("o44", O, "            ws[o + 5] = ws[o + 5] + 1;\n            ws[o] = 1;", "            ws[o] = 1;", "unit", "the element index never advances")
 # ---- the parser's wiring
-m("w01", F, "                    if oon == 1 {\n                        let orule", "                    if false {\n                        let orule", "unit", "the recogniser is never stepped")
-m("w02", F, "if oon == 1 && ws[b + 3] == 1 && !ocppframe.complete(ws, b + 20) {", "if false {", "unit", "a message may end before the grammar does")
-m("w03", F, "if oon == 1 && ws[b + 3] == 1 && !ocppframe.complete(ws, b + 20) {", "if oon == 1 && !ocppframe.complete(ws, b + 20) {", "unit", "every fragment must be a whole message")
-m("w04", F, "if op == 2 && ws[b + 27] == 1 {", "if false {", "unit", "a binary message is admitted on an OCPP route")
-m("w05", F, "                    ocppframe.reset(ws, b + 20);\n", "", "unit", "a message begins where the last one ended")
-m("w06", F, "                oon = ws[b + 27];", "                oon = 0;", "unit", "no direction is validated")
-m("w07", F, "            var oon = 0;\n            if uon == 1 {\n                oon = ws[b + 27];\n            }", "            var oon = ws[b + 27];", "unit", "control frames are read as OCPP")
-m("w08", F, "    if rule == 17 || rule == 25 {\n        return 1008;", "    if rule == 17 || rule == 26 {\n        return 1008;", "unit", "nesting is answered 1007")
-m("w09", F, "    if rule >= 18 && rule <= 24 {\n        return 1007;\n    }\n", "", "unit", "a malformed message is answered 1002")
-m("w10", F, "return \"ws.ocpp-code\";", "return \"ws.ocpp-codes\";", "unit", "a tag is misspelt")
-m("w11", F, "return rule >= 17 && rule <= 25;", "return rule >= 18 && rule <= 25;", ["the_counters_and_the_refusal_tags"], "a binary refusal is not counted as an OCPP one")
-m("w12", F, "    ws[dir_base(1) + 27] = 1;\n", "", "unit", "the upstream's messages are not validated")
-m("w13", F, "    ws[dir_base(0) + 27] = 1;\n", "", "unit", "the client's messages are not validated")
+m("w01", F, "                    if von != 0 {\n                        let vrule", "                    if false {\n                        let vrule", 'unit', 'the recogniser is never stepped')
+m("w02", F, "if von != 0 && ws[b + 3] == 1 {", "if false {", 'unit', 'a message may end before the grammar does')
+m("w03", F, "if von != 0 && ws[b + 3] == 1 {", "if von != 0 {", 'unit', 'every fragment must be a whole message')
+m("w04", F, "                if op == 2 {\n                    let vbin", "                if false {\n                    let vbin", 'unit', 'a binary message is admitted on an OCPP route')
+m("w05", F, "                    wsvalidate.begin(ws, b + 20, wsvalidate.kind(ws, b + 20));\n", "", 'unit', 'a message begins where the last one ended')
+m("w06", F, "                von = wsvalidate.kind(ws, b + 20);", "                von = 0;", 'unit', 'no direction is validated')
+m("w07", F, "            var von = 0;\n            if uon == 1 {\n                von = wsvalidate.kind(ws, b + 20);\n            }", "            var von = wsvalidate.kind(ws, b + 20);", 'unit', 'control frames are read as OCPP')
+m("w08", V, "    if rule == 17 || rule == 25 {\n        return 1008;", "    if rule == 17 || rule == 26 {\n        return 1008;", 'unit', 'nesting is answered 1007')
+m("w09", V, "    if rule >= 18 && rule <= 24 {\n        return 1007;\n    }\n", "", 'unit', 'a malformed message is answered 1002')
+m("w10", V, 'return "ws.ocpp-code";', 'return "ws.ocpp-codes";', 'unit', 'a tag is misspelt')
+m("w11", V, "    if rule >= 17 && rule <= 25 {\n        return 1;", "    if rule >= 18 && rule <= 25 {\n        return 1;", ['the_counters_and_the_refusal_tags'], 'a binary refusal is not counted as an OCPP one')
+m("w12", F, "    wsvalidate.set_kind(ws, dir_base(1) + 20, kind);\n", "", 'unit', "the upstream's messages are not validated")
+m("w13", F, "    wsvalidate.set_kind(ws, dir_base(0) + 20, kind);\n", "", 'unit', "the client's messages are not validated")
 # ---- the tunnel
-m("p01", P, "    if route.ws_ocpp(st[pc + 31] - 1) > 0 {", "    if false {", ["every_refusal_by_the_client_is_closed_with_its_code_and_stays_off_the_upstream"], "no tunnel is validated")
-m("p02", P, "    if route.ws_ocpp(st[pc + 31] - 1) > 0 {", "    if true {", ["a_route_without_ws_ocpp_forwards_what_slice_two_did"], "every tunnel is validated")
-m("p03", P, "    if wsframe.is_ocpp(cause) {\n        metrics.ws_ocpp_violation(contents(core.stats));\n    }\n", "", ["the_counters_and_the_refusal_tags"], "violations are not counted")
+m("p01", B, "    if route.ws_ocpp(index) > 0 {", "    if false {", ['every_refusal_by_the_client_is_closed_with_its_code_and_stays_off_the_upstream'], 'no tunnel is validated')
+m("p02", B, "    if route.ws_ocpp(index) > 0 {", "    if true {", ['a_route_without_ws_ocpp_forwards_what_slice_two_did'], 'every tunnel is validated')
+m("p03", B, "        metrics.ws_ocpp_violation(stats);\n", "", ['the_counters_and_the_refusal_tags'], 'violations are not counted')
 m("p04", "src/route.cho", "return number(bytes.field(blob[at..line_end(blob, at)], 9, 32));", "return number(bytes.field(blob[at..line_end(blob, at)], 9, 31));", ["a_route_without_ws_ocpp_forwards_what_slice_two_did"], "the version mask is read from the wrong column")
 # ---- the metrics
 m("t01", MET, "    stats[ws_base() + 12] = stats[ws_base() + 12] + 1;", "    stats[ws_base() + 12] = stats[ws_base() + 12] + 2;", "unit", "a violation is counted twice")

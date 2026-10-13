@@ -1,0 +1,357 @@
+edition 6;
+
+module gateway.slots;
+
+import std.bytes;
+import std.conns;
+import std.http;
+import std.io;
+import std.signals as sg;
+import gateway.auth;
+import gateway.accesslog;
+import gateway.admin;
+import gateway.chunked;
+import gateway.deploy;
+import gateway.egress;
+import gateway.forward;
+import gateway.framing;
+import gateway.jwt;
+import gateway.metrics;
+import gateway.out;
+import gateway.problem;
+import gateway.ratelimit;
+import gateway.ipkey;
+import gateway.response;
+import gateway.route;
+import gateway.routes_table;
+import gateway.shared;
+import gateway.adminloop;
+import gateway.tlsio;
+import gateway.websocket;
+import gateway.wsframe;
+
+// The slot lifecycle every path of the proxy shares: what a slot is watched for (`settle`), the upstream pool, the circuit, the write queue (`flush`), a refusal (`refuse`) and the end of a response.
+// Split from `proxy.cho` (the slot table's layout is documented in its header) so that the tunnel (`wstunnel.cho`) can sit below it.
+
+// What `k` is watched for now: room to write if output is queued, input if the phase wants it.
+pub fn settle[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> [poll] int {
+    let st = contents(core.state);
+    let p = shared.stride() * k;
+    if st[p] != 1 {
+        return 0;
+    }
+    if st[p + 1] == 4 {
+        adminloop.admin_settle(tab, core, k);
+        return 0;
+    }
+    if st[p + 1] == 1 && st[p + tlsio.f_mode()] == tlsio.m_queued() {
+        // Accepted and waiting its turn for a handshake: not watched, its ClientHello waits in the kernel.
+        return 0;
+    }
+    var want = 0;
+    if st[p + 5] > 0 || st[p + 1] == 1 && shared.tls_pending(core, k) {
+        want = 2;
+    }
+    if st[p + 1] == 1 {
+        // A client is read while its head or its body is arriving, or while it is lingering after a refusal; afterwards only a
+        // hang-up matters, and the loop does not look for one (an HTTP client may half-close after its request).
+        if st[p + 3] == 0 || st[p + 3] == 5 || st[p + 3] == 3 && st[p + 10] == 0 && st[p + 4] < shared.buf_size() && st[p + 14] == 0 || st[p + 3] == 6 && st[p + 4] < shared.buf_size() && st[p + 14] == 0 {
+            want = want + 1;
+        }
+        if want % 2 == 1 && st[p + tlsio.f_cin()] > 0 && st[p + tlsio.f_mode()] != 0 {
+            // Ciphertext is held that the engine has not yet taken: the socket has nothing to add, and watching it would spin.
+            want = want - 1;
+        }
+    } else if st[p + 1] == 3 {
+        // Idle in the pool: anything it says, or its closing, means it is no longer fit for use.
+        want = 1;
+    } else if st[p + 3] == 0 {
+        want = 2;
+    } else if st[p + 14] == 0 && st[p + 4] < shared.buf_size() {
+        want = want + 1;
+    }
+    if want != st[p + 6] {
+        conns.rewatch(tab, core.poller, k, shared.token_of(k), want);
+        st[p + 6] = want;
+    }
+    return 0;
+}
+
+// Close slot `k`, whatever it is, and forget it.
+pub fn close_slot[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> [] int {
+    conns.close(tab, k);
+    contents(core.state)[shared.stride() * k] = 0;
+    return 0;
+}
+
+// An idle connection to upstream `idx`, or -1.
+pub fn pool_find[&c](core: &c shared.Core, idx: int) -> [] int {
+    let st = contents(core.state);
+    var k = 0;
+    while k < shared.slot_limit() {
+        if st[shared.stride() * k] == 1 && st[shared.stride() * k + 1] == 3 && st[shared.stride() * k + 11] == idx {
+            return k;
+        }
+        k = k + 1;
+    }
+    return 0 - 1;
+}
+
+// Upstream `u` has finished a response and may carry another request: keep it, if the pool has room, else close it.
+pub fn pool_return[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, now: int) -> [poll] int {
+    let st = contents(core.state);
+    let p = shared.stride() * u;
+    if shared.pool_max() == 0 || shared.idle_count(core, st[p + 11]) >= shared.pool_max() {
+        close_slot(tab, core, u);
+        return 0;
+    }
+    st[p + 1] = 3;
+    st[p + 2] = 0 - 1;
+    st[p + 3] = 1;
+    st[p + 4] = 0;
+    st[p + 5] = 0;
+    st[p + 7] = now + shared.idle_ms();
+    st[p + 8] = 0;
+    st[p + 14] = 0;
+    st[p + 16] = 0;
+    st[p + 17] = 0;
+    st[p + 18] = 0;
+    st[p + 19] = 0;
+    st[p + 20] = 0;
+    st[p + 22] = 0;
+    settle(tab, core, u);
+    return 0;
+}
+
+// The oldest idle connection is closed to make room. Answers 1 if there was one.
+pub fn evict_idle[&t, &c](tab: &!t conns.Table, core: &!c shared.Core) -> [] int {
+    let st = contents(core.state);
+    var oldest = 0 - 1;
+    var k = 0;
+    while k < shared.slot_limit() {
+        if st[shared.stride() * k] == 1 && st[shared.stride() * k + 1] == 3 && (oldest < 0 || st[shared.stride() * k + 7] < st[shared.stride() * oldest + 7]) {
+            oldest = k;
+        }
+        k = k + 1;
+    }
+    if oldest < 0 {
+        return 0;
+    }
+    close_slot(tab, core, oldest);
+    return 1;
+}
+
+// May a request go to upstream `idx` now? 0: yes, the circuit is closed. 1: yes, as the single trial after the open period.
+// 2: no, the circuit is open, or a trial is already in flight.
+pub fn circuit_admit[&c](core: &!c shared.Core, idx: int, now: int) -> [] int {
+    let h = contents(core.health);
+    let b = 4 * idx;
+    if shared.circuit_threshold() == 0 || h[b + 1] == 0 {
+        return 0;
+    }
+    if now < h[b + 1] {
+        return 2;
+    }
+    // Half open: one request at a time, and a trial that never reports back does not hold the circuit shut for ever.
+    if h[b + 2] != 0 && now < h[b + 2] {
+        return 2;
+    }
+    h[b + 2] = now + shared.connect_ms() + shared.upstream_ms();
+    return 1;
+}
+
+// Upstream `idx` answered: the failures are forgotten and the circuit, if open, closes.
+pub fn health_ok[&c](core: &!c shared.Core, idx: int) -> [] int {
+    let h = contents(core.health);
+    let b = 4 * idx;
+    h[b] = 0;
+    h[b + 1] = 0;
+    h[b + 2] = 0;
+    return 0;
+}
+
+// Upstream `idx` failed (it would not connect, did not answer in time, hung up without answering on a fresh connection, or said
+// something unreadable). Enough in a row opens the circuit, and its idle pooled connections go. The count is not reset when the
+// circuit opens, so a failed trial after the open period reopens it at once.
+pub fn health_fail[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, idx: int, now: int) -> [] int {
+    metrics.upstream_failed(contents(core.stats), idx);
+    if shared.circuit_threshold() == 0 {
+        return 0;
+    }
+    let h = contents(core.health);
+    let st = contents(core.state);
+    let b = 4 * idx;
+    h[b] = h[b] + 1;
+    if h[b] >= shared.circuit_threshold() {
+        h[b + 1] = now + shared.circuit_open_ms();
+        h[b + 2] = 0;
+        var k = 0;
+        while k < shared.slot_limit() {
+            if st[shared.stride() * k] == 1 && st[shared.stride() * k + 1] == 3 && st[shared.stride() * k + 11] == idx {
+                close_slot(tab, core, k);
+            }
+            k = k + 1;
+        }
+    }
+    return 0;
+}
+
+// Upstream `u` has hung up, failed, or been written to in vain. If it was a pooled connection that died before saying anything and
+// the request may be sent again (no body, idempotent) and has not been, it is sent again on a fresh connection; otherwise
+// the client is answered 502, or, if the response was under way, simply closed.
+pub fn upstream_lost[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, now: int) -> [conn_write, poll] int {
+    let st = contents(core.state);
+    let p = shared.stride() * u;
+    let client = st[p + 2];
+    if client < 0 || st[shared.stride() * client] != 1 {
+        close_slot(tab, core, u);
+        return 0;
+    }
+    let pc = shared.stride() * client;
+    if st[p + 16] >= 1 {
+        shared.drop_session(tab, core, client);
+        return 0;
+    }
+    if st[p + 20] == 0 && st[p + 16] == 0 {
+        // A fresh connection that hung up before answering: the upstream's failing, not a pooled connection going stale.
+        health_fail(tab, core, st[p + 11], now);
+    }
+    if st[p + 4] == 0 && st[p + 20] == 1 && st[pc + 16] == 1 && st[pc + 17] == 0 {
+        close_slot(tab, core, u);
+        st[pc + 2] = 0 - 1;
+        st[pc + 3] = 1;
+        st[pc + 17] = 1;
+        st[pc + 7] = now + shared.connect_ms();
+        return 0;
+    }
+    refuse(tab, core, client, 502, "proxy.upstream-closed", now);
+    return 0;
+}
+
+// Write what is queued for `k`, and, once nothing is left and `k` is to close, close it (a refusal first lingers). Answers 1 if
+// the session ended or the upstream was replaced (the write failed, or `k` has closed).
+pub fn flush[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: int) -> [conn_write, poll] int {
+    let st = contents(core.state);
+    let pd = contents(core.pends);
+    let p = shared.stride() * k;
+    let base = k * shared.pend_size();
+    if st[p] != 1 {
+        return 0;
+    }
+    if st[p + 5] == 0 && shared.tls_drain(tab, core, k) < 0 {
+        shared.drop_session(tab, core, k);
+        return 1;
+    }
+    if st[p + 5] > 0 {
+        match shared.client_write(tab, core, k, pd[base..base + st[p + 5]]) {
+            Sent::Wrote(n) => {
+                copy_into(pd[base..base + st[p + 5] - n], pd[base + n..base + st[p + 5]]);
+                st[p + 5] = st[p + 5] - n;
+            }
+            Sent::Again => {
+            }
+            Sent::Failed(e) => {
+                if st[p + 1] == 2 {
+                    upstream_lost(tab, core, k, now);
+                } else {
+                    shared.drop_session(tab, core, k);
+                }
+                return 1;
+            }
+        }
+    }
+    if st[p + 5] == 0 && st[p + 8] == 1 && !shared.tls_pending(core, k) {
+        if st[p + 1] == 1 && st[p + 3] == 4 {
+            // A final answer is out while the client may still be sending: linger, reading and discarding, until it stops or
+            // the time is up.
+            st[p + 3] = 5;
+            st[p + 8] = 0;
+            st[p + 7] = now + shared.linger_ms();
+            // The lingering cap: the request's own total deadline, or three seconds, whichever comes first.
+            if st[p + 12] == 0 || st[p + 12] > now + 3000 {
+                st[p + 12] = now + 3000;
+            }
+            settle(tab, core, k);
+            return 0;
+        }
+        shared.drop_session(tab, core, k);
+        return 1;
+    }
+    return 0;
+}
+
+// Refuse the request of client `k` with `status` and `rule`: the upstream, if any, is closed, and a problem+json response is
+// queued and the connection closed once it is sent (the poller reports the socket writable at once). If a response has already
+// begun there is nothing honest to send: the session just ends.
+pub fn refuse[&t, &c, &r](tab: &!t conns.Table, core: &!c shared.Core, k: int, status: int, rule: &r [byte], now: int) -> [conn_write, poll] int {
+    return refuse_as(tab, core, k, status, rule, rule, now);
+}
+
+// `refuse`, where the response says `rule` and the access log and the counters say `shown`: a token refused for any of eleven reasons is one answer to the client and eleven in the log
+// (docs/jwt.md section 9).
+pub fn refuse_as[&t, &c, &r, &l](tab: &!t conns.Table, core: &!c shared.Core, k: int, status: int, rule: &r [byte], shown: &l [byte], now: int) -> [conn_write, poll] int {
+    let st = contents(core.state);
+    let pd = contents(core.pends);
+    let p = shared.stride() * k;
+    shared.release_trial(core, k);
+    if st[p + 13] == 1 {
+        shared.drop_session(tab, core, k);
+        return 0;
+    }
+    let peer = st[p + 2];
+    if peer >= 0 && st[shared.stride() * peer] == 1 {
+        conns.close(tab, peer);
+        st[shared.stride() * peer] = 0;
+    }
+    st[p + 2] = 0 - 1;
+    // The record of the refusal, for the access log: its status and rule, and that the gateway made it.
+    st[p + 29] = status;
+    shared.flag_set(core, k, 1);
+    shared.meta_put(core, k, 68, 40, 1, shown);
+    let base = k * shared.pend_size();
+    // A 401 names how to authenticate: the challenge of the route that refused it (docs/auth.md section 7.2).
+    var challenge = "";
+    if status == 401 && st[p + 31] > 0 {
+        challenge = route.auth_challenge(st[p + 31] - 1);
+    }
+    let n = problem.response_challenge(pd[base..base + shared.pend_size()], status, rule, shared.meta_get(core, k, 4, 0), st[p + shared.retry_after()], challenge);
+    if n < 0 {
+        shared.drop_session(tab, core, k);
+        return 0;
+    }
+    st[p + 5] = n;
+    st[p + 27] = st[p + 27] + n;
+    st[p + 8] = 1;
+    st[p + 3] = 4;
+    st[p + 4] = 0;
+    st[p + 7] = now + shared.flush_ms();
+    settle(tab, core, k);
+    return 0;
+}
+
+// The upstream's response is complete: the client's connection ends once what is queued for it has been written, and the
+// upstream goes back to the pool if it may carry another request (its framing allows it, nothing is left unread, the request's
+// body was fully sent and the upstream did not hang up), else it is closed.
+pub fn finish_response[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int, now: int) -> [conn_write, poll] int {
+    let st = contents(core.state);
+    let pu = shared.stride() * u;
+    let client = st[pu + 2];
+    let pc = shared.stride() * client;
+    let reuse = st[pu + 19] == 1 && st[pu + 4] == 0 && st[pc + 10] == 1 && st[pu + 14] == 0;
+    st[pc + 2] = 0 - 1;
+    st[pc + 8] = 1;
+    shared.flag_set(core, client, 2);
+    if st[pc + 10] == 0 {
+        // The upstream answered before the request body was all sent: the client may still be sending, so it lingers.
+        st[pc + 3] = 4;
+    }
+    if reuse {
+        pool_return(tab, core, u, now);
+    } else {
+        close_slot(tab, core, u);
+    }
+    if flush(tab, core, client, now) == 0 {
+        settle(tab, core, client);
+    }
+    return 0;
+}

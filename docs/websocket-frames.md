@@ -211,8 +211,8 @@ Built 2026-10-12 on a branch of its own, against the pinned compiler (`2fcf4cd`)
 
 **What exists.**
 
-- *`src/wsframe.cho`* (pure, no effect): the parser `scan`, the close plan `begin_close`, the keepalive clock (`ping_due`, `pong_expired`), the gateway's own frames (`put_close`, `put_close_masked`, `put_ping`), the rule tags. The state is 56 ints per client slot in a new slab, `Core.wsf`, of `256 x 56` ints (112 KiB).
-- *The tunnel* (`src/proxy.cho`, 1,925 lines; `scripts/lines.py` passes): `tunnel_pump` (one direction, written once for both), `tunnel_run`, `tunnel_mark`, `tunnel_close`; the old `tunnel_down` / `tunnel_up` are thin callers. The sweep closes with a Close frame instead of dropping, Pings a silent client and watches the pong deadline.
+- *`src/wsframe.cho`* (pure, no effect; its OCPP wiring moved behind `src/wsvalidate.cho`, section 16): the parser `scan`, the close plan `begin_close`, the keepalive clock (`ping_due`, `pong_expired`), the gateway's own frames (`put_close`, `put_close_masked`, `put_ping`), the rule tags. The state is 56 ints per client slot in a new slab, `Core.wsf`, of `256 x 56` ints (112 KiB).
+- *The tunnel* (`src/proxy.cho`, 1,925 lines when this slice was built; **the tunnel now lives in `src/wstunnel.cho` (412 lines) and the slot lifecycle it needs in `src/slots.cho` (357), `proxy.cho` is 1,278**: the functions are unchanged, section 16): `tunnel_pump` (one direction, written once for both), `tunnel_run`, `tunnel_mark`, `tunnel_close`; the old `tunnel_down` / `tunnel_up` are thin callers. The sweep closes with a Close frame instead of dropping, Pings a silent client and watches the pong deadline.
 - *Keys* (`scripts/generate.py`, tag `config.websocket`): per route `ws_max_message_bytes`; deployment-wide `ws_ping_ms`, `ws_pong_ms`, `ws_close_ms`. The route table has one more column (22); `generated/deploy.cho` has `ws_ping_ms`, `ws_pong_ms`, `ws_close_ms`.
 - *Log and metrics:* `line_full` (`ws_close` last), `metrics.ws_messages`, `ws_pinged`, `ws_pong_timeout`, `ws_closed` (twelve more ints after the TLS block). `accesslog.max_line` went from 768 to 784 (the worst line with an identity and a close code was 769).
 - *Tests:* `tests/wsframe_test.cho` (21 cancho tests), `tests/wsframes_test.py` (25 end-to-end tests), `tests/wsframes_mutants.py`, `tests/wsframes_bench.py`; 36 generator cases (refusals and acceptances) for the new keys; 1 metrics test, 1 log-line test. `tests/websocket_test.py` changed where slice 1's behaviour was a byte tunnel (below).
@@ -275,3 +275,25 @@ Violations seen in the middle of a payload: only UTF-8 (the size is judged at he
 - **Close 1008 (policy violation) is never sent** (the metrics label exists for a peer's); per-message rate limiting, a binary versus text policy and OCPP validation are section 14.
 - **A violation by a peer during a close** is only counted as the end of that side (no second tag).
 - **The gateway Ping's 8-byte payload is its clock reading**: a peer's own Pong with the same value would be swallowed (section 6).
+
+## 16. The validator seam (a refactor of slice 3, behaviour unchanged)
+
+*Added 2026-10-13, after the question "should the general gateway know OCPP?". Decision: the gateway keeps OCPP-J validation and its key `ws_ocpp`, and confines it behind one interface. This section is the interface; `docs/ocpp.md` section 12 is what a second grammar would cost.*
+
+**What the general tunnel knows.** A route has a *validator kind* (0 none, 1 OCPP-J), chosen from the route table when the 101 is relayed (`wsbind.kind_of_route`, then `wsframe.enable_validator`). The tunnel code (`wstunnel`, `proxy`) and the frame parser (`wsframe.scan`) know nothing else of a grammar than four things a validator gives them: a **kind**, a **verdict** (0, or the number of the rule broken), the rule's **tag** (`wsframe.tag`, the access log and the per-tag counters) and the **Close code** the offender is sent (`wsframe.own_code`). A verdict is a violation like any other of this document: the bytes of the message are not forwarded from the offending one on, the tunnel is closed by section 7's plan.
+
+**The interface (`src/wsvalidate.cho`, pure, no effect, no allocation).** It is a *stream* interface, not "one call per complete message", because a message is never held: the buffers are fixed (and smaller than the message limit), so the parser cannot hand a validator a whole message without growing the heap or the regions. Per direction it owns eight ints at `dir_base(dir) + 20` of the tunnel's block (7 of state and the kind); the block is still 72 ints.
+
+| call | when | answers |
+|---|---|---|
+| `begin(ws, o, kind)` | the first frame of a text message | ready for a new message |
+| `step(ws, o, kind, c)` | each unmasked byte of a text message, after the UTF-8 automaton accepted it | 0, or the rule the byte breaks |
+| `finish(ws, o, kind)` | the FIN frame's last byte | 0, or the rule a message that ends here breaks |
+| `binary(kind)` | the header of a binary message (never read) | 0, or the rule that refuses it |
+| `tag(rule)`, `close_code(rule)`, `kind_of_rule(rule)` | when a rule is reported, logged and counted | the tag, the Close code, which kind owns the rule |
+
+Kind 0 steps nothing and refuses nothing: the route is as it was before the key existed, and a route without a validator pays one comparison per payload chunk, not per byte. The metrics counter is behind the seam too: `wsbind.count(stats, rule)` increments the validator's counter if the rule is a validator's (`ws_ocpp_violations_total` for OCPP-J; a frame violation or a timer is not counted there). `wsbind.kind_of_route` is the only place that reads the route table's validator column.
+
+**What lives where.** `wsframe.cho`: the frame layer (sections 3 to 7), calling the interface at the five places above. `wsvalidate.cho`: the kinds, the rule range of each (OCPP-J: 17 to 25), the tags, the Close codes, the dispatch. `ocppframe.cho`: the grammar. `wsbind.cho`: route column and counter. `wstunnel.cho`: the tunnel loop; it names no grammar. `wsframe.is_ocpp` and `wsframe.enable_ocpp` remain as one-line forwards because the existing unit tests call them.
+
+**Measured.** The seam adds one call level to the per-byte path (`wsframe.scan` calls `wsvalidate.step`, which calls `ocppframe.step`). `tests/ocpp_bench.py` before and after, on the same machine: see `docs/ocpp.md` section 12 (within the run-to-run spread of the plain route, about 10 %).
