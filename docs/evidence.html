@@ -422,6 +422,54 @@ nav a[aria-current] { color: var(--fg); font-weight: 650; }
 <!-- bench:end -->
 </section>
 
+<section id="tls">
+  <h2>What TLS costs</h2>
+  <p class="sub">Gate 9 of <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/docs/tls.md">docs/tls.md</a>, measured on 2026-10-12 by <code>bench/run.py</code> (protocol and caveats in <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/docs/bench.md">docs/bench.md</a> section 11, raw results in <code>bench/results/2026-10-12-tls.json</code>). The result is bad, and it is reported as it came out.</p>
+  <ul>
+    <li><strong>Over TLS the gateway serves about 157 requests a second from one core, against 26,991 plain: 1 in 170.</strong> It keeps no client connection open, so every request is a full handshake, 5.9 ms of the gateway&rsquo;s CPU (6.9 ms at 20 to 100 a second). The TLS port is never faster than 167 new connections a second, and the default <code>tls_rate</code> of 50 a second caps it lower.</li>
+    <li>The latency over TLS is queueing: 64 clients waiting their turn behind 6 ms handshakes (p50 192 ms). One client alone, to an idle gateway, sees a handshake in 7.5 ms (p99 13.5, Python&rsquo;s own client work included).</li>
+    <li>An established connection costs 3.6 times the plain CPU for the bytes (C8: 199 against 695 MiB/s on one connection, 5.0 against 1.4 s of CPU a GiB). That is what a client keep-alive would leave, and the gateway has none.</li>
+    <li>Same machine as the benchmark above (one shared 4-core VM, loopback, proxy on core 0), Xeon 2.8 GHz with AES-NI, OpenSSL 3.0.13 clients (wrk 4.1.0, curl 8.5.0, <code>openssl s_time</code>). Certificate: ECDSA P-256, self-signed, verified by nobody, no resumption. Negotiated: TLS 1.3, <code>TLS_AES_128_GCM_SHA256</code>, X25519, ECDSA with SHA-256; the gateway&rsquo;s other two suites were not measured. Three proxies in the same five interleaved rounds: the plain build, the TLS build&rsquo;s plain port and its TLS port; ratios are paired within a round, because the machine drifted.</li>
+    <li>wrk is marked <code>WRK-SPIN</code> over TLS (it polls a connection that is still handshaking, so its CPU is not a bound: 95% of a core for one connection at 126 requests/s); the gateway was at 98 to 100% and the upstream at most 1% in every TLS run. No run had a non-2xx response or a socket error.</li>
+    <li>Not measured: any other proxy over TLS (so this says nothing about how fast a TLS terminator <em>can</em> be), other suites, several cores, failure paths. Memory: 110 KiB for each established TLS connection, and 17 to 28 MiB more than the plain build after a 64-connection load, the top of it above the design&rsquo;s own estimate of 23 MiB (not investigated).</li>
+  </ul>
+<!-- tls:begin -->
+<h3 id="TC1">C1 over TLS: GET /, 64 connections</h3>
+<div class="fitwrap"><table class="fit num"><thead><tr><th>listener</th><th>requests/s, median (min&ndash;max)</th><th>p50 ms</th><th>p99 ms</th><th>proxy CPU</th><th>RSS MiB after the load</th></tr></thead><tbody>
+<tr class="us"><th>plain build, plain port</th><td class="n">26,991 (25,150&ndash;29,687)</td><td class="n">1.94</td><td class="n">5.94</td><td class="n">95%</td><td class="n">3.6</td></tr>
+<tr><th>TLS build, plain port</th><td class="n">23,412 (22,240&ndash;27,482)</td><td class="n">1.79</td><td class="n">7.65</td><td class="n">84%</td><td class="n">3.9</td></tr>
+<tr><th>TLS build, TLS port</th><td class="n">157 (150&ndash;160)</td><td class="n">192.20</td><td class="n">376.85</td><td class="n">99%</td><td class="n">20.7</td></tr>
+</tbody></table></div>
+<h3 id="TC3">C3 over TLS: 64 KiB response, 64 connections</h3>
+<div class="fitwrap"><table class="fit num"><thead><tr><th>listener</th><th>requests/s, median (min&ndash;max)</th><th>p50 ms</th><th>p99 ms</th><th>proxy CPU</th><th>RSS MiB after the load</th></tr></thead><tbody>
+<tr class="us"><th>plain build, plain port</th><td class="n">8,548 (8,049&ndash;9,688)</td><td class="n">7.11</td><td class="n">13.20</td><td class="n">98%</td><td class="n">5.4</td></tr>
+<tr><th>TLS build, plain port</th><td class="n">8,202 (7,827&ndash;8,225)</td><td class="n">7.28</td><td class="n">15.14</td><td class="n">97%</td><td class="n">5.7</td></tr>
+<tr><th>TLS build, TLS port</th><td class="n">149 (145&ndash;158)</td><td class="n">280.47</td><td class="n">447.22</td><td class="n">98%</td><td class="n">27.0</td></tr>
+</tbody></table></div>
+<h3 id="TC4">C4 over TLS: 16 KiB POST, 64 connections</h3>
+<div class="fitwrap"><table class="fit num"><thead><tr><th>listener</th><th>requests/s, median (min&ndash;max)</th><th>p50 ms</th><th>p99 ms</th><th>proxy CPU</th><th>RSS MiB after the load</th></tr></thead><tbody>
+<tr class="us"><th>plain build, plain port</th><td class="n">10,865 (10,353&ndash;11,085)</td><td class="n">5.53</td><td class="n">11.74</td><td class="n">96%</td><td class="n">7.8</td></tr>
+<tr><th>TLS build, plain port</th><td class="n">10,493 (9,844&ndash;11,296)</td><td class="n">5.87</td><td class="n">11.89</td><td class="n">98%</td><td class="n">8.4</td></tr>
+<tr><th>TLS build, TLS port</th><td class="n">159 (152&ndash;161)</td><td class="n">190.07</td><td class="n">376.89</td><td class="n">99%</td><td class="n">36.2</td></tr>
+</tbody></table></div>
+<h3 id="T7">C7: full handshakes only, as fast as the gateway takes them</h3>
+<div class="fitwrap"><table class="fit num"><thead><tr><th>listener</th><th>handshakes/s, median (min&ndash;max)</th><th>gateway CPU per handshake, ms</th><th>proxy CPU</th><th>one handshake to an idle gateway, p50 / p99 ms</th></tr></thead><tbody>
+<tr><th>TLS build, TLS port</th><td class="n">167 (164&ndash;172)</td><td class="n">5.9</td><td class="n">98%</td><td class="n">7.5 / 13.5</td></tr></tbody></table></div>
+<h3 id="T8">C8: one connection, one 64 MiB response</h3>
+<div class="fitwrap"><table class="fit num"><thead><tr><th>listener</th><th>MiB/s, median (min&ndash;max)</th><th>gateway CPU, s per GiB</th></tr></thead><tbody>
+<tr class="us"><th>plain build, plain port</th><td class="n">695 (668&ndash;739)</td><td class="n">1.41</td></tr>
+<tr><th>TLS build, plain port</th><td class="n">673 (628&ndash;761)</td><td class="n">1.47</td></tr>
+<tr><th>TLS build, TLS port</th><td class="n">199 (196&ndash;200)</td><td class="n">5.01</td></tr>
+</tbody></table></div>
+<h3 id="T6">C6 over TLS: resident memory, before and with 100 idle connections</h3>
+<div class="fitwrap"><table class="fit num"><thead><tr><th>listener</th><th>MiB before</th><th>MiB with 100 idle connections</th></tr></thead><tbody>
+<tr class="us"><th>plain build, plain port</th><td class="n">2.6</td><td class="n">2.6</td></tr>
+<tr><th>TLS build, plain port</th><td class="n">2.9</td><td class="n">2.9</td></tr>
+<tr><th>TLS build, TLS port</th><td class="n">3.1</td><td class="n">13.9</td></tr>
+</tbody></table></div>
+<!-- tls:end -->
+</section>
+
 <section id="found">
   <h2>What the tests found</h2>
   <p class="sub">In the order they were found. Each was fixed with a test that fails without the fix.</p>

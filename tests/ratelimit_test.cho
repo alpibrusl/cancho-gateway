@@ -433,3 +433,200 @@ fn test_the_generators_copy_of_the_hash_chooses_the_same_sets() -> [] int {
     test.assert_eq(ratelimit.hash2("alice"), 1665511214);
     return 0;
 }
+
+// ---- the route-wide ceiling (docs/ratelimit.md section 13.1) ----
+//
+// A table of 5 buckets: the key's four (one set) at 0 and the ceiling's one at bucket 4. `admit_route` answers what `admit` does, and, if the key's bucket gave a token and the route has a
+// ceiling that holds none, `route_offset()` plus the seconds to wait.
+
+// One request of `key` against a key limit of 1 a second with room for `burst`, and a ceiling of 1 a second with room for `cburst`.
+fn through[&t, &k](t: &!t [int], key: &k [byte], burst: int, cburst: int, now: int) -> [] int {
+    return ratelimit.admit_route(t, 0, 4, key, 1, 1000, burst, 4, 1, 1000, cburst, now);
+}
+
+fn test_the_ceiling_is_one_bucket_for_every_key_with_its_own_burst_and_refill() -> [] int {
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(5), 0);
+        let off = ratelimit.route_offset();
+        // Ceiling of 2 tokens: three different keys, each with plenty of its own, get two between them.
+        test.assert_eq(through(t, "a", 5, 2, 0), 0);
+        test.assert_eq(through(t, "b", 5, 2, 0), 0);
+        test.assert_eq(through(t, "c", 5, 2, 0), off + 1);
+        test.assert_eq(through(t, "d", 5, 2, 0), off + 1);
+        test.assert_eq(through(t, "c", 5, 2, 999), off + 1);
+        // The wait it named was enough, to the millisecond: one token of the ceiling at a second, whichever key asks.
+        test.assert_eq(through(t, "e", 5, 2, 1000), 0);
+        test.assert_eq(through(t, "f", 5, 2, 1000), off + 1);
+        // Long idle: back to the ceiling's burst, no more.
+        test.assert_eq(through(t, "g", 5, 2, 100000), 0);
+        test.assert_eq(through(t, "h", 5, 2, 100000), 0);
+        test.assert_eq(through(t, "i", 5, 2, 100000), off + 1);
+    }
+    return 0;
+}
+
+fn test_a_ceiling_in_minutes_names_its_wait_in_seconds() -> [] int {
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(5), 0);
+        // 10 a minute for the route (a token is 6 s), room for 1.
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "a", 100, 1000, 100, 4, 10, 60000, 1, 0), 0);
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "b", 100, 1000, 100, 4, 10, 60000, 1, 0), ratelimit.route_offset() + 6);
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "b", 100, 1000, 100, 4, 10, 60000, 1, 5999), ratelimit.route_offset() + 1);
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "b", 100, 1000, 100, 4, 10, 60000, 1, 6000), 0);
+    }
+    return 0;
+}
+
+fn test_a_request_its_own_key_refuses_takes_nothing_from_the_ceiling() -> [] int {
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(5), 0);
+        let off = ratelimit.route_offset();
+        // Key "a" has one token, the ceiling three. "a" asks twelve times: one is admitted, eleven are its own refusal.
+        test.assert_eq(through(t, "a", 1, 3, 0), 0);
+        var i = 0;
+        while i < 11 {
+            test.assert_eq(through(t, "a", 1, 3, 0), 1);
+            i = i + 1;
+        }
+        // Two tokens of the ceiling are left, not three less eleven: two other keys get them, the third does not.
+        test.assert_eq(through(t, "b", 1, 3, 0), 0);
+        test.assert_eq(through(t, "c", 1, 3, 0), 0);
+        test.assert_eq(through(t, "d", 1, 3, 0), off + 1);
+    }
+    return 0;
+}
+
+fn test_a_request_the_ceiling_refuses_has_spent_its_keys_token() -> [] int {
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(5), 0);
+        let off = ratelimit.route_offset();
+        // The key allows 1 an hour with room for 1; the ceiling holds 1 and gains one a second.
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "a", 1, 3600000, 1, 4, 1, 1000, 1, 0), 0);
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "b", 1, 3600000, 1, 4, 1, 1000, 1, 0), off + 1);
+        // A second later the ceiling has a token, but "b" spent its own and is limited by it: the ceiling's refusal was not free.
+        let again = ratelimit.admit_route(t, 0, 4, "b", 1, 3600000, 1, 4, 1, 1000, 1, 1000);
+        test.assert(again > 0 && again <= 3600);
+        // And the ceiling's token was not taken by that refusal: a new key gets it.
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "c", 1, 3600000, 1, 4, 1, 1000, 1, 1000), 0);
+    }
+    return 0;
+}
+
+fn test_a_full_key_table_refuses_without_touching_the_ceiling() -> [] int {
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(5), 0);
+        // Four keys fill the set of four (1 a second, room for 2, so each is still recovering); the ceiling has room for 6 and has given 4.
+        test.assert_eq(through(t, "k1", 2, 6, 0), 0);
+        test.assert_eq(through(t, "k2", 2, 6, 0), 0);
+        test.assert_eq(through(t, "k3", 2, 6, 0), 0);
+        test.assert_eq(through(t, "k4", 2, 6, 0), 0);
+        // A fifth key has no bucket: the table's refusal (negative), and nothing taken from the ceiling.
+        test.assert_eq(through(t, "k5", 2, 6, 0), 0 - 1);
+        test.assert_eq(through(t, "k6", 2, 6, 0), 0 - 1);
+        // Six tokens of ceiling, four given: two are left for the old keys' second requests, then it is out.
+        test.assert_eq(through(t, "k1", 2, 6, 0), 0);
+        test.assert_eq(through(t, "k2", 2, 6, 0), 0);
+        test.assert_eq(through(t, "k3", 2, 6, 0), ratelimit.route_offset() + 1);
+    }
+    return 0;
+}
+
+fn test_a_route_without_a_ceiling_is_the_plain_verdict() -> [] int {
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(5), 0);
+        // A ceiling rate of 0 is no ceiling: whatever bucket the position names is not read.
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "a", 1, 1000, 2, 0 - 1, 0, 0, 0, 0), 0);
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "a", 1, 1000, 2, 0 - 1, 0, 0, 0, 0), 0);
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "a", 1, 1000, 2, 0 - 1, 0, 0, 0, 0), 1);
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "a", 1, 1000, 2, 100, 0, 0, 0, 0), 1);
+    }
+    return 0;
+}
+
+fn test_a_ceiling_outside_the_table_is_refused_not_read() -> [] int {
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(5), 0);
+        let off = ratelimit.route_offset();
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "a", 1, 1000, 2, 5, 1, 1000, 1, 0), off + 1);
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "b", 1, 1000, 2, 0 - 1, 1, 1000, 1, 0), off + 1);
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "c", 1, 1000, 2, 9223372036854775807, 1, 1000, 1, 0), off + 1);
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "d", 1, 1000, 2, 0 - 9223372036854775807, 1, 1000, 1, 0), off + 1);
+        // The key's own table is still checked first: a table that does not fit is its refusal, before the ceiling is asked.
+        test.assert_eq(ratelimit.admit_route(t, 2, 4, "e", 1, 1000, 2, 4, 1, 1000, 1, 0), 0 - 1);
+    }
+    return 0;
+}
+
+fn test_the_three_verdicts_cannot_be_mistaken_for_each_other() -> [] int {
+    // The key's wait is at most an hour (positive), the full table's at most a day (negative); the ceiling's is `route_offset()` plus at most an hour.
+    test.assert(ratelimit.route_offset() > ratelimit.max_retry());
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(5), 0);
+        // The ceiling's longest wait: 1 an hour, empty.
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "a", 1000, 1000, 1000, 4, 1, 3600000, 1, 0), 0);
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "b", 1000, 1000, 1000, 4, 1, 3600000, 1, 0), ratelimit.route_offset() + 3600);
+    }
+    region b {
+        // The key's own longest: 1 an hour, empty.
+        let u = alloc_slice[b](ratelimit.table_len(5), 0);
+        test.assert_eq(ratelimit.admit_route(u, 0, 4, "c", 1, 3600000, 1, 4, 1, 3600000, 5, 0), 0);
+        test.assert_eq(ratelimit.admit_route(u, 0, 4, "c", 1, 3600000, 1, 4, 1, 3600000, 5, 0), 3600);
+    }
+    return 0;
+}
+
+fn test_the_largest_ceiling_and_burst_at_the_longest_period_overflow_nothing() -> [] int {
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(5), 0);
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "a", 1000000, 3600000, 1000000, 4, 1000000, 3600000, 1000000, 0), 0);
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "a", 1000000, 3600000, 1000000, 4, 1000000, 3600000, 1000000, 9223372036854775807), 0);
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "b", 1000000, 3600000, 1000000, 4, 1000000, 3600000, 1000000, 9223372036854775807), 0);
+        test.assert_eq(ratelimit.admit_route(t, 0, 4, "c", 1000000, 3600000, 1000000, 4, 1000000, 3600000, 1000000, 0 - 9223372036854775807), 0);
+    }
+    return 0;
+}
+
+fn test_a_clock_that_goes_back_neither_gives_the_ceiling_tokens_nor_strands_it() -> [] int {
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(5), 0);
+        let off = ratelimit.route_offset();
+        test.assert_eq(through(t, "a", 5, 1, 1000), 0);
+        test.assert_eq(through(t, "b", 5, 1, 500), off + 1);
+        test.assert_eq(through(t, "c", 5, 1, 1499), off + 1);
+        // Re-anchored at 500: a second after that is a token.
+        test.assert_eq(through(t, "d", 5, 1, 1500), 0);
+    }
+    return 0;
+}
+
+fn test_many_distinct_keys_cannot_pass_more_than_the_ceilings_burst() -> [] int {
+    region a {
+        let t = alloc_slice[a](ratelimit.table_len(1025), 0);
+        // 1,024 buckets of keys, a ceiling of 5 with no refill to speak of (1 an hour): 300 distinct keys, each with room for 10, are admitted 5 times in all.
+        var admitted = 0;
+        var refused_by_ceiling = 0;
+        var refused_by_table = 0;
+        var i = 0;
+        while i < 300 {
+            region k {
+                let name = alloc_slice[k](24, byte_of(0));
+                let n = numbered(name, i);
+                let v = ratelimit.admit_route(t, 0, 1024, name[0..n], 1, 1000, 10, 1024, 1, 3600000, 5, 0);
+                if v == 0 {
+                    admitted = admitted + 1;
+                }
+                if v > ratelimit.route_offset() {
+                    refused_by_ceiling = refused_by_ceiling + 1;
+                }
+                if v < 0 {
+                    refused_by_table = refused_by_table + 1;
+                }
+            }
+            i = i + 1;
+        }
+        test.assert_eq(admitted, 5);
+        test.assert_eq(admitted + refused_by_ceiling + refused_by_table, 300);
+        test.assert(refused_by_ceiling > 250);
+    }
+    return 0;
+}

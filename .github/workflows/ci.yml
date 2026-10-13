@@ -50,6 +50,7 @@ jobs:
           python3 scripts/generate.py tests/fixtures/long/deploy.toml --out tests/fixtures/long --check
           for f in deploy/demo.toml deploy/examples/*.toml; do python3 scripts/generate.py "$f" --out "$RUNNER_TEMP" > /dev/null; done
           python3 tests/generate_test.py
+          python3 tests/ipkey_vectors.py --check   # the IPv6 key's vectors are what the script writes (docs/ratelimit.md section 13.2)
 
       - name: Build
         working-directory: gateway

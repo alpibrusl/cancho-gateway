@@ -96,7 +96,7 @@ m("w13", F, "    ws[dir_base(0) + 27] = 1;\n", "", "unit", "the client's message
 m("p01", P, "    if route.ws_ocpp(st[pc + 31] - 1) > 0 {", "    if false {", ["every_refusal_by_the_client_is_closed_with_its_code_and_stays_off_the_upstream"], "no tunnel is validated")
 m("p02", P, "    if route.ws_ocpp(st[pc + 31] - 1) > 0 {", "    if true {", ["a_route_without_ws_ocpp_forwards_what_slice_two_did"], "every tunnel is validated")
 m("p03", P, "    if wsframe.is_ocpp(cause) {\n        metrics.ws_ocpp_violation(contents(core.stats));\n    }\n", "", ["the_counters_and_the_refusal_tags"], "violations are not counted")
-m("p04", "src/route.cho", "return number(bytes.field(blob[at..line_end(blob, at)], 9, 27));", "return number(bytes.field(blob[at..line_end(blob, at)], 9, 26));", ["a_route_without_ws_ocpp_forwards_what_slice_two_did"], "the version mask is read from the wrong column")
+m("p04", "src/route.cho", "return number(bytes.field(blob[at..line_end(blob, at)], 9, 32));", "return number(bytes.field(blob[at..line_end(blob, at)], 9, 31));", ["a_route_without_ws_ocpp_forwards_what_slice_two_did"], "the version mask is read from the wrong column")
 # ---- the metrics
 m("t01", MET, "    stats[ws_base() + 12] = stats[ws_base() + 12] + 1;", "    stats[ws_base() + 12] = stats[ws_base() + 12] + 2;", "unit", "a violation is counted twice")
 m("t02", MET, 'k = jnum(out, k, "ocpp_violations", stats[ws_base() + 12]);', 'k = jnum(out, k, "ocpp_violation", stats[ws_base() + 12]);', "unit", "the JSON key is misspelt")

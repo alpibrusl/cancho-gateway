@@ -346,11 +346,43 @@ pub fn ws_max_message(index: int) -> [] int {
     return number(bytes.field(blob[at..line_end(blob, at)], 9, 26));
 }
 
+// The route-wide ceiling of route `index` (docs/ratelimit.md section 13.1): tokens added per period (0: no ceiling), the period in milliseconds, the bucket's size in tokens, and which bucket of the
+// one table it is; and the IPv6 prefix of an `xff:*` key (docs/ratelimit.md section 13.2; 0: the key is not an address). The generator has bounded all of them.
+pub fn rate_ceiling(index: int) -> [] int {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return number(bytes.field(blob[at..line_end(blob, at)], 9, 27));
+}
+
+pub fn rate_ceiling_per_ms(index: int) -> [] int {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return number(bytes.field(blob[at..line_end(blob, at)], 9, 28));
+}
+
+pub fn rate_ceiling_burst(index: int) -> [] int {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return number(bytes.field(blob[at..line_end(blob, at)], 9, 29));
+}
+
+pub fn rate_ceiling_at(index: int) -> [] int {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return number(bytes.field(blob[at..line_end(blob, at)], 9, 30));
+}
+
+pub fn rate_xff_prefix(index: int) -> [] int {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return number(bytes.field(blob[at..line_end(blob, at)], 9, 31));
+}
+
 // The OCPP-J versions whose frames route `index` validates (docs/ocpp.md): 0 none, 1 for 1.6, 2 for 2.0.1, 3 for both.
 pub fn ws_ocpp(index: int) -> [] int {
     let blob = routes_table.blob();
     let at = line_start(blob, index);
-    return number(bytes.field(blob[at..line_end(blob, at)], 9, 27));
+    return number(bytes.field(blob[at..line_end(blob, at)], 9, 32));
 }
 
 // JWT acceptance of route `index` (docs/jwt.md section 8; `auth` above is 1 for API keys, 2 for JWTs, 3 for both): the public-key indices it allows (`*` for all, else comma-separated),

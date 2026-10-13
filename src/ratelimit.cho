@@ -206,6 +206,37 @@ pub fn admit[&t, &k](table: &!t [int], base: int, buckets: int, key: &k [byte], 
     return 0 - secs;
 }
 
+// ---- the route-wide ceiling (docs/ratelimit.md section 13.1) ----
+
+// A refusal by the route's ceiling is answered as this plus the seconds to wait (at most an hour, so at most `route_offset() + 3600`): above everything the key's own verdicts can be
+// (a wait of at most an hour, or a full table's negative number), so the three cannot be mistaken for each other.
+pub fn route_offset() -> [] int {
+    return 1000000;
+}
+
+// `admit`, then, for a route with a ceiling (`c_rate` at least 1: its one bucket is bucket `ceil_at` of `table`, limited to `c_rate` tokens per `c_per_ms` with room for `c_burst`), one token of the
+// ceiling for a request the key's bucket admitted. Answers what `admit` does, or `route_offset()` plus the seconds to wait if the ceiling holds less than one token. A request that the key's bucket
+// refused (or its table) asks the ceiling for nothing: one key refused again and again cannot drain the route's total. A request the ceiling refused has already spent its key's token: fails
+// towards limiting, and the table's search does not return the bucket's place, so there is nothing to give back. A ceiling outside the table is refused like a spent one.
+pub fn admit_route[&t, &k](table: &!t [int], base: int, buckets: int, key: &k [byte], rate: int, per_ms: int, burst: int, ceil_at: int, c_rate: int, c_per_ms: int, c_burst: int, now: int) -> [] int {
+    let verdict = admit(table, base, buckets, key, rate, per_ms, burst, now);
+    if verdict != 0 || c_rate < 1 {
+        return verdict;
+    }
+    // (A negative place is `admit`'s own refusal below. This guard is for a place so large that `admit` would overflow adding the one bucket to it.)
+    if ceil_at >= len(table) / bucket_ints() {
+        return route_offset() + 1;
+    }
+    let wait = admit(table, ceil_at, 1, "", c_rate, c_per_ms, c_burst, now);
+    if wait == 0 {
+        return 0;
+    }
+    if wait < 0 {
+        return route_offset() + 1;
+    }
+    return route_offset() + wait;
+}
+
 // ---- the key of a request ----
 
 fn is_lower[&a, &l](a: &a [byte], lower: &l [byte]) -> [] bool {

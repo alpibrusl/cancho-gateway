@@ -253,6 +253,80 @@ REFUSALS = [
     ("config.routes", None, UP + "".join('[[route]]\nupstream = "a"\npath_prefix = "/r%d"\n' % i for i in range(257))),
 ]
 
+# --- rate limiting, slice 2 (docs/ratelimit.md section 13, rules 9 to 14, and rule 8 with the ceiling's bucket): (key the answer names, line, deployment text). The route's keys begin at line 8.
+RK = UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "header:X-Key"\n'
+RX = UP + R + 'path_prefix = "/"\ntrust_forwarded = true\nrate_limit = "5/s"\nrate_key = "xff:last"\n'
+RATE2 = [
+    # 9: rate_route_limit is not N/s, N/m or N/h with N in 1..1,000,000
+    ("rate_route_limit", 10, RK + 'rate_route_limit = 100\n'),
+    ("rate_route_limit", 10, RK + 'rate_route_limit = "100"\n'),
+    ("rate_route_limit", 10, RK + 'rate_route_limit = "100/d"\n'),
+    ("rate_route_limit", 10, RK + 'rate_route_limit = "0/s"\n'),
+    ("rate_route_limit", 10, RK + 'rate_route_limit = "007/s"\n'),
+    ("rate_route_limit", 10, RK + 'rate_route_limit = "1000001/s"\n'),
+    ("rate_route_limit", 10, RK + 'rate_route_limit = " 5/s"\n'),
+    ("rate_route_limit", 10, RK + 'rate_route_limit = "-5/s"\n'),
+    ("rate_route_limit", 10, RK + 'rate_route_limit = true\n'),
+    ("rate_route_limit", 10, RK + 'rate_route_limit = ""\n'),
+    # 10: rate_route_burst is not an integer in 1..1,000,000
+    ("rate_route_burst", 11, RK + 'rate_route_limit = "50/s"\nrate_route_burst = 0\n'),
+    ("rate_route_burst", 11, RK + 'rate_route_limit = "50/s"\nrate_route_burst = 1000001\n'),
+    ("rate_route_burst", 11, RK + 'rate_route_limit = "50/s"\nrate_route_burst = -1\n'),
+    ("rate_route_burst", 11, RK + 'rate_route_limit = "50/s"\nrate_route_burst = "5"\n'),
+    ("rate_route_burst", 11, RK + 'rate_route_limit = "50/s"\nrate_route_burst = true\n'),
+    ("rate_route_burst", 11, RK + 'rate_route_limit = "50/s"\nrate_route_burst = 5.0\n'),
+    # 11: rate_route_burst without rate_route_limit, or either without rate_limit
+    ("rate_route_burst", 10, RK + 'rate_route_burst = 5\n'),
+    ("rate_route_limit", 8, UP + R + 'path_prefix = "/"\nrate_route_limit = "5/s"\n'),
+    ("rate_route_burst", 8, UP + R + 'path_prefix = "/"\nrate_route_burst = 5\n'),
+    ("rate_route_limit", 8, UP + R + 'path_prefix = "/"\nrate_route_limit = "5/s"\nrate_route_burst = 5\n'),
+    # 12: rate_route_limit with a route key (the default, or written): the one bucket already is the ceiling
+    ("rate_route_limit", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_route_limit = "50/s"\n'),
+    ("rate_route_limit", 10, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "route"\nrate_route_limit = "50/s"\n'),
+    ("rate_route_limit", 10, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_burst = 9\nrate_route_limit = "50/s"\n'),
+    # 13: rate_xff_prefix is not an integer in 1..128
+    ("rate_xff_prefix", 11, RX + 'rate_xff_prefix = 0\n'),
+    ("rate_xff_prefix", 11, RX + 'rate_xff_prefix = 129\n'),
+    ("rate_xff_prefix", 11, RX + 'rate_xff_prefix = -1\n'),
+    ("rate_xff_prefix", 11, RX + 'rate_xff_prefix = "64"\n'),
+    ("rate_xff_prefix", 11, RX + 'rate_xff_prefix = true\n'),
+    ("rate_xff_prefix", 11, RX + 'rate_xff_prefix = 64.0\n'),
+    ("rate_xff_prefix", 11, RX + 'rate_xff_prefix = 4294967296\n'),
+    # 14: rate_xff_prefix without an xff key
+    ("rate_xff_prefix", 10, RK + 'rate_xff_prefix = 64\n'),
+    ("rate_xff_prefix", 9, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_xff_prefix = 64\n'),
+    ("rate_xff_prefix", 10, UP + R + 'path_prefix = "/"\nrate_limit = "5/s"\nrate_key = "route"\nrate_xff_prefix = 64\n'),
+    ("rate_xff_prefix", 8, UP + R + 'path_prefix = "/"\nrate_xff_prefix = 64\n'),
+    ("rate_xff_prefix", 11, UP + R + 'path_prefix = "/"\ntrust_forwarded = true\nrate_limit = "5/s"\nrate_key = "header:X-Real-IP"\nrate_xff_prefix = 64\n'),
+    # 8, with the ceiling's bucket: 65,532 and one is 65,533, and a second route of 4 and its ceiling is 5 more
+    ("rate_route_limit", 18, UP + R + 'path_prefix = "/a"\nrate_limit = "5/s"\nrate_key = "header:X-Key"\nrate_buckets = 65532\nrate_route_limit = "50/s"\n' +
+     R + 'path_prefix = "/b"\nrate_limit = "5/s"\nrate_key = "header:X-Key"\nrate_buckets = 4\nrate_route_limit = "50/s"\n'),
+    ("rate_route_limit", 11, UP + R + 'path_prefix = "/a"\nrate_limit = "5/s"\nrate_key = "header:X-Key"\nrate_buckets = 65536\nrate_route_limit = "50/s"\n'),
+    # 65,528 and a ceiling is 65,529 and seven route keys make exactly 65,536 (accepted, in RATE2_ACCEPTED); an eighth makes 65,537, and is the route named
+    ("rate_limit", 43, UP + R + 'path_prefix = "/a"\nrate_limit = "5/s"\nrate_key = "header:X-Key"\nrate_buckets = 65528\nrate_route_limit = "50/s"\n' +
+     "".join(R + 'path_prefix = "/r%d"\nrate_limit = "5/s"\n' % i for i in range(8))),
+]
+RATE2_ACCEPTED = [
+    # the ceiling beside every key form, with and without its burst
+    RK + 'rate_route_limit = "50/s"\n',
+    RK + 'rate_route_limit = "1/h"\nrate_route_burst = 1\n',
+    RK + 'rate_route_limit = "1000000/h"\nrate_route_burst = 1000000\n',
+    RK + 'rate_route_limit = "50/m"\nrate_route_burst = 3\nrate_buckets = 4\n',
+    RX + 'rate_route_limit = "50/s"\n',
+    UP + R + 'path_prefix = "/"\ntrust_forwarded = true\nrate_limit = "5/s"\nrate_key = "xff:first"\nrate_route_limit = "50/s"\nrate_route_burst = 9\nrate_xff_prefix = 48\n',
+    # every bound of the prefix
+    RX + 'rate_xff_prefix = 1\n',
+    RX + 'rate_xff_prefix = 64\n',
+    RX + 'rate_xff_prefix = 128\n',
+    UP + R + 'path_prefix = "/"\ntrust_forwarded = true\nrate_limit = "5/s"\nrate_key = "xff:first"\nrate_xff_prefix = 56\n',
+    # exactly 65,536 buckets in all: 65,528 and the ceiling's, and seven route keys
+    UP + R + 'path_prefix = "/a"\nrate_limit = "5/s"\nrate_key = "header:X-Key"\nrate_buckets = 65528\nrate_route_limit = "50/s"\n' +
+    "".join(R + 'path_prefix = "/r%d"\nrate_limit = "5/s"\n' % i for i in range(7)),
+    UP + R + 'path_prefix = "/a"\nrate_limit = "5/s"\nrate_key = "header:X-Key"\nrate_buckets = 65532\nrate_route_limit = "50/s"\n' +
+    "".join(R + 'path_prefix = "/r%d"\nrate_limit = "5/s"\n' % i for i in range(3)),
+]
+REFUSALS += [("config.ratelimit", line, text) for _, line, text in RATE2]
+
 # Accepted: a host-specific route beside a host-less one on the same prefix, and the same prefix with disjoint methods.
 ACCEPTED = [
     UP + R + 'path_prefix = "/"\nhost = "a.example"\n' + R + 'path_prefix = "/"\n',
@@ -296,6 +370,8 @@ ACCEPTED = [
     'tls_listen = 443\nadmin_listen = 9090\ntls_dir = "/etc/cancho/tls"\ntls_identities = ["api"]\n[[upstream]]\nname = "a"\naddr = "10.0.0.1:1"\n[[route]]\nupstream = "a"\npath_prefix = "/"\n',
     'listen = 80\nadmin_listen = 9090\ntls_listen = 443\ntls_dir = "/srv/tls-1.2_x"\ntls_identities = ["a.example", "b-2"]\ntls_handshakes = 1000\ntls_rate = 100000\ntls_handshake_ms = 100\n[[upstream]]\nname = "a"\naddr = "10.0.0.1:1"\n[[route]]\nupstream = "a"\npath_prefix = "/"\n',
 ]
+
+ACCEPTED += RATE2_ACCEPTED
 
 
 # --- authentication (docs/auth.md section 6): one refusal per rule, plus the variants of each
@@ -554,10 +630,10 @@ def jwt_compiled(run, failures):
         table = (pathlib.Path(tmp) / "routes.cho").read_text()
         explained = run(text).stdout
     wants = ["pub fn jwt_key_count() -> [] int {\n    return 2;", 'return "ka\\t%s\\nkb\\t%s\\n";' % (PKA, PKB),
-             '\\t2\\tauthorization\\t0\\t\\tBearer realm=\\"cancho-gateway\\"\\t1\\tapi\\thttps://i.example\\t7\\t1048576\\t0\\n',
-             '\\t3\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t*\\t\\t\\t0\\t1048576\\t0\\n',
-             '\\t1\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t\\t\\t\\t0\\t1048576\\t0\\n',
-             '\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\n']
+             '\\t2\\tauthorization\\t0\\t\\tBearer realm=\\"cancho-gateway\\"\\t1\\tapi\\thttps://i.example\\t7\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n',
+             '\\t3\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t*\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n',
+             '\\t1\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n',
+             '\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n']
     for want in wants:
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
@@ -655,7 +731,7 @@ def frames_compiled(run, failures):
         table = (pathlib.Path(tmp) / "routes.cho").read_text()
         deploy = (pathlib.Path(tmp) / "deploy.cho").read_text()
         explained = run(text).stdout
-    for want in ("\\t65536\\t0\\n", "\\t1048576\\t0\\n"):
+    for want in ("\\t65536\\t0\\t0\\t0\\t0\\t0\\t0\\n", "\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n"):
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
             failures += 1
@@ -699,7 +775,7 @@ def ocpp_compiled(run, failures):
         subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(f), "--out", tmp], check=True)
         table = (pathlib.Path(tmp) / "routes.cho").read_text()
         explained = run(text).stdout
-    for want in ("\\t1111\\t1\\n", "\\t2222\\t2\\n", "\\t3333\\t3\\n", "\\t4444\\t0\\n"):
+    for want in ("\\t1111\\t0\\t0\\t0\\t0\\t0\\t1\\n", "\\t2222\\t0\\t0\\t0\\t0\\t0\\t2\\n", "\\t3333\\t0\\t0\\t0\\t0\\t0\\t3\\n", "\\t4444\\t0\\t0\\t0\\t0\\t0\\t0\\n"):
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
             failures += 1
@@ -725,9 +801,9 @@ def auth_compiled(run, failures):
         explained = run(text).stdout
     keys = '"alice\\t%s\\nbob\\t%s\\n"' % (D1, D2)
     wants = ["pub fn key_count() -> [] int {\n    return 2;", "return " + keys + ";",
-             '\\t1\\tx-api-key\\t0\\t1\\tApiKey realm=\\"cancho-gateway\\", header=\\"x-api-key\\"\\t\\t\\t\\t0\\t1048576\\t0\\n',
-             '\\ta\\t8\\t0\\t1\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t\\t\\t\\t0\\t1048576\\t0\\n',
-             '\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\n']
+             '\\t1\\tx-api-key\\t0\\t1\\tApiKey realm=\\"cancho-gateway\\", header=\\"x-api-key\\"\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n',
+             '\\ta\\t8\\t0\\t1\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n',
+             '\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n']
     for want in wants:
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
@@ -810,6 +886,15 @@ def main():
         if out.returncode != 2 or answer.get("rule") != rule or (line is not None and answer.get("line") != line):
             print("FAIL refusal %s at line %s: exit %d, %r" % (rule, line, out.returncode, out.stderr.strip()[:140]))
             failures += 1
+    for key, line, text in RATE2:
+        out = run(text)
+        try:
+            answer = json.loads(out.stderr)
+        except ValueError:
+            answer = {}
+        if out.returncode != 2 or answer.get("rule") != "config.ratelimit" or answer.get("key") != key or answer.get("line") != line:
+            print("FAIL rate refusal naming %s at line %s: exit %d, %r" % (key, line, out.returncode, out.stderr.strip()[:200]))
+            failures += 1
     for text in ACCEPTED:
         out = run(text)
         if out.returncode != 0:
@@ -840,18 +925,24 @@ def main():
         failures += 1
     # What a rate limit compiles (docs/ratelimit.md section 4): the record's six fields, the lowercased header name, the bases of the tables, the total.
     limited = (UP + R + 'path_prefix = "/a"\nrate_limit = "10/m"\nrate_burst = 3\nrate_key = "header:X-API-Key"\nrate_buckets = 64\n' + R + 'path_prefix = "/b"\n' + R +
-               'path_prefix = "/c"\ntrust_forwarded = true\nrate_limit = "7/s"\nrate_key = "xff:last"\n' + R + 'path_prefix = "/d"\nrate_limit = "2/h"\n')
+               'path_prefix = "/c"\ntrust_forwarded = true\nrate_limit = "7/s"\nrate_key = "xff:last"\n' + R + 'path_prefix = "/d"\nrate_limit = "2/h"\n' + R +
+               'path_prefix = "/e"\ntrust_forwarded = true\nrate_limit = "3/s"\nrate_key = "xff:first"\nrate_buckets = 8\nrate_route_limit = "30/m"\nrate_route_burst = 7\nrate_xff_prefix = 56\n')
     with tempfile.TemporaryDirectory() as tmp:
         f = pathlib.Path(tmp) / "d.toml"
         f.write_text(limited)
         subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(f), "--out", tmp], check=True)
         table = (pathlib.Path(tmp) / "routes.cho").read_text()
         explained = run(limited).stdout
-    for want in ("\\t10\\t60000\\t3\\th:x-api-key\\t64\\t0\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\n", "\\t0\\t0\\t0\\t\\t0\\t64\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\n", "\\t7\\t1000\\t7\\tx:l\\t1024\\t64\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\n", "\\t2\\t3600000\\t2\\tr\\t1\\t1088\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\n",
-                 "pub fn rate_buckets_total() -> [] int {\n    return 1089;"):
+    for want in ("\\t10\\t60000\\t3\\th:x-api-key\\t64\\t0\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n", "\\t0\\t0\\t0\\t\\t0\\t64\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n", "\\t7\\t1000\\t7\\tx:l\\t1024\\t64\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t64\\t0\\n", "\\t2\\t3600000\\t2\\tr\\t1\\t1088\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n",
+                 # a ceiling of 30 a minute with room for 7, in the bucket after the route's 8 (1089 + 8), and a prefix of 56
+                 "\\t3\\t1000\\t3\\tx:f\\t8\\t1089\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t30\\t60000\\t7\\t1097\\t56\\t0\\n",
+                 "pub fn rate_buckets_total() -> [] int {\n    return 1098;"):
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
             failures += 1
+    if "ceiling 30 per 60000 ms, burst 7" not in explained or "ipv6 prefix /56" not in explained:
+        print("FAIL --explain must say a route's ceiling and its IPv6 prefix: %r" % explained[-400:])
+        failures += 1
     if "limit 10 per 60000 ms, burst 3, key h:x-api-key, 64 bucket(s)" not in explained:
         print("FAIL --explain must say what a route's limit is: %r" % explained[-300:])
         failures += 1

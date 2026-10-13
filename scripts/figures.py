@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The site's data figures, drawn from the recorded benchmark results (bench/results/*.json) so that a number on the page is a number in a file.
 
-    python3 scripts/figures.py          # write docs/figures/bench.svg and memory.svg, and the benchmark tables inside docs/evidence.html
+    python3 scripts/figures.py          # write docs/figures/bench.svg and memory.svg, and the benchmark and TLS tables inside docs/evidence.html
     python3 scripts/figures.py --check  # exit 1 if the committed figures or tables differ from what the results give
 
 Each SVG is self-contained (its own colours, light and dark), because it is shown with <img>.
@@ -111,8 +111,53 @@ def bench_html():
     return "\n".join(out) + "\n"
 
 
-def splice(html, fragment):
-    a, b = "<!-- bench:begin -->", "<!-- bench:end -->"
+TLS_RESULTS = RESULTS / "2026-10-12-tls.json"
+TLS_NAMES = [("cancho", "plain build, plain port", True), ("cancho-tlsplain", "TLS build, plain port", False), ("cancho-tls", "TLS build, TLS port", False)]
+TLS_CELLS = [("C1", "GET /, 64 connections"), ("C3", "64 KiB response, 64 connections"), ("C4", "16 KiB POST, 64 connections")]
+
+
+def tls_html():
+    """The TLS cost tables of docs/evidence.html (gate 9, docs/bench.md section 11), from the recorded run: every figure there is a figure in the file."""
+    data = json.loads(TLS_RESULTS.read_text())
+    med = statistics.median
+    out = []
+    for cell, label in TLS_CELLS:
+        out.append('<h3 id="T%s">%s over TLS: %s</h3>' % (cell, cell, label))
+        out.append('<div class="fitwrap"><table class="fit num"><thead><tr><th>listener</th><th>requests/s, median (min&ndash;max)</th><th>p50 ms</th><th>p99 ms</th><th>proxy CPU</th><th>RSS MiB after the load</th></tr></thead><tbody>')
+        for key, name, us in TLS_NAMES:
+            runs = data["cells"][cell][key]
+            rps = [r["rps"] for r in runs]
+            out.append('<tr%s><th>%s</th><td class="n">%s (%s&ndash;%s)</td><td class="n">%.2f</td><td class="n">%.2f</td><td class="n">%d%%</td><td class="n">%.1f</td></tr>' % (
+                ' class="us"' if us else "", name, format(round(med(rps)), ","), format(round(min(rps)), ","), format(round(max(rps)), ","),
+                med(r["p50"] for r in runs), med(r["p99"] for r in runs), round(100 * med(r["proxy_cpu"] for r in runs)), med(r["rss_kib"] for r in runs) / 1024))
+        out.append("</tbody></table></div>")
+    out.append('<h3 id="T7">C7: full handshakes only, as fast as the gateway takes them</h3>')
+    runs = data["cells"]["C7"]["cancho-tls"]
+    rate = [r["rate"] for r in runs]
+    lat = data["handshake_latency"]
+    out.append('<div class="fitwrap"><table class="fit num"><thead><tr><th>listener</th><th>handshakes/s, median (min&ndash;max)</th><th>gateway CPU per handshake, ms</th><th>proxy CPU</th><th>one handshake to an idle gateway, p50 / p99 ms</th></tr></thead><tbody>')
+    out.append('<tr><th>TLS build, TLS port</th><td class="n">%s (%s&ndash;%s)</td><td class="n">%.1f</td><td class="n">%d%%</td><td class="n">%.1f / %.1f</td></tr></tbody></table></div>' % (
+        format(round(med(rate)), ","), format(round(min(rate)), ","), format(round(max(rate)), ","), med(r["cpu_ms_per_handshake"] for r in runs),
+        round(100 * med(r["proxy_cpu"] for r in runs)), lat["p50"], lat["p99"]))
+    out.append('<h3 id="T8">C8: one connection, one 64 MiB response</h3>')
+    out.append('<div class="fitwrap"><table class="fit num"><thead><tr><th>listener</th><th>MiB/s, median (min&ndash;max)</th><th>gateway CPU, s per GiB</th></tr></thead><tbody>')
+    for key, name, us in TLS_NAMES:
+        runs = data["cells"]["C8"][key]
+        r = [x["mib_s"] for x in runs]
+        out.append('<tr%s><th>%s</th><td class="n">%s (%s&ndash;%s)</td><td class="n">%.2f</td></tr>' % (
+            ' class="us"' if us else "", name, format(round(med(r)), ","), format(round(min(r)), ","), format(round(max(r)), ","), med(x["cpu_s_per_gib"] for x in runs)))
+    out.append("</tbody></table></div>")
+    out.append('<h3 id="T6">C6 over TLS: resident memory, before and with 100 idle connections</h3>')
+    out.append('<div class="fitwrap"><table class="fit num"><thead><tr><th>listener</th><th>MiB before</th><th>MiB with 100 idle connections</th></tr></thead><tbody>')
+    for key, name, us in TLS_NAMES:
+        m = data["memory"][key]
+        out.append('<tr%s><th>%s</th><td class="n">%.1f</td><td class="n">%.1f</td></tr>' % (' class="us"' if us else "", name, m["before_kib"] / 1024, m["after_kib"] / 1024))
+    out.append("</tbody></table></div>")
+    return "\n".join(out) + "\n"
+
+
+def splice(html, fragment, name="bench"):
+    a, b = "<!-- %s:begin -->" % name, "<!-- %s:end -->" % name
     i, j = html.index(a) + len(a), html.index(b)
     return html[:i] + "\n" + fragment + html[j:]
 
@@ -121,11 +166,11 @@ def main():
     out = {"bench.svg": bench_svg(), "memory.svg": memory_svg()}
     target = ROOT / "docs" / "figures"
     page = ROOT / "docs" / "evidence.html"
-    spliced = splice(page.read_text(), bench_html()) if page.exists() else None
+    spliced = splice(splice(page.read_text(), bench_html()), tls_html(), "tls") if page.exists() else None
     if "--check" in sys.argv[1:]:
         stale = [n for n, t in out.items() if not (target / n).exists() or (target / n).read_text() != t]
         if spliced is not None and spliced != page.read_text():
-            stale.append("evidence.html (benchmark tables)")
+            stale.append("evidence.html (benchmark and TLS tables)")
         print("stale: " + ", ".join(stale) if stale else "figures are current")
         return 1 if stale else 0
     target.mkdir(exist_ok=True)
@@ -134,7 +179,7 @@ def main():
         print("wrote docs/figures/" + n)
     if spliced is not None:
         page.write_text(spliced)
-        print("wrote the benchmark tables into docs/evidence.html")
+        print("wrote the benchmark and TLS tables into docs/evidence.html")
     return 0
 
 

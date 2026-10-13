@@ -8,7 +8,8 @@ module gateway.routes_table;
 // empty; docs/websocket.md), then the rate limit (docs/ratelimit.md): tokens per period (0: none), the period in ms, the burst, the key, the buckets, and the
 // first bucket of the route's table, then authentication (docs/auth.md): 1 if the route authenticates, the header it reads, 1 if it forwards the credential, the
 // allowed key indices (`*`: all) and the WWW-Authenticate challenge, then the JWT fields (docs/jwt.md): the allowed public-key indices, the required audience and issuer
-// (empty: none) and the leeway in seconds, then the WebSocket message limit (docs/websocket-frames.md) and the OCPP-J versions whose frames are validated (docs/ocpp.md). Tab-separated, in file order; `gateway.route` reads it.
+// (empty: none) and the leeway in seconds, then the WebSocket message limit (docs/websocket-frames.md), then the route's ceiling (docs/ratelimit.md section 13.1: tokens per period,
+// the period in ms, the burst, the bucket it is), the IPv6 prefix of an xff key (0: not one) and the OCPP-J versions whose frames are validated (docs/ocpp.md). Tab-separated, in file order; `gateway.route` reads it.
 
 pub fn count() -> [] int {
     return 3;
@@ -38,5 +39,5 @@ pub fn jwt_keys_blob() -> [] &static [byte] {
 }
 
 pub fn blob() -> [] &static [byte] {
-    return "api.example.com\t/\t127\t0\t1048576\t1\tapi\t0\t\t\t0\t0\t0\t\t0\t0\t0\t\t0\t\t\t\t\t\t0\t1048576\t0\n*\t/static\t3\t1\t0\t0\tweb-static\t0\t\t\t0\t0\t0\t\t0\t0\t0\t\t0\t\t\t\t\t\t0\t1048576\t0\n*\t/\t127\t1\t1048576\t0\tweb\t0\t\t\t0\t0\t0\t\t0\t0\t0\t\t0\t\t\t\t\t\t0\t1048576\t0\n";
+    return "api.example.com\t/\t127\t0\t1048576\t1\tapi\t0\t\t\t0\t0\t0\t\t0\t0\t0\t\t0\t\t\t\t\t\t0\t1048576\t0\t0\t0\t0\t0\t0\n*\t/static\t3\t1\t0\t0\tweb-static\t0\t\t\t0\t0\t0\t\t0\t0\t0\t\t0\t\t\t\t\t\t0\t1048576\t0\t0\t0\t0\t0\t0\n*\t/\t127\t1\t1048576\t0\tweb\t0\t\t\t0\t0\t0\t\t0\t0\t0\t\t0\t\t\t\t\t\t0\t1048576\t0\t0\t0\t0\t0\t0\n";
 }

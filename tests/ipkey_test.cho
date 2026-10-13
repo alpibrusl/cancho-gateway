@@ -1,0 +1,261 @@
+edition 5;
+
+import std.bytes;
+import std.test;
+import gateway.out;
+import gateway.ipkey;
+import gateway.ipkey_vectors;
+
+// The IPv6 key of an `X-Forwarded-For` element (docs/ratelimit.md section 13.2), without a gateway. The cases are tests/ipkey_vectors.cho's: the keys come from Python's `ipaddress`
+// (tests/ipkey_vectors.py), so the parser here is judged by one that is not ours. No input may trap, and nothing may be written outside the two places the module owns.
+
+// A decimal number, with an optional minus sign, as the vectors write a prefix.
+fn parse_int[&t](text: &t [byte]) -> [] int {
+    var neg = false;
+    var i = 0;
+    if len(text) > 0 && int_of(text[0]) == '-' {
+        neg = true;
+        i = 1;
+    }
+    var v = 0;
+    while i < len(text) {
+        v = v * 10 + (int_of(text[i]) - '0');
+        i = i + 1;
+    }
+    if neg {
+        return 0 - v;
+    }
+    return v;
+}
+
+fn fill[&b](buf: &!b [byte], v: int) -> [] int {
+    var i = 0;
+    while i < len(buf) {
+        buf[i] = byte_of(v);
+        i = i + 1;
+    }
+    return 0;
+}
+
+// True if every byte the module may not touch is still 0xAA: the key's 33, then 7 untouched, then the 16 of the address, then 8 untouched.
+fn untouched[&b](buf: &b [byte]) -> [] bool {
+    var i = 33;
+    while i < 40 {
+        if int_of(buf[i]) != 170 {
+            return false;
+        }
+        i = i + 1;
+    }
+    i = 56;
+    while i < len(buf) {
+        if int_of(buf[i]) != 170 {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// The key `text` has at `prefix` bits, or "" if it is not a literal, compared with `want`.
+fn key_is[&t, &w](text: &t [byte], prefix: int, want: &w [byte]) -> [] bool {
+    var ok = false;
+    region a {
+        let buf = alloc_slice[a](ipkey.scratch_len(), byte_of(170));
+        let n = ipkey.aggregate(text, prefix, buf);
+        if len(want) == 0 {
+            ok = n == 0;
+        } else {
+            ok = n == len(want) && bytes.equal(buf[0..n], want);
+        }
+        ok = ok && untouched(buf);
+    }
+    return ok;
+}
+
+fn test_every_vector_has_the_key_python_gives_it() -> [] int {
+    let blob = ipkey_vectors.blob();
+    var at = 0;
+    var seen = 0;
+    var literals = 0;
+    while at < len(blob) {
+        var end = at;
+        while end < len(blob) && int_of(blob[end]) != '\n' {
+            end = end + 1;
+        }
+        let row = blob[at..end];
+        let text = bytes.field(row, 9, 1);
+        let prefix = parse_int(bytes.field(row, 9, 2));
+        let want = bytes.field(row, 9, 3);
+        if !key_is(text, prefix, want) {
+            // Not a message, a trap: `seen` is the row (counted from 0) in tests/ipkey_vectors.cho's blob.
+            test.assert_eq(seen, 0 - 1);
+        }
+        if len(want) > 0 {
+            literals = literals + 1;
+        }
+        seen = seen + 1;
+        at = end + 1;
+    }
+    test.assert(seen > 1200);
+    test.assert(literals > 700 && seen - literals > 500);
+    return 0;
+}
+
+fn test_every_spelling_of_one_address_is_one_key() -> [] int {
+    test.assert(key_is("::1", 64, "v00000000000000000000000000000000"));
+    test.assert(key_is("0:0:0:0:0:0:0:1", 128, "v00000000000000000000000000000001"));
+    test.assert(key_is("::1", 128, "v00000000000000000000000000000001"));
+    test.assert(key_is("0000:0000:0000:0000:0000:0000:0000:0001", 128, "v00000000000000000000000000000001"));
+    test.assert(key_is("2001:db8::1", 64, "v20010db8000000000000000000000000"));
+    test.assert(key_is("2001:DB8:0:0:ffff:ffff:ffff:ffff", 64, "v20010db8000000000000000000000000"));
+    test.assert(key_is("[2001:db8::1]:443", 64, "v20010db8000000000000000000000000"));
+    test.assert(key_is("[2001:db8::1]", 64, "v20010db8000000000000000000000000"));
+    return 0;
+}
+
+fn test_the_prefix_is_where_the_key_stops_telling_addresses_apart() -> [] int {
+    // /64 keeps the first four groups; /65 keeps one more bit; /63 drops the last bit of the fourth group.
+    test.assert(key_is("2001:db8:1:3:1:2:3:4", 64, "v20010db8000100030000000000000000"));
+    test.assert(key_is("2001:db8:1:3:8000::", 65, "v20010db8000100038000000000000000"));
+    test.assert(key_is("2001:db8:1:3:7fff::", 65, "v20010db8000100030000000000000000"));
+    test.assert(key_is("2001:db8:1:3::", 63, "v20010db8000100020000000000000000"));
+    test.assert(key_is("2001:db8:1:2::", 63, "v20010db8000100020000000000000000"));
+    test.assert(key_is("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", 1, "v80000000000000000000000000000000"));
+    test.assert(key_is("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", 8, "vff000000000000000000000000000000"));
+    test.assert(key_is("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", 12, "vfff00000000000000000000000000000"));
+    test.assert(key_is("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", 127, "vfffffffffffffffffffffffffffffffe"));
+    test.assert(key_is("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", 128, "vffffffffffffffffffffffffffffffff"));
+    // A prefix the generator never writes is no aggregation at all, not a trap and not an empty key.
+    test.assert(key_is("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", 0, "vffffffffffffffffffffffffffffffff"));
+    test.assert(key_is("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", 129, "vffffffffffffffffffffffffffffffff"));
+    test.assert(key_is("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", 0 - 5, "vffffffffffffffffffffffffffffffff"));
+    test.assert(key_is("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", 9223372036854775807, "vffffffffffffffffffffffffffffffff"));
+    test.assert(key_is("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", 0 - 9223372036854775807, "vffffffffffffffffffffffffffffffff"));
+    return 0;
+}
+
+fn test_an_ipv4_mapped_address_is_keyed_as_the_ipv4_address() -> [] int {
+    // Aggregated on /64 these would all be `v000...0`: every IPv4 client behind a dual-stack front in one bucket.
+    test.assert(key_is("::ffff:1.2.3.4", 64, "1.2.3.4"));
+    test.assert(key_is("::ffff:1.2.3.4", 1, "1.2.3.4"));
+    test.assert(key_is("::FFFF:102:304", 64, "1.2.3.4"));
+    test.assert(key_is("0:0:0:0:0:ffff:1.2.3.4", 128, "1.2.3.4"));
+    test.assert(key_is("[::ffff:10.0.0.255]:80", 64, "10.0.0.255"));
+    test.assert(key_is("::ffff:0.0.0.0", 64, "0.0.0.0"));
+    test.assert(key_is("::ffff:255.255.255.255", 64, "255.255.255.255"));
+    // Close to it, but not it: ordinary IPv6, aggregated.
+    test.assert(key_is("::fffe:1.2.3.4", 64, "v00000000000000000000000000000000"));
+    test.assert(key_is("::1:ffff:1.2.3.4", 128, "v00000000000000000001ffff01020304"));
+    test.assert(key_is("::1.2.3.4", 128, "v00000000000000000000000001020304"));
+    return 0;
+}
+
+fn test_what_is_not_an_ipv6_literal_is_left_to_the_caller() -> [] int {
+    test.assert(key_is("", 64, ""));
+    test.assert(key_is(":", 64, ""));
+    test.assert(key_is("1.2.3.4", 64, ""));
+    test.assert(key_is("1.2.3.4:80", 64, ""));
+    test.assert(key_is("unknown", 64, ""));
+    test.assert(key_is("_hidden", 64, ""));
+    test.assert(key_is("fe80::1%eth0", 64, ""));
+    test.assert(key_is("2001:db8::1::2", 64, ""));
+    test.assert(key_is("2001:db8:::1", 64, ""));
+    test.assert(key_is("12345::1", 64, ""));
+    test.assert(key_is("1:2:3:4:5:6:7:8:9", 64, ""));
+    test.assert(key_is("1:2:3:4:5:6:7:", 64, ""));
+    test.assert(key_is("::1 ", 64, ""));
+    test.assert(key_is("[::1", 64, ""));
+    test.assert(key_is("[::1]:", 64, ""));
+    test.assert(key_is("[::1]:123456", 64, ""));
+    return 0;
+}
+
+fn test_bytes_that_are_not_text_are_not_a_literal_and_nothing_traps() -> [] int {
+    region a {
+        let text = alloc_slice[a](3, byte_of(0));
+        text[0] = byte_of(':');
+        text[1] = byte_of(':');
+        // "::" is the all-zero address; any third byte that is not a hexadecimal digit makes it nothing, whatever its value.
+        var v = 0;
+        var accepted = 0;
+        while v < 256 {
+            text[2] = byte_of(v);
+            let buf = alloc_slice[a](ipkey.scratch_len(), byte_of(170));
+            let n = ipkey.aggregate(text, 64, buf);
+            let digit = v >= '0' && v <= '9' || v >= 'a' && v <= 'f' || v >= 'A' && v <= 'F';
+            if digit {
+                test.assert_eq(n, 33);
+                accepted = accepted + 1;
+            } else {
+                test.assert_eq(n, 0);
+            }
+            test.assert(untouched(buf));
+            v = v + 1;
+        }
+        test.assert_eq(accepted, 22);
+    }
+    return 0;
+}
+
+fn test_one_changed_byte_of_a_literal_never_traps_or_escapes() -> [] int {
+    // Every byte value at every position of the longest forms: the answer is 0 or a key of 33 or at most 15 bytes, and the guard bytes are never written.
+    region a {
+        let samples = 3;
+        let buf = alloc_slice[a](ipkey.scratch_len(), byte_of(170));
+        var s = 0;
+        while s < samples {
+            var base = "2001:db8:85a3:8a2e:370:7334:abcd:ef01";
+            if s == 1 {
+                base = "[2001:db8::1]:65535";
+            }
+            if s == 2 {
+                base = "::ffff:255.255.255.255";
+            }
+            let text = alloc_slice[a](len(base), byte_of(0));
+            var i = 0;
+            while i < len(base) {
+                var v = 0;
+                while v < 256 {
+                    var k = 0;
+                    while k < len(base) {
+                        text[k] = base[k];
+                        k = k + 1;
+                    }
+                    text[i] = byte_of(v);
+                    fill(buf, 170);
+                    let n = ipkey.aggregate(text, 64, buf);
+                    test.assert(n == 0 || n == 33 || n >= 7 && n <= 15);
+                    test.assert(untouched(buf));
+                    v = v + 17;
+                }
+                i = i + 1;
+            }
+            s = s + 1;
+        }
+    }
+    return 0;
+}
+
+fn test_a_text_that_is_too_long_or_a_scratch_that_is_too_small_is_refused_unread() -> [] int {
+    // 53 bytes is the longest element read: a 45-byte literal in brackets with a five-digit port is 53.
+    test.assert(key_is("[0:0:0:0:0:ffff:255.255.255.255]:65535", 64, "255.255.255.255"));
+    test.assert(key_is("[1111:2222:3333:4444:5555:6666:7777:8888]:65535", 64, "v11112222333344440000000000000000"));
+    test.assert(key_is("[1111:2222:3333:4444:5555:6666:7777:8888]:655355", 64, ""));
+    test.assert(key_is("[::ffff:255.255.255.255]:65535x", 64, ""));
+    test.assert(key_is("0000:0000:0000:0000:0000:ffff:255.255.255.255", 64, "255.255.255.255"));
+    test.assert(key_is("0000:0000:0000:0000:0000:ffff:255.255.255.2555", 64, ""));
+    region a {
+        let small = alloc_slice[a](ipkey.scratch_len() - 1, byte_of(170));
+        test.assert_eq(ipkey.aggregate("2001:db8::1", 64, small), 0);
+        var i = 0;
+        while i < len(small) {
+            test.assert_eq(int_of(small[i]), 170);
+            i = i + 1;
+        }
+        let empty = alloc_slice[a](0, byte_of(0));
+        test.assert_eq(ipkey.aggregate("2001:db8::1", 64, empty), 0);
+        let big = alloc_slice[a](ipkey.scratch_len() * 4, byte_of(170));
+        test.assert_eq(ipkey.aggregate("2001:db8::1", 64, big), 33);
+    }
+    return 0;
+}
