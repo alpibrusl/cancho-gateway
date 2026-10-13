@@ -54,7 +54,7 @@ MAX_SUBPROTOCOLS = 8
 # WebSocket frames (docs/websocket-frames.md sections 4, 6, 7 and 10): the longest message a route carries (per route, summed over its fragments), the keepalive Ping the gateway
 # sends a silent client (0: none) and how long its Pong may take, and how long the gateway waits for a Close frame's answer (and for a frame boundary to put one at).
 WS_MESSAGE, WS_MESSAGE_RANGE = 1 << 20, (1024, 1 << 28)
-OCPP_VERSIONS = {"1.6": 1, "2.0.1": 2}      # ws_ocpp (docs/ocpp.md section 7): the bit each version has in the route table's column
+OCPP_VERSIONS = {"1.6": 1, "2.0.1": 2, "2.1": 4}      # ws_ocpp (docs/ocpp.md section 7): the bit each version has in the route table's column
 WS_PING_RANGE = (1000, 86400000)
 WS_PONG_MS, WS_PONG_RANGE = 10000, (100, 600000)
 WS_CLOSE_MS, WS_CLOSE_RANGE = 5000, (100, 60000)
@@ -560,7 +560,7 @@ def load(path):
             want = [want] if isinstance(want, str) else want
             if not isinstance(want, list) or not 1 <= len(want) <= len(OCPP_VERSIONS) or len(set(map(str, want))) != len(want) or \
                     not all(isinstance(v, str) and v in OCPP_VERSIONS for v in want):
-                refuse("config.websocket", "ws_ocpp must be \"1.6\", \"2.0.1\" or a list of distinct versions of them (docs/ocpp.md section 7)", "route", i, "ws_ocpp")
+                refuse("config.websocket", "ws_ocpp must be \"1.6\", \"2.0.1\", \"2.1\" or a list of distinct versions of them (docs/ocpp.md section 7)", "route", i, "ws_ocpp")
             if sorted(protocols) != sorted("ocpp" + v for v in want):
                 refuse("config.websocket", "ws_ocpp = %s needs subprotocols to be exactly %s: the handshake then admits only the versions whose frames are checked (docs/ocpp.md section 7)" % (
                     json.dumps(want), json.dumps(sorted("ocpp" + v for v in want))), "route", i, "subprotocols" if "subprotocols" in r else "ws_ocpp")
@@ -759,7 +759,7 @@ def table_blob(routes):
     authenticates (1 API keys, 2 JWTs, 3 both), the lowercase header it reads, 1 if it forwards the credential, the allowed key indices (`*` for all, else comma-separated), and the
     `WWW-Authenticate` challenge; then the JWT fields (docs/jwt.md): the allowed JWT key indices, the required audience and issuer (empty: none) and the leeway in seconds;
     then the route's `ws_max_message_bytes` (docs/websocket-frames.md); then the route's ceiling (docs/ratelimit.md section 13.1): tokens per period (0: none), the period in ms, the burst, the
-    bucket it is (in the one table), and the IPv6 prefix of an xff key (0: not an xff key); then `ws_ocpp` (docs/ocpp.md: 1 for 1.6, 2 for 2.0.1, 3 for both, 0 for none); tab-separated, in file order."""
+    bucket it is (in the one table), and the IPv6 prefix of an xff key (0: not an xff key); then `ws_ocpp` (docs/ocpp.md: 1 for 1.6, 2 for 2.0.1, 4 for 2.1, the sum for several, 0 for none); tab-separated, in file order."""
     return "".join("%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n" % (
         r["host"] or "*", r["prefix"], r["mask"], r["upstream"], r["max_body"], r["trust"], r["name"], r["ws"], ",".join(r["protocols"]), ",".join(r["origins"]),
         r["rate"], r["per_ms"], r["burst"], r["rate_key"], r["buckets"], r["base"],

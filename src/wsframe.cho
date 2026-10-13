@@ -17,7 +17,7 @@ import gateway.wsvalidate;
 //     13 1 once a Close frame has gone by   14 the event the last `scan` reported (0 none, 1 violation, 2 a Close frame went by, 3 the gateway's own Pong, 4 a header or Pong is
 //     incomplete)   15 its number (the rule, the Close code, or the bytes to drop)   16 1 if the frame in hand is validated as UTF-8   17 for a violation: 1 if the bytes
 //     `scan` answered end at a frame boundary   18 1 once the direction is junk (a violation was seen: everything from it is discarded)   19 1 if the direction's frames are the cause of the close
-//     20 to 27 the validator of the direction's text messages (`gateway.wsvalidate`, docs/websocket-frames.md section 16): 20 to 26 its state, 27 its kind (0 none, 1 OCPP-J, docs/ocpp.md section 4)
+//     20 to 27 the validator of the direction's text messages (`gateway.wsvalidate`, docs/websocket-frames.md section 16): 20 to 26 its state, 27 its kind (0 none, 1 OCPP-J, docs/ocpp.md section 4) with the negotiated OCPP version packed above it (docs/ocpp.md section 13)
 //
 // What `scan` does to its answer: it never answers more than the bytes it was given; a header is not answered (so not forwarded) until it is whole and has been judged; a frame that
 // violates a rule is not answered, and neither is anything after it. See the document for the rules (section 3) and for why a violation in the middle of a payload cannot be undone.
@@ -184,16 +184,22 @@ pub fn is_ocpp(rule: int) -> [] bool {
     return wsvalidate.kind_of_rule(rule) == wsvalidate.kind_ocpp();
 }
 
-// Validate the text messages of both directions of this tunnel as validator kind `kind` (`wsvalidate`; the route's, from `wsbind.kind_of_route`).
-pub fn enable_validator[&t](ws: &!t [int], kind: int) -> [] int {
-    wsvalidate.set_kind(ws, dir_base(0) + 20, kind);
-    wsvalidate.set_kind(ws, dir_base(1) + 20, kind);
+// Validate the text messages of both directions of this tunnel as validator kind `kind` (`wsvalidate`; the route's, from `wsbind.kind_of_route`), for the OCPP version bit `version` the
+// handshake negotiated (`wsbind.negotiated`).
+pub fn enable_validator[&t](ws: &!t [int], kind: int, version: int) -> [] int {
+    wsvalidate.set_kind(ws, dir_base(0) + 20, kind, version);
+    wsvalidate.set_kind(ws, dir_base(1) + 20, kind, version);
     return 0;
 }
 
-// OCPP-J (kind 1); kept for the unit tests.
+// OCPP-J (kind 1) negotiated as OCPP 1.6; kept for the unit tests.
 pub fn enable_ocpp[&t](ws: &!t [int]) -> [] int {
-    return enable_validator(ws, wsvalidate.kind_ocpp());
+    return enable_validator(ws, wsvalidate.kind_ocpp(), 1);
+}
+
+// OCPP-J (kind 1) negotiated as the version `version` (1 for 1.6, 2 for 2.0.1, 4 for 2.1).
+pub fn enable_ocpp_version[&t](ws: &!t [int], version: int) -> [] int {
+    return enable_validator(ws, wsvalidate.kind_ocpp(), version);
 }
 
 pub fn tag(rule: int) -> [] &static [byte] {
