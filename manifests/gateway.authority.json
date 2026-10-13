@@ -215,6 +215,7 @@
     "check_signature",
     "choose_alpn",
     "choose_suite",
+    "chosen_protocol",
     "cin_cap",
     "circuit_open_ms",
     "circuit_open_ms",
@@ -722,6 +723,7 @@
     "names_distinct",
     "names_len",
     "neg_inverse",
+    "negotiated",
     "next_point",
     "nibble",
     "no_entropy",
@@ -1181,6 +1183,7 @@
     "verify_name",
     "version",
     "version",
+    "version",
     "view_len",
     "ways",
     "ways_of",
@@ -1236,5 +1239,5 @@
   ],
   "folded_operators": 230,
   "folded_calls": 347,
-  "functions": 1663
+  "functions": 1666
 }
