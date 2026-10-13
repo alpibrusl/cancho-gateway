@@ -14,7 +14,8 @@ All of these pass before anything is called done (CI runs them, `.github/workflo
     python3 tests/websocket_test.py              # WebSocket handshake and tunnel, plain and over TLS (docs/websocket.md)
     python3 tests/wsframes_test.py               # WebSocket frames: violations, limits, UTF-8, keepalive, the Close handshake (docs/websocket-frames.md); its mutants: tests/wsframes_mutants.py
     python3 tests/route_test.py 12 400          # route selection vs the reference; also --fixed (docs/routes.md)
-    python3 tests/ratelimit_test.py             # rate limiting, end to end (docs/ratelimit.md); its mutants: tests/ratelimit_mutants.py
+    python3 tests/ipkey_vectors.py --check      # tests/ipkey_vectors.cho is what the script writes (the IPv6 key's cases, from Python's ipaddress)
+    python3 tests/ratelimit_test.py             # rate limiting, end to end (docs/ratelimit.md); its mutants: tests/ratelimit_mutants.py (they include the circuit's half-open trial, docs/ratelimit.md section 13.3)
     python3 tests/auth_test.py                  # API-key authentication, end to end (docs/auth.md); its mutants: tests/auth_mutants.py
     python3 tests/jwt_vectors.py --check        # tests/jwt_vectors.cho is what the script writes (the unit test's tokens; test keys only)
     python3 tests/jwt_test.py                   # JWT bearer tokens, end to end (docs/jwt.md); its mutants: tests/jwt_mutants.py

@@ -116,6 +116,82 @@ upstream = "up"
 rate_limit = "6/m"
 rate_burst = 1
 
+# Slice 2 (docs/ratelimit.md section 13): a route-wide ceiling above per-key buckets, and IPv6 aggregation of xff keys.
+[[route]]
+name = "ceil"
+path_prefix = "/ceil"
+upstream = "up"
+rate_limit = "1/h"
+rate_burst = 3
+rate_key = "header:X-Api-Key"
+rate_buckets = 256
+rate_route_limit = "1/h"
+rate_route_burst = 5
+
+[[route]]
+name = "ceilo"
+path_prefix = "/ceilo"
+upstream = "up"
+rate_limit = "1/h"
+rate_burst = 1
+rate_key = "header:X-Api-Key"
+rate_buckets = 4
+rate_route_limit = "1/h"
+rate_route_burst = 3
+
+[[route]]
+name = "ceilf"
+path_prefix = "/ceilf"
+upstream = "up"
+rate_limit = "100/s"
+rate_key = "header:X-Api-Key"
+rate_buckets = 64
+rate_route_limit = "2/s"
+
+[[route]]
+name = "wsc"
+path_prefix = "/wsc"
+upstream = "ws"
+websocket = true
+rate_limit = "1/h"
+rate_burst = 5
+rate_key = "header:X-Api-Key"
+rate_buckets = 16
+rate_route_limit = "1/h"
+rate_route_burst = 1
+
+[[route]]
+name = "v6"
+path_prefix = "/v6"
+upstream = "up"
+trust_forwarded = true
+rate_limit = "1/h"
+rate_burst = 1
+rate_key = "xff:last"
+rate_buckets = 256
+
+[[route]]
+name = "v6x"
+path_prefix = "/v6x"
+upstream = "up"
+trust_forwarded = true
+rate_limit = "1/h"
+rate_burst = 1
+rate_key = "xff:first"
+rate_buckets = 256
+rate_xff_prefix = 128
+
+[[route]]
+name = "v6n"
+path_prefix = "/v6n"
+upstream = "up"
+trust_forwarded = true
+rate_limit = "1/h"
+rate_burst = 1
+rate_key = "xff:last"
+rate_buckets = 64
+rate_xff_prefix = 48
+
 [[route]]
 name = "wsr"
 path_prefix = "/wsr"
@@ -433,30 +509,163 @@ class Main:
         assert e["status"] == 429 and e["rule"] == "limit.rate" and e["route"] == "wsr", e
         assert seen(ws, "/wsr/d") == 0
 
+    def forty_distinct_keys_against_a_ceiling_of_five_admit_exactly_five(gw, up, ws):
+        n0 = len(gw.lines())
+        m0 = gw.route_metrics("ceil")
+        results = [get(gw, "/ceil/k%d" % i, ["X-Api-Key: tenant-%d" % i]) for i in range(40)]
+        statuses = [r[0] for r in results]
+        assert statuses[:5] == [200] * 5 and statuses[5:] == [429] * 35, statuses
+        # Every key had a token of its own (3): it is the ceiling, and its own rule, that refused.
+        assert {rule_of(r[2]) for r in results[5:]} == {"limit.rate-route"}, [rule_of(r[2]) for r in results[5:8]]
+        assert {r[1]["retry-after"] for r in results[5:]} == {"3600"}, results[5][1]
+        s, h, b, raw = results[5]
+        assert h["content-type"] == "application/problem+json" and h["connection"] == "close", h
+        body = json.loads(b)
+        assert body["status"] == 429 and body["rule"] == "limit.rate-route" and body["request_id"] == h["x-request-id"], (body, h)
+        assert raw.index(b"Content-Length") < raw.index(b"Retry-After") < raw.index(b"X-Request-Id"), raw[:200]
+        assert seen(up, "/ceil/k") == 5, seen(up, "/ceil/k")           # the upstream's own record: five of forty
+        e = gw.find(n0, path="/ceil/k5")
+        assert e["status"] == 429 and e["rule"] == "limit.rate-route" and e["route"] == "ceil" and e["outcome"] == "refused", e
+        m1 = gw.route_metrics("ceil")
+        assert m1["rate_route_limited"] == m0["rate_route_limited"] + 35 and m1["rate_limited"] == m0["rate_limited"], (m0, m1)
+        # A key that has been admitted is still told the ceiling's answer, not its own: its own bucket holds two more tokens.
+        s, h, b, _ = get(gw, "/ceil/again", ["X-Api-Key: tenant-0"])
+        assert s == 429 and rule_of(b) == "limit.rate-route", (s, b)
+
+    def a_key_refused_by_its_own_bucket_takes_nothing_from_the_ceiling(gw, up, ws):
+        n0 = len(gw.lines())
+        m0 = gw.route_metrics("ceilo")
+        a = ["X-Api-Key: alpha"]
+        assert get(gw, "/ceilo/a0", a)[0] == 200                      # alpha: its one token, and one of the ceiling's three
+        for i in range(10):
+            s, h, b, _ = get(gw, "/ceilo/a%d" % (i + 1), a)
+            assert s == 429 and rule_of(b) == "limit.rate", (i, s, b)   # its own bucket: not the ceiling's rule
+        assert get(gw, "/ceilo/b0", ["X-Api-Key: bravo"])[0] == 200    # two tokens of the ceiling were left, not three less ten
+        assert get(gw, "/ceilo/c0", ["X-Api-Key: charlie"])[0] == 200
+        s, h, b, _ = get(gw, "/ceilo/d0", ["X-Api-Key: delta"])
+        assert s == 429 and rule_of(b) == "limit.rate-route" and h["retry-after"] == "3600", (s, b)
+        # The ceiling's refusal was not free: delta's own token went with it, so delta is now told its own rule.
+        s, h, b, _ = get(gw, "/ceilo/d1", ["X-Api-Key: delta"])
+        assert s == 429 and rule_of(b) == "limit.rate", (s, b)
+        assert seen(up, "/ceilo/") == 3
+        m1 = gw.route_metrics("ceilo")
+        assert m1["rate_limited"] == m0["rate_limited"] + 11 and m1["rate_route_limited"] == m0["rate_route_limited"] + 1, (m0, m1)
+        assert gw.find(n0, path="/ceilo/d0")["rule"] == "limit.rate-route"
+
+    def the_ceilings_retry_after_is_a_wait_that_works(gw, up, ws):
+        k = lambda i: ["X-Api-Key: fill-%d" % i]
+        assert get(gw, "/ceilf/a", k(1))[0] == 200 and get(gw, "/ceilf/b", k(2))[0] == 200
+        s, h, b, _ = get(gw, "/ceilf/c", k(3))
+        assert s == 429 and rule_of(b) == "limit.rate-route" and h["retry-after"] == "1", (s, h, b)
+        time.sleep(int(h["retry-after"]) + 0.05)
+        # A second at 2 a second is two tokens, for whichever keys ask: the ceiling's burst, not past it.
+        assert get(gw, "/ceilf/d", k(4))[0] == 200 and get(gw, "/ceilf/e", k(5))[0] == 200
+        assert get(gw, "/ceilf/f", k(6))[0] == 429
+        assert seen(up, "/ceilf/") == 4
+
+    def a_limited_upgrade_by_the_ceiling_takes_no_tunnel_place(gw, up, ws):
+        m0 = gw.route_metrics("wsc")
+        a = wt.connect_ws(gw, "/wsc/a", protocols=(), extra=["X-Api-Key: one"])       # the ceiling's one token; one of the cap's two places
+        socks = []
+        for i in range(6):
+            raw, _ = wt.request_bytes("/wsc/d%d" % i, protocols=(), extra=["X-Api-Key: key-%d" % i])
+            s = wt.open_socket(gw)
+            s.sendall(raw)
+            socks.append(s)
+        heads = []
+        for s in socks:
+            head, _ = wt.read_head(s)
+            heads.append(pt.refusal(head + b"\r\n\r\n"))
+        o = wt.connect_ws(gw, "/wso/a", protocols=())                                  # the other place is free: six lingering refusals hold none
+        assert o.status == 101
+        o.close()
+        for s in socks:
+            s.close()
+        a.close()
+        assert all(st == 429 for st, _ in heads), heads
+        assert gw.route_metrics("wsc")["rate_route_limited"] == m0["rate_route_limited"] + 6
+        assert seen(ws, "/wsc/d") == 0
+
+    def an_ipv6_host_rotating_inside_its_prefix_is_one_bucket(gw, up, ws):
+        n0 = len(gw.lines())
+        assert get(gw, "/v6/first", ["X-Forwarded-For: 2001:db8:1:1::1"])[0] == 200
+        for i in range(2, 42):
+            s, h, b, _ = get(gw, "/v6/r%d" % i, ["X-Forwarded-For: 2001:db8:1:1:%x:%x::%x" % (i, i * 257, i)])
+            assert s == 429 and rule_of(b) == "limit.rate", (i, s)
+        # Other spellings of the same /64: upper case, the long form, brackets and a port, the last element of a chain.
+        for k, value in enumerate(("2001:DB8:1:1::ffff", "2001:db8:1:1:0:0:0:2", "[2001:db8:1:1::9]:443", "[2001:db8:1:1:1:2:3:4]", "9.9.9.9, 2001:db8:1:1:aaaa::")):
+            assert get(gw, "/v6/s%d" % k, ["X-Forwarded-For: " + value])[0] == 429, value
+        assert seen(up, "/v6/") == 1, seen(up, "/v6/")
+        # The next /64 is another client.
+        assert get(gw, "/v6/next", ["X-Forwarded-For: 2001:db8:1:2::1"])[0] == 200
+        assert get(gw, "/v6/next2", ["X-Forwarded-For: 2001:db8:1:2:f::1"])[0] == 429
+        assert get(gw, "/v6/other", ["X-Forwarded-For: 2001:db9:1:1::1"])[0] == 200
+        assert seen(up, "/v6/") == 3
+
+    def ipv4_is_keyed_as_before_and_an_ipv4_mapped_address_is_the_ipv4_address(gw, up, ws):
+        assert get(gw, "/v6/v4a", ["X-Forwarded-For: 1.2.3.4"])[0] == 200
+        assert get(gw, "/v6/v4b", ["X-Forwarded-For: 1.2.3.5"])[0] == 200                 # a neighbour is its own client
+        assert get(gw, "/v6/v4c", ["X-Forwarded-For: 1.2.3.4"])[0] == 429
+        assert get(gw, "/v6/m4a", ["X-Forwarded-For: ::ffff:1.2.3.4"])[0] == 429          # the same client, written the other way
+        assert get(gw, "/v6/m4b", ["X-Forwarded-For: ::ffff:102:304"])[0] == 429
+        # Aggregated on /64 these would be one bucket: the mapped addresses of different IPv4 clients are not.
+        assert get(gw, "/v6/m4c", ["X-Forwarded-For: ::ffff:5.6.7.8"])[0] == 200
+        assert get(gw, "/v6/m4d", ["X-Forwarded-For: ::ffff:5.6.7.9"])[0] == 200
+        assert get(gw, "/v6/m4e", ["X-Forwarded-For: ::ffff:5.6.7.8"])[0] == 429
+
+    def what_is_not_an_ipv6_literal_is_keyed_on_its_text_as_before(gw, up, ws):
+        assert get(gw, "/v6/g0", ["X-Forwarded-For: fe80::1%eth0"])[0] == 200            # a zone id: not a literal, its text
+        assert get(gw, "/v6/g1", ["X-Forwarded-For: fe80::1%eth1"])[0] == 200            # another spelling: another key
+        assert get(gw, "/v6/g2", ["X-Forwarded-For: fe80::1%eth0"])[0] == 429
+        assert get(gw, "/v6/g3", ["X-Forwarded-For: unknown"])[0] == 200
+        assert get(gw, "/v6/g4", ["X-Forwarded-For: unknown"])[0] == 429
+        assert get(gw, "/v6/g5", ["X-Forwarded-For: 2001:db8:::1"])[0] == 200            # three colons: its text
+        assert get(gw, "/v6/g6", ["X-Forwarded-For: 2001:db8:::2"])[0] == 200
+        # A literal that is only a prefix of the long form of another address does not share a bucket with it.
+        assert get(gw, "/v6/g7", ["X-Forwarded-For: 2001:db8:7:7::1"])[0] == 200
+        assert get(gw, "/v6/g8", ["X-Forwarded-For: 2001:db8:7:7"])[0] == 200
+
+    def a_prefix_of_128_tells_every_address_apart_and_a_prefix_of_48_aggregates_more(gw, up, ws):
+        x = lambda v: ["X-Forwarded-For: " + v + ", 9.9.9.9"]
+        assert get(gw, "/v6x/a", x("2001:db8:1:1::1"))[0] == 200
+        assert get(gw, "/v6x/b", x("2001:db8:1:1::2"))[0] == 200                          # the same /64, a different address
+        assert get(gw, "/v6x/c", x("2001:db8:1:1:0:0:0:1"))[0] == 429                      # the same address, written another way
+        assert get(gw, "/v6x/d", x("[2001:db8:1:1::2]:80"))[0] == 429
+        n = lambda v: ["X-Forwarded-For: 9.9.9.9, " + v]
+        assert get(gw, "/v6n/a", n("2001:db8:1:1::1"))[0] == 200
+        assert get(gw, "/v6n/b", n("2001:db8:1:2::1"))[0] == 429                          # the same /48
+        assert get(gw, "/v6n/c", n("2001:db8:1:ffff:ffff:ffff:ffff:ffff"))[0] == 429
+        assert get(gw, "/v6n/d", n("2001:db8:2:1::1"))[0] == 200                          # another /48
+
     def the_counters_agree_with_what_the_clients_were_told(gw, up, ws):
         # Counted here from the log, which was written from the same record the client's answer was.
         lines = gw.lines()
-        for name in ("rroute", "fill", "rkey", "absent", "xl", "xf", "small", "other", "both", "slow", "wsr", "open"):
+        for name in ("rroute", "fill", "rkey", "absent", "xl", "xf", "small", "other", "both", "slow", "wsr", "open", "ceil", "ceilo", "ceilf", "wsc", "v6", "v6x", "v6n"):
             mine = [l for l in lines if l.get("route") == name and l.get("rule") == "limit.rate"]
             full = [l for l in lines if l.get("route") == name and l.get("rule") == "limit.rate-table"]
+            whole = [l for l in lines if l.get("route") == name and l.get("rule") == "limit.rate-route"]
             m = gw.route_metrics(name)
-            assert m["rate_limited"] == len(mine) and m["rate_table_full"] == len(full), (name, m["rate_limited"], len(mine), m["rate_table_full"], len(full))
-            assert m["requests"]["4xx"] >= len(mine) + len(full), (name, m["requests"])
+            assert m["rate_limited"] == len(mine) and m["rate_table_full"] == len(full) and m["rate_route_limited"] == len(whole), (name, m["rate_limited"], len(mine), m["rate_table_full"], len(full), m["rate_route_limited"], len(whole))
+            assert m["requests"]["4xx"] >= len(mine) + len(full) + len(whole), (name, m["requests"])
         assert gw.route_metrics("rroute")["rate_limited"] >= 9
         m = gw.metrics()
         assert m["refusals"]["limit.rate"] >= 20 and m["refusals"]["limit.rate-table"] == 1, m["refusals"]
-        assert list(gw.route_metrics("rroute"))[-4:] == ["rate_limited", "rate_table_full", "auth_refused", "jwt_refused"]   # the auth counters follow the rate-limit ones (docs/auth.md section 12)
+        assert m["refusals"]["limit.rate-route"] == sum(gw.route_metrics(n)["rate_route_limited"] for n in ("ceil", "ceilo", "ceilf", "wsc")) == 45, m["refusals"]
+        assert list(gw.route_metrics("rroute"))[-5:] == ["rate_limited", "rate_table_full", "rate_route_limited", "auth_refused", "jwt_refused"]   # the auth counters follow the rate-limit ones (docs/auth.md section 12)
         prom = gw.admin_get("/metrics?format=prometheus").decode()
         assert '# TYPE cancho_gateway_rate_limited_total counter' in prom and '# TYPE cancho_gateway_rate_table_full_total counter' in prom
         assert 'cancho_gateway_rate_limited_total{route="rroute"} %d' % gw.route_metrics("rroute")["rate_limited"] in prom
         assert 'cancho_gateway_rate_table_full_total{route="small"} 1' in prom
+        assert '# TYPE cancho_gateway_rate_route_limited_total counter' in prom
+        assert 'cancho_gateway_rate_route_limited_total{route="ceil"} %d' % gw.route_metrics("ceil")["rate_route_limited"] in prom and 'cancho_gateway_rate_route_limited_total{route="rroute"} 0' in prom
 
     def the_log_lines_of_a_limited_request_have_the_keys_of_every_other_refusal(gw, up, ws):
         lines = gw.lines()
         limited = next(l for l in lines if l.get("rule") == "limit.rate")
         other = next(l for l in lines if l.get("rule") == "route.none" or l.get("rule") == "limit.body") if any(l.get("rule") in ("route.none", "limit.body") for l in lines) else None
-        refusal = next(l for l in lines if l.get("outcome") == "refused" and l.get("rule") not in ("limit.rate", "limit.rate-table"))
+        refusal = next(l for l in lines if l.get("outcome") == "refused" and l.get("rule") not in ("limit.rate", "limit.rate-table", "limit.rate-route"))
         assert list(limited) == list(refusal), (list(limited), list(refusal))
+        assert list(next(l for l in lines if l.get("rule") == "limit.rate-route")) == list(refusal)
         assert other is None or list(limited) == list(other)
 
     def a_refusal_leaves_nothing_behind(gw, up, ws):

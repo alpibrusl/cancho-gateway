@@ -257,14 +257,23 @@ fn test_rate_refusals_are_counted_per_route_and_shown_in_both_formats() -> [] in
         metrics.rate_refused(stats, 2, true);
         metrics.rate_refused(stats, 0 - 1, false);
         metrics.rate_refused(stats, 3, true);
+        // The ceiling's refusals (slot 40): counted for the route, not for another, and not for a route that is not there.
+        metrics.rate_route_refused(stats, 2);
+        metrics.rate_route_refused(stats, 2);
+        metrics.rate_route_refused(stats, 2);
+        metrics.rate_route_refused(stats, 0 - 1);
+        metrics.rate_route_refused(stats, 3);
         let out = alloc_slice[a](metrics.worst_case(), byte_of(0));
         let n = metrics.prometheus(out, 0, stats, names, g);
         test.assert(n > 0);
         test.assert(contains(out[0..n], "cancho_gateway_rate_limited_total{route=\"web\"} 2\n"));
         test.assert(contains(out[0..n], "cancho_gateway_rate_table_full_total{route=\"web\"} 1\n"));
         test.assert(contains(out[0..n], "cancho_gateway_rate_limited_total{route=\"api\"} 0\n"));
+        test.assert(contains(out[0..n], "cancho_gateway_rate_route_limited_total{route=\"web\"} 3\n"));
+        test.assert(contains(out[0..n], "cancho_gateway_rate_route_limited_total{route=\"api\"} 0\n"));
+        test.assert(contains(out[0..n], "# TYPE cancho_gateway_rate_route_limited_total counter\n"));
         let j = metrics.json(out, 0, stats, names, g);
-        test.assert(contains(out[0..j], "\"rate_limited\":2,\"rate_table_full\":1,\"auth_refused\":{"));
+        test.assert(contains(out[0..j], "\"rate_limited\":2,\"rate_table_full\":1,\"rate_route_limited\":3,\"auth_refused\":{"));
     }
     return 0;
 }

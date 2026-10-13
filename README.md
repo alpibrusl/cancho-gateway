@@ -25,7 +25,7 @@ is `docs/design.md`.
 ## Intended scope (v1)
 
 A route table to a fixed set of upstreams; header sanitising (hop-by-hop headers, `Forwarded`, request id); per-route
-size and time limits; per-route rate limiting from the clock (built: `docs/ratelimit.md`); API-key verification (built: `docs/auth.md`) and EdDSA JWT verification (built: `docs/jwt.md`; HMAC, RSA and ECDSA tokens are not: cancho has the
+size and time limits; per-route rate limiting from the clock, per key and optionally for the whole route, with IPv6 clients aggregated on a prefix when the key is an `X-Forwarded-For` element (built: `docs/ratelimit.md`); API-key verification (built: `docs/auth.md`) and EdDSA JWT verification (built: `docs/jwt.md`; HMAC, RSA and ECDSA tokens are not: cancho has the
 primitives, but HMAC needs a secret the binary must not hold); upstream connection reuse; health checks; an access log. HTTP/1.1, over plain TCP or TLS 1.3 from the client side.
 
 Not in v1: HTTP/2 and gRPC, TLS to the upstreams, client certificates, caching, response rewriting, dynamic upstream

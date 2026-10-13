@@ -46,6 +46,14 @@ Against an upstream the test can take down and bring back (it shuts the listenin
 - a trial whose client leaves mid-upload, and a trial the gateway refuses itself, are handed back and the next request is admitted;
 - other upstreams keep answering while one circuit is open; with `circuit_threshold = 0`, eight failures in a row never open it.
 
+**Added later (the second slice of rate limiting, `docs/ratelimit.md` sections 13.3 and 14.3):** the pieces above each stop at a verdict (a 503, a 200); none counted what reached
+the upstream. `the_half_open_trial_has_one_life_from_open_to_closed` does, on an upstream that stays up throughout: an open circuit lets **no** connection through (eight refused, the
+upstream's accepted count unchanged); after the period five simultaneous requests make **exactly one** connection; that one is unreadable, so it fails and the circuit reopens for a
+**full** period (refused at once and again 0.7 s later, no connection); after that period five simultaneous requests again make exactly one connection, which succeeds, closes the circuit,
+and forgets the failures (four simultaneous requests are then all admitted, and it takes three fresh failures to open it again). It found no bug; it has a mutant for each transition
+(`tests/ratelimit_mutants.py`, ids `x01` to `x09`), and the first slice's claim that the half-open trial is one request is now measured by the upstream's own count rather than inferred
+from four refusals and a 200.
+
 ## 3. Mutants, survivors, and what the tests found
 
 Each killed by the test named: the circuit never opening; an open circuit admitting everything; a success not resetting the count; a
