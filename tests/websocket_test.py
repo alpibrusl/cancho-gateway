@@ -363,6 +363,15 @@ class WsUpstream:
             lines.append("Transfer-Encoding: chunked")
         elif mode == "ext":
             lines.append("Sec-WebSocket-Extensions: permessage-deflate")
+        elif mode == "extparams":
+            lines.append("Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_max_window_bits=15")
+        elif mode == "extupper":
+            lines.append("SEC-WEBSOCKET-EXTENSIONS: x-webkit-deflate-frame")
+        elif mode == "extdup":
+            lines.append("Sec-WebSocket-Extensions: permessage-deflate")
+            lines.append("Sec-WebSocket-Extensions: permessage-deflate")
+        elif mode == "extempty":
+            lines.append("Sec-WebSocket-Extensions:")
         if mode == "badproto":
             lines.append("Sec-WebSocket-Protocol: mqtt")
         elif mode == "noproto":
@@ -739,6 +748,26 @@ class Main:
         assert h["x-custom"] == ["kept"] and h["via"] == ["1.1 cancho-gateway"] and h["x-forwarded-host"] == ["csms.example"], h
         assert lines[-4:-2] == ["Connection: Upgrade", "Upgrade: websocket"], lines
         assert "Connection: close" not in up.heads[n].decode(), "Connection: close must not be written on an upgrade"
+
+    def an_offer_of_permessage_deflate_in_any_spelling_is_never_passed_on_or_accepted(gw, up):
+        # docs/websocket-deflate.md section 3: the offer is stripped, so the tunnel is uncompressed; a client that believes it was
+        # negotiated anyway and sends an RSV1 frame is closed 1002 (ws.frame-rsv), not inflated.
+        offers = [["Sec-WebSocket-Extensions: permessage-deflate"],
+                  ["Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits; server_no_context_takeover"],
+                  ["SEC-WEBSOCKET-EXTENSIONS: permessage-deflate", "sec-websocket-extensions: x-webkit-deflate-frame"],
+                  ["Sec-WebSocket-Extensions: permessage-deflate", "Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits=9"]]
+        for extra in offers:
+            n = len(up.heads)
+            ws = connect_ws(gw, "/v16/CP004", extra=extra, origin=None)
+            assert "sec-websocket-extensions" not in ws.headers, ws.headers
+            h = pt.heads_of(up.heads[n])
+            assert "sec-websocket-extensions" not in h and b"deflate" not in up.heads[n].lower(), up.heads[n]
+            echo_roundtrip(ws)
+            key = b"\x01\x02\x03\x04"
+            ws.sock.sendall(bytes([0xC1, 0x82]) + key + bytes(b ^ key[i % 4] for i, b in enumerate(b"hi")))
+            op, payload = ws.recv()
+            assert op == 8 and payload[:2] == (1002).to_bytes(2, "big"), (op, payload)
+            ws.sock.close()
 
     def the_access_log_line_of_a_tunnel(gw, up):
         n0 = len(gw.lines())
@@ -1133,7 +1162,8 @@ class Main:
     def the_upstreams_refusals_of_the_upgrade_each_have_their_tag(gw, up):
         cases = [("badaccept", "ws.upstream-accept"), ("noaccept", "ws.upstream-accept"), ("twoaccept", "ws.upstream-accept"),
                  ("noupgrade", "ws.upstream-upgrade"), ("noconn", "ws.upstream-upgrade"), ("cl", "ws.upstream-upgrade"), ("te", "ws.upstream-upgrade"),
-                 ("badproto", "ws.upstream-subprotocol"), ("noproto", "ws.upstream-subprotocol"), ("ext", "ws.upstream-extensions")]
+                 ("badproto", "ws.upstream-subprotocol"), ("noproto", "ws.upstream-subprotocol"), ("ext", "ws.upstream-extensions"),
+                 ("extparams", "ws.upstream-extensions"), ("extupper", "ws.upstream-extensions"), ("extdup", "ws.upstream-extensions"), ("extempty", "ws.upstream-extensions")]
         for mode, tag in cases:
             raw, _ = request_bytes("/bad/" + mode)
             got = refused(raw_exchange(gw, raw))
