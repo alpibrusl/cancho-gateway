@@ -41,7 +41,7 @@ is enforced (reserved bits and opcodes, control frames, masking in the right dir
 (default 1 MiB, counted over its fragments) and invalid UTF-8 in a text message are refused, and a violation never reaches the other side. The gateway now sends **Close frames** of its own at
 frame boundaries (1001 for a timer, 1002/1007/1009 for the client's fault, 1011 to a client whose upstream broke the rules), waits a bounded time for the echo (`ws_close_ms`) and passes a
 peer's Close through. An optional **keepalive** (`ws_ping_ms`, `ws_pong_ms`) Pings a silent charger and closes it when the Pong does not come, so a charger whose NAT mapping died frees its slot in
-seconds instead of at the idle timeout; the upstream never sees the gateway's Ping or its Pong. **Not done:** `permessage-deflate` (stripped), per-message rate limits,
+seconds instead of at the idle timeout; the upstream never sees the gateway's Ping or its Pong. **Not done:** `permessage-deflate` (stripped, and why: `docs/websocket-deflate.md`), per-message rate limits,
 TLS to the upstream, and more than 127 concurrent tunnels (the slot table's size).
 
 **OCPP-J message validation, built 2026-10-12 (slice 3).** A route with `ws_ocpp = "1.6"`, `"2.0.1"` or a list of both (its `subprotocols` must be exactly the matching `ocpp...` tokens) checks that every

@@ -158,6 +158,9 @@ REFUSALS = [
     ("config.websocket", 2, WS + 'ws_max_tunnels = 128\n' + WSR),
     ("config.websocket", 2, WS + 'ws_max_tunnels = -1\n' + WSR),
     ("config.websocket", 2, WS + 'ws_max_tunnels = "64"\n' + WSR),
+    # --- permessage-deflate is not supported and has no key (docs/websocket-deflate.md section 6): a deployment that asks for it is told so, not ignored
+    ("config.unknown-key", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nws_extensions = "permessage-deflate"\n'),
+    ("config.unknown-key", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nws_compression = true\n'),
     # --- OCPP-J validation (docs/ocpp.md section 7): the key needs the websocket flag, a version or a list of distinct versions, and exactly the matching subprotocols
     ("config.websocket", 8, UP + R + 'path_prefix = "/"\nws_ocpp = "1.6"\n'),
     ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = false\nws_ocpp = "1.6"\n'),

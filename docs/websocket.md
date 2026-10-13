@@ -24,7 +24,7 @@ read WebSocket frames.
 | not done | why |
 |---|---|
 | interpreting frames: ping/pong policy, close handshake, message size limits, fragmentation limits, UTF-8 validation *(done in slice 2, 2026-10-12: `docs/websocket-frames.md`)* | a byte tunnel is the smallest thing that carries OCPP; each of these is a later decision with its own gate (section 10 says what its absence costs) |
-| `permessage-deflate` and every other extension | stripped from the request (section 5), so none is negotiated; an upstream that answers with one is refused (`ws.upstream-extensions`) |
+| `permessage-deflate` and every other extension (*decided: `docs/websocket-deflate.md`*) | stripped from the request (section 5), so none is negotiated; an upstream that answers with one is refused (`ws.upstream-extensions`) |
 | a gateway-originated ping, or any idle keepalive | **none in slice 1** (section 8; *slice 2 adds an optional one*). The idle timeout is the only liveness rule |
 | TLS to the upstream (`wss` upstream) | the upstream side is plain, as everywhere else in the gateway (`docs/tls.md` section 2) |
 | routing a connection by its `Sec-WebSocket-Protocol` | the route is chosen by `Host`, path and method as for any request |

@@ -197,7 +197,7 @@ The parser touches **headers** and **text payload** byte by byte; every other pa
 
 | not done | why / what it would take |
 |---|---|
-| `permessage-deflate` and other extensions | stripped at the request (slice 1); with RSV bits judged here an extension would need the parser to know its framing: a decision for its own slice, and `ws_max_message_bytes` would have to bound the *inflated* size |
+| `permessage-deflate` and other extensions | *decided against, with measurements and the steps it would take: `docs/websocket-deflate.md`.* Stripped at the request (slice 1); with RSV bits judged here an extension would need the parser to know its framing: a decision for its own slice, and `ws_max_message_bytes` would have to bound the *inflated* size |
 | **OCPP-J message validation** | out of scope here; *built in slice 3 (`docs/ocpp.md`), as a streaming recogniser rather than as this row proposed.* The row as written: A next slice could read the first bytes of a **text message** (`[2,"<unique id>","Action",{...}]` and the `3` and `4` shapes): check the message type id and that the unique id is a string of at most 36 characters, and refuse a Call over the route's limit by its action; it would need to hold the first ~60 bytes of a message (a bounded prefix, the same trick as the header) and would not need a JSON parser; a JSON-schema check would need one |
 | per-message rate limiting | a token bucket per tunnel keyed on messages, using the parser's message count; the buckets exist (`docs/ratelimit.md`) but are per request, not per tunnel |
 | a binary versus text policy | `ws_binary = false` per route would refuse opcode 2 at the header (OCPP-J is text only); trivial given the parser, not asked |
