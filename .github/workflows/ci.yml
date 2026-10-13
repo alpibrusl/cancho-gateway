@@ -99,6 +99,10 @@ jobs:
           python3 -m pip install websockets==17.2
           python3 tests/wsframes_test.py
 
+      - name: OCPP-J message validation (docs/ocpp.md) - every refusal in both directions, valid traffic byte for byte, and a differential of the gateway against a reference of the grammar and Python's json.loads on mutated messages; the mutants are run by hand (tests/ocpp_mutants.py)
+        working-directory: gateway
+        run: python3 tests/ocpp_test.py
+
       - name: Rate limiting (docs/ratelimit.md) against a recording upstream, plain, over TLS and with WebSocket upgrades; the mutants are run by hand (tests/ratelimit_mutants.py)
         working-directory: gateway
         run: python3 tests/ratelimit_test.py

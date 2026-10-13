@@ -1,0 +1,952 @@
+edition 5;
+
+import std.bytes;
+import std.test;
+import gateway.wsframe;
+
+// The OCPP-J recogniser of docs/ocpp.md, through the frame parser that steps it (`wsframe.scan` with the direction's flag on): every message of section 3's grammar, every refusal of
+// its table, each in both directions and at every split of the stream, fragmented, and on random mutations. A message is judged byte by byte as it goes by, so the verdict must not
+// depend on where the reads were cut: that is the property most of this file asserts.
+
+fn put[&b](buf: &!b [byte], at: int, v: int) -> [] int {
+    buf[at] = byte_of(v);
+    return at + 1;
+}
+
+fn cat[&b, &p](buf: &!b [byte], at: int, s: &p [byte]) -> [] int {
+    var i = 0;
+    while i < len(s) {
+        buf[at + i] = s[i];
+        i = i + 1;
+    }
+    return at + len(s);
+}
+
+// A frame of `payload`, masked with `key` if `masked` (the length classes up to 65535 are enough here).
+fn frame[&b, &p](buf: &!b [byte], at: int, fin: int, op: int, masked: bool, key: int, payload: &p [byte]) -> [] int {
+    var a = at;
+    var m = 0;
+    if masked {
+        m = 128;
+    }
+    a = put(buf, a, fin * 128 + op);
+    let n = len(payload);
+    if n < 126 {
+        a = put(buf, a, m + n);
+    } else {
+        a = put(buf, a, m + 126);
+        a = put(buf, a, n / 256);
+        a = put(buf, a, n % 256);
+    }
+    if masked {
+        a = put(buf, a, key / 16777216 % 256);
+        a = put(buf, a, key / 65536 % 256);
+        a = put(buf, a, key / 256 % 256);
+        a = put(buf, a, key % 256);
+    }
+    var j = 0;
+    while j < n {
+        var c = int_of(payload[j]);
+        if masked {
+            c = c ^ key >> 8 * (3 - j % 4) & 255;
+        }
+        a = put(buf, a, c);
+        j = j + 1;
+    }
+    return a;
+}
+
+fn fresh[&t](ws: &!t [int], on: bool) -> [] int {
+    wsframe.init(ws, 0);
+    if on {
+        wsframe.enable_ocpp(ws);
+    }
+    return 0;
+}
+
+// What a drive saw: bytes forwarded, the rule (0 none), 1 if the violation was at a frame boundary, bytes left waiting.
+fn drive[&t, &w, &d](ws: &!t [int], work: &!w [byte], data: &d [byte], dir: int, c1: int, c2: int) -> [] (int, int, int, int) {
+    var have = 0;
+    var forwarded = 0;
+    var piece = 0;
+    let b = wsframe.dir_base(dir);
+    while piece < 3 {
+        var lo = 0;
+        var hi = c1;
+        if piece == 1 {
+            lo = c1;
+            hi = c2;
+        } else if piece == 2 {
+            lo = c2;
+            hi = len(data);
+        }
+        copy_into(work[have..have + hi - lo], data[lo..hi]);
+        have = have + hi - lo;
+        var again = true;
+        while again {
+            again = false;
+            let n = wsframe.scan(ws, dir, work[0..have], 1048576, false, false);
+            test.assert(n >= 0 && n <= have);
+            let ev = ws[b + 14];
+            copy_into(work[0..have - n], work[n..have]);
+            have = have - n;
+            forwarded = forwarded + n;
+            if ev == 1 {
+                return (forwarded, ws[b + 15], ws[b + 17], have);
+            }
+            if n > 0 {
+                again = true;
+            } else {
+                test.assert(have < 14);
+            }
+        }
+        piece = piece + 1;
+    }
+    return (forwarded, 0, 0, have);
+}
+
+// Feed `data` one byte at a time.
+fn bytewise[&t, &w, &d](ws: &!t [int], work: &!w [byte], data: &d [byte], dir: int) -> [] (int, int) {
+    var have = 0;
+    var forwarded = 0;
+    var i = 0;
+    let b = wsframe.dir_base(dir);
+    while i < len(data) {
+        work[have] = data[i];
+        have = have + 1;
+        i = i + 1;
+        var again = true;
+        while again {
+            again = false;
+            let n = wsframe.scan(ws, dir, work[0..have], 1048576, false, false);
+            let ev = ws[b + 14];
+            copy_into(work[0..have - n], work[n..have]);
+            have = have - n;
+            forwarded = forwarded + n;
+            if ev == 1 {
+                return (forwarded, ws[b + 15]);
+            }
+            if n > 0 {
+                again = true;
+            }
+        }
+    }
+    return (forwarded, 0);
+}
+
+// `data`, a whole stream in direction `dir`, has the verdict `rule` (0: valid and forwarded whole) however it is cut: whole, in three pieces at every pair of cut points (a stride
+// for the long ones) and byte by byte. A refusal fed whole forwards nothing and is at a frame boundary (the frame is never half sent); cut, never more than the stream.
+fn verdict_everywhere[&t, &w, &d](ws: &!t [int], work: &!w [byte], data: &d [byte], dir: int, rule: int, lead: int) -> [] int {
+    fresh(ws, true);
+    let (f0, r0, bd0, h0) = drive(ws, work, data, dir, len(data), len(data));
+    test.assert_eq(r0, rule);
+    if rule == 0 {
+        test.assert_eq(f0, len(data));
+        test.assert_eq(h0, 0);
+    } else {
+        test.assert_eq(f0, lead);
+        test.assert_eq(bd0, 1);
+    }
+    var step = 1;
+    if len(data) > 70 {
+        step = 3;
+    }
+    var c1 = 0;
+    while c1 <= len(data) {
+        var c2 = c1;
+        while c2 <= len(data) {
+            fresh(ws, true);
+            let (f, r, bd, h) = drive(ws, work, data, dir, c1, c2);
+            test.assert_eq(r, rule);
+            test.assert(f <= len(data));
+            if rule == 0 {
+                test.assert_eq(f, len(data));
+            }
+            c2 = c2 + step * 2 + 1;
+        }
+        c1 = c1 + step;
+    }
+    fresh(ws, true);
+    let (fb, rb) = bytewise(ws, work, data, dir);
+    test.assert_eq(rb, rule);
+    if rule == 0 {
+        test.assert_eq(fb, len(data));
+    }
+    return 0;
+}
+
+// The message `msg` as one text frame, client's and server's, has verdict `rule`.
+fn verdict[&m](msg: &m [byte], rule: int) -> [] int {
+    region a {
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
+        let work = alloc_slice[a](len(msg) + 64, byte_of(0));
+        let buf = alloc_slice[a](len(msg) + 64, byte_of(0));
+        var n = frame(buf, 0, 1, 1, true, 305419896, msg);
+        verdict_everywhere(ws, work, buf[0..n], 0, rule, 0);
+        n = frame(buf, 0, 1, 1, false, 0, msg);
+        verdict_everywhere(ws, work, buf[0..n], 1, rule, 0);
+    }
+    return 0;
+}
+
+fn good[&m](msg: &m [byte]) -> [] int {
+    return verdict(msg, 0);
+}
+
+fn bad[&m](msg: &m [byte], rule: int) -> [] int {
+    return verdict(msg, rule);
+}
+
+// The rules of docs/ocpp.md section 3.
+fn r_binary() -> [] int {
+    return 17;
+}
+
+fn r_json() -> [] int {
+    return 18;
+}
+
+fn r_type() -> [] int {
+    return 19;
+}
+
+fn r_arity() -> [] int {
+    return 20;
+}
+
+fn r_id() -> [] int {
+    return 21;
+}
+
+fn r_action() -> [] int {
+    return 22;
+}
+
+fn r_payload() -> [] int {
+    return 23;
+}
+
+fn r_code() -> [] int {
+    return 24;
+}
+
+fn r_depth() -> [] int {
+    return 25;
+}
+
+fn test_the_tags_and_codes_are_the_documented_ones() -> [] int {
+    test.assert_eq(wsframe.rule_count(), 25);
+    test.assert(bytes.equal(wsframe.tag(17), "ws.ocpp-binary"));
+    test.assert(bytes.equal(wsframe.tag(18), "ws.ocpp-json"));
+    test.assert(bytes.equal(wsframe.tag(19), "ws.ocpp-type"));
+    test.assert(bytes.equal(wsframe.tag(20), "ws.ocpp-arity"));
+    test.assert(bytes.equal(wsframe.tag(21), "ws.ocpp-id"));
+    test.assert(bytes.equal(wsframe.tag(22), "ws.ocpp-action"));
+    test.assert(bytes.equal(wsframe.tag(23), "ws.ocpp-payload"));
+    test.assert(bytes.equal(wsframe.tag(24), "ws.ocpp-code"));
+    test.assert(bytes.equal(wsframe.tag(25), "ws.ocpp-depth"));
+    // 1008 for the policy refusals (binary, nesting), 1007 for a message that is not a well-formed frame.
+    test.assert_eq(wsframe.own_code(17), 1008);
+    test.assert_eq(wsframe.own_code(25), 1008);
+    var r = 18;
+    while r < 25 {
+        test.assert_eq(wsframe.own_code(r), 1007);
+        r = r + 1;
+    }
+    test.assert(wsframe.is_ocpp(17) && wsframe.is_ocpp(25));
+    test.assert(!wsframe.is_ocpp(16) && !wsframe.is_ocpp(11) && !wsframe.is_ocpp(26) && !wsframe.is_ocpp(0));
+    return 0;
+}
+
+fn test_the_state_block_holds_the_recogniser_and_nothing_is_on_by_default() -> [] int {
+    test.assert_eq(wsframe.state_len(), 72);
+    region a {
+        let ws = alloc_slice[a](wsframe.state_len(), 7);
+        wsframe.init(ws, 5);
+        var i = 0;
+        while i < wsframe.state_len() {
+            if i == 12 {
+                test.assert_eq(ws[i], 5);
+            } else {
+                test.assert_eq(ws[i], 0);
+            }
+            i = i + 1;
+        }
+        wsframe.enable_ocpp(ws);
+        test.assert_eq(ws[wsframe.dir_base(0) + 27], 1);
+        test.assert_eq(ws[wsframe.dir_base(1) + 27], 1);
+    }
+    return 0;
+}
+
+fn test_valid_messages_of_every_type_pass_at_every_split() -> [] int {
+    good("[2,\"19223201\",\"BootNotification\",{\"chargePointVendor\":\"VendorX\",\"chargePointModel\":\"SingleSocketCharger\"}]");
+    good("[3,\"19223201\",{\"status\":\"Accepted\",\"currentTime\":\"2013-02-01T20:53:32.486Z\",\"interval\":300}]");
+    good("[4,\"19223201\",\"NotImplemented\",\"unknown action\",{}]");
+    good("[2,\"a\",\"B\",{}]");
+    good("[3,\"a\",{}]");
+    good("[4,\"a\",\"C\",\"\",{}]");
+    good("[4,\"a\",\"C\",\"d\",{\"x\":[1,2]}]");
+    return 0;
+}
+
+fn test_whitespace_is_allowed_between_tokens_and_nowhere_inside_one() -> [] int {
+    good(" [ 2 , \"a\" , \"B\" , { } ] ");
+    good("\t\r\n[\n2,\n\"a\",\n\"B\",\n{\n\"k\"\n:\n[\n1\n,\n2\n]\n}\n]\n");
+    good("[2,\"a\",\"B\",{\"k\" : \"v\" , \"l\" : [ ] , \"m\" : { } }]");
+    // inside a restricted string a space is a character (0x20 is allowed in an id); in a number or a literal it is the end of the token
+    good("[2,\"a b\",\"B\",{}]");
+    bad("[2,\"a\",\"B C\",{}]", r_action());
+    bad("[2,\"a\",\"B\",{\"k\":tr ue}]", r_json());
+    bad("[2,\"a\",\"B\",{\"k\":1 2}]", r_json());
+    bad("[ 2 2,\"a\",\"B\",{}]", r_type());
+    bad("[2,\"a\",\"B\",{\"k\":-\n1}]", r_json());
+    return 0;
+}
+
+fn test_every_json_value_kind_in_a_payload_is_accepted() -> [] int {
+    good("[2,\"x\",\"A\",{\"a\":[1,-2,0,0.5,-0.5e+10,1E-2,1e5,10,-0,0e0,123456789012345678901234567890,true,false,null,\"s\",{\"n\":{}},[]],\"b\":{\"c\":[[[]]]},\"\":0}]");
+    good("[2,\"x\",\"A\",{\"s\":\"\\\"\\\\\\/\\b\\f\\n\\r\\t\\u00e9\\uD83D\\uDE00\\u0000\"}]");
+    good("[3,\"x\",{\"a\":null,\"b\":true,\"c\":false}]");
+    good("[2,\"x\",\"A\",{\"a\":[[],[[]],{},{\"b\":[{}]}]}]");
+    return 0;
+}
+
+fn test_json_that_is_not_json_is_refused_inside_a_payload() -> [] int {
+    bad("[2,\"a\",\"B\",{\"a\" 1}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\"}]", r_json());
+    bad("[2,\"a\",\"B\",{a:1}]", r_json());
+    bad("[2,\"a\",\"B\",{'a':1}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":1,}]", r_json());
+    bad("[2,\"a\",\"B\",{,}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":1 \"b\":2}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":[1,]}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":[,1]}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":[1 2]}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":[1}}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":{]}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":{\"b\":1]}]", r_json());
+    bad("[2,\"a\",\"B\",{1:1}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":tru}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":truE}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":nul}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":nulll}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":falsy}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":True}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":NaN}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":undefined}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":01}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":+1}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":.5}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":1.}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":-}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":1e}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":1e+}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":1e-}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":1e+}}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":1e-}}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":1e+,\"b\":2}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":1.e1}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":0x10}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":--1}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":1-}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":\"\\x\"}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":\"\\u12G4\"}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":\"\\u12\"}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":\"\\u00e\"}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":\"\\'\"}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":\"line\nbreak\"}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":\"tab\there\"}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":\"unterminated}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\\\":1}]", r_json());
+    return 0;
+}
+
+fn test_a_message_that_is_not_an_array_or_does_not_end_right_is_refused() -> [] int {
+    bad("", r_json());
+    bad("   ", r_json());
+    bad("{}", r_json());
+    bad("\"x\"", r_json());
+    bad("2", r_json());
+    bad("null", r_json());
+    bad("abc", r_json());
+    bad("x[2,\"a\",\"B\",{}]", r_json());
+    bad("[2,\"a\",\"B\",{}]x", r_json());
+    bad("[2,\"a\",\"B\",{}] ]", r_json());
+    bad("[2,\"a\",\"B\",{}][2,\"a\",\"B\",{}]", r_json());
+    bad("[2,\"a\",\"B\",{}] ,", r_json());
+    bad("[2,\"a\",\"B\",{}", r_json());
+    bad("[2,\"a\",\"B\",{", r_json());
+    bad("[2,\"a\",\"B\",", r_json());
+    bad("[2,\"a\",\"B\"", r_json());
+    bad("[2,\"a", r_json());
+    bad("[2,", r_json());
+    bad("[2", r_json());
+    bad("[", r_json());
+    return 0;
+}
+
+fn test_the_message_type_is_the_digit_2_3_or_4() -> [] int {
+    bad("[]", r_type());
+    bad("[1,\"a\",\"B\",{}]", r_type());
+    bad("[0,\"a\",\"B\",{}]", r_type());
+    bad("[5,\"a\",\"B\",{}]", r_type());
+    bad("[6,\"a\",\"B\",{}]", r_type());
+    bad("[9,\"a\",\"B\",{}]", r_type());
+    bad("[22,\"a\",\"B\",{}]", r_type());
+    bad("[02,\"a\",\"B\",{}]", r_type());
+    bad("[2.0,\"a\",\"B\",{}]", r_type());
+    bad("[2e0,\"a\",\"B\",{}]", r_type());
+    bad("[-2,\"a\",\"B\",{}]", r_type());
+    bad("[\"2\",\"a\",\"B\",{}]", r_type());
+    bad("[true,\"a\",\"B\",{}]", r_type());
+    bad("[null,\"a\",\"B\",{}]", r_type());
+    bad("[[2],\"a\",\"B\",{}]", r_type());
+    bad("[{},\"a\",\"B\",{}]", r_type());
+    bad("[,2,\"a\",\"B\",{}]", r_type());
+    bad("[2x,\"a\",\"B\",{}]", r_type());
+    return 0;
+}
+
+fn test_the_arity_follows_the_type() -> [] int {
+    bad("[2]", r_arity());
+    bad("[2,\"a\"]", r_arity());
+    bad("[2,\"a\",\"B\"]", r_arity());
+    bad("[2,\"a\",\"B\",]", r_arity());
+    bad("[2,\"a\",\"B\",{},{}]", r_arity());
+    bad("[2,\"a\",\"B\",{},]", r_arity());
+    bad("[3]", r_arity());
+    bad("[3,\"a\"]", r_arity());
+    bad("[3,\"a\",{},{}]", r_arity());
+    bad("[3,\"a\",{},]", r_arity());
+    bad("[4]", r_arity());
+    bad("[4,\"a\"]", r_arity());
+    bad("[4,\"a\",\"C\"]", r_arity());
+    bad("[4,\"a\",\"C\",\"d\"]", r_arity());
+    bad("[4,\"a\",\"C\",\"d\",{},{}]", r_arity());
+    // the arity of a CALLRESULT is not a CALL's
+    bad("[3,\"a\",\"B\",{}]", r_payload());
+    return 0;
+}
+
+fn test_the_unique_id_is_a_short_plain_string() -> [] int {
+    good("[2,\"123456789012345678901234567890123456\",\"B\",{}]");
+    good("[2,\"a\",\"B\",{}]");
+    good("[2,\"!#$%&'()*+,-./:;<=>?@[]^_`{|}~\",\"B\",{}]");
+    bad("[2,\"1234567890123456789012345678901234567\",\"B\",{}]", r_id());
+    bad("[2,\"\",\"B\",{}]", r_id());
+    bad("[2,1,\"B\",{}]", r_id());
+    bad("[2,null,\"B\",{}]", r_id());
+    bad("[2,{},\"B\",{}]", r_id());
+    bad("[2,[],\"B\",{}]", r_id());
+    bad("[2,,\"B\",{}]", r_id());
+    bad("[2,true,\"B\",{}]", r_id());
+    bad("[2,\"a\\\"b\",\"B\",{}]", r_id());
+    bad("[2,\"a\\u0041\",\"B\",{}]", r_id());
+    bad("[2,\"a\\\\b\",\"B\",{}]", r_id());
+    bad("[2,\"a\tb\",\"B\",{}]", r_id());
+    bad("[3,\"\",{}]", r_id());
+    bad("[3,5,{}]", r_id());
+    bad("[4,\"\",\"C\",\"d\",{}]", r_id());
+    bad("[4,5,\"C\",\"d\",{}]", r_id());
+    // an unterminated id is a message that ends inside it
+    bad("[2,\"abc", r_json());
+    return 0;
+}
+
+fn test_a_non_ascii_or_delete_byte_in_an_id_is_refused_as_an_id() -> [] int {
+    region a {
+        let m = alloc_slice[a](64, byte_of(0));
+        var n = cat(m, 0, "[2,\"a");
+        n = put(m, n, 195);
+        n = put(m, n, 169);
+        n = cat(m, n, "\",\"B\",{}]");
+        bad(m[0..n], r_id());
+        n = cat(m, 0, "[2,\"a");
+        n = put(m, n, 127);
+        n = cat(m, n, "\",\"B\",{}]");
+        bad(m[0..n], r_id());
+        n = cat(m, 0, "[2,\"a");
+        n = put(m, n, 31);
+        n = cat(m, n, "\",\"B\",{}]");
+        bad(m[0..n], r_id());
+        n = cat(m, 0, "[2,\"a");
+        n = put(m, n, 0);
+        n = cat(m, n, "\",\"B\",{}]");
+        bad(m[0..n], r_id());
+    }
+    return 0;
+}
+
+fn test_the_action_and_the_error_code_are_letters_and_digits() -> [] int {
+    good("[2,\"a\",\"Get15118EVCertificate\",{}]");
+    good("[2,\"a\",\"PublishFirmwareStatusNotification\",{}]");
+    good("[2,\"a\",\"1234567890123456789012345678901234567890123456789012345678901234\",{}]");
+    good("[4,\"a\",\"OccurenceConstraintViolation\",\"d\",{}]");
+    bad("[2,\"a\",\"12345678901234567890123456789012345678901234567890123456789012345\",{}]", r_action());
+    bad("[2,\"a\",\"\",{}]", r_action());
+    bad("[2,\"a\",1,{}]", r_action());
+    bad("[2,\"a\",null,{}]", r_action());
+    bad("[2,\"a\",{},{}]", r_action());
+    bad("[2,\"a\",[],{}]", r_action());
+    bad("[2,\"a\",,{}]", r_action());
+    bad("[2,\"a\",\"Boot-Notification\",{}]", r_action());
+    bad("[2,\"a\",\"Boot_Notification\",{}]", r_action());
+    bad("[2,\"a\",\"Boot.Notification\",{}]", r_action());
+    bad("[2,\"a\",\"Boot\\u004eotification\",{}]", r_action());
+    bad("[2,\"a\",\"Boot\\nNotification\",{}]", r_action());
+    bad("[2,\"a\",\"/\",{}]", r_action());
+    bad("[2,\"a\",\"@\",{}]", r_action());
+    bad("[2,\"a\",\"[\",{}]", r_action());
+    bad("[2,\"a\",\"`\",{}]", r_action());
+    bad("[2,\"a\",\"{\",{}]", r_action());
+    bad("[2,\"a\",\":\",{}]", r_action());
+    bad("[4,\"a\",\"C-D\",\"d\",{}]", r_code());
+    bad("[4,\"a\",\"\",\"d\",{}]", r_code());
+    bad("[4,\"a\",1,\"d\",{}]", r_code());
+    bad("[4,\"a\",null,\"d\",{}]", r_code());
+    bad("[4,\"a\",{},\"d\",{}]", r_code());
+    bad("[4,\"a\",\"C\",1,{}]", r_code());
+    bad("[4,\"a\",\"C\",null,{}]", r_code());
+    bad("[4,\"a\",\"C\",{},{}]", r_code());
+    bad("[4,\"a\",\"C\",[],{}]", r_code());
+    bad("[4,\"a\",\"C\",,{}]", r_code());
+    return 0;
+}
+
+fn test_a_description_is_any_json_string() -> [] int {
+    region a {
+        let m = alloc_slice[a](96, byte_of(0));
+        var n = cat(m, 0, "[4,\"a\",\"C\",\"caf");
+        n = put(m, n, 195);
+        n = put(m, n, 169);
+        n = put(m, n, 226);
+        n = put(m, n, 130);
+        n = put(m, n, 172);
+        n = put(m, n, 240);
+        n = put(m, n, 159);
+        n = put(m, n, 152);
+        n = put(m, n, 128);
+        n = cat(m, n, " \\n \\u0041 \\\" \\\\\",{}]");
+        good(m[0..n]);
+        n = cat(m, 0, "[4,\"a\",\"C\",\"a");
+        n = put(m, n, 10);
+        n = cat(m, n, "b\",{}]");
+        bad(m[0..n], r_json());
+    }
+    return 0;
+}
+
+fn test_the_payload_and_the_details_are_objects() -> [] int {
+    bad("[2,\"a\",\"B\",[]]", r_payload());
+    bad("[2,\"a\",\"B\",\"x\"]", r_payload());
+    bad("[2,\"a\",\"B\",null]", r_payload());
+    bad("[2,\"a\",\"B\",1]", r_payload());
+    bad("[2,\"a\",\"B\",true]", r_payload());
+    bad("[2,\"a\",\"B\",,{}]", r_payload());
+    bad("[2,\"a\",\"B\",x]", r_payload());
+    bad("[3,\"a\",[]]", r_payload());
+    bad("[3,\"a\",\"x\"]", r_payload());
+    bad("[3,\"a\",null]", r_payload());
+    bad("[3,\"a\",0]", r_payload());
+    bad("[4,\"a\",\"C\",\"d\",[]]", r_payload());
+    bad("[4,\"a\",\"C\",\"d\",\"x\"]", r_payload());
+    bad("[4,\"a\",\"C\",\"d\",null]", r_payload());
+    bad("[4,\"a\",\"C\",\"d\",9]", r_payload());
+    return 0;
+}
+
+// An object nested `depth` levels deep (the payload's own braces are level 1), as `{"a":{"a":...{}...}}`, wrapped in a CALL.
+fn nested[&b](buf: &!b [byte], depth: int, open: int) -> [] int {
+    var n = cat(buf, 0, "[2,\"a\",\"B\",");
+    var i = 0;
+    while i < depth {
+        if i == 0 || open == 0 {
+            n = cat(buf, n, "{\"a\":");
+        } else {
+            n = cat(buf, n, "[");
+        }
+        i = i + 1;
+    }
+    n = cat(buf, n, "1");
+    // close in reverse
+    i = depth;
+    while i > 0 {
+        if i == 1 || open == 0 {
+            n = cat(buf, n, "}");
+        } else {
+            n = cat(buf, n, "]");
+        }
+        i = i - 1;
+    }
+    n = cat(buf, n, "]");
+    return n;
+}
+
+fn test_nesting_is_bounded_at_32_levels() -> [] int {
+    region a {
+        let m = alloc_slice[a](1024, byte_of(0));
+        var n = nested(m, 1, 0);
+        good(m[0..n]);
+        n = nested(m, 31, 0);
+        good(m[0..n]);
+        n = nested(m, 32, 0);
+        good(m[0..n]);
+        n = nested(m, 32, 1);
+        good(m[0..n]);
+        n = nested(m, 33, 0);
+        bad(m[0..n], r_depth());
+        n = nested(m, 33, 1);
+        bad(m[0..n], r_depth());
+        n = nested(m, 40, 0);
+        bad(m[0..n], r_depth());
+    }
+    return 0;
+}
+
+fn test_a_million_opening_brackets_are_refused_at_the_thirty_third() -> [] int {
+    region a {
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
+        let work = alloc_slice[a](8192, byte_of(0));
+        let buf = alloc_slice[a](8192, byte_of(0));
+        let m = alloc_slice[a](4096, byte_of(91));
+        var n = cat(work, 0, "[2,\"a\",\"B\",{\"k\":");
+        n = cat(work, n, m[0..3000]);
+        let f = frame(buf, 0, 1, 1, true, 99, work[0..n]);
+        fresh(ws, true);
+        let (fw, rw, bd, h) = drive(ws, work, buf[0..f], 0, f, f);
+        test.assert_eq(rw, r_depth());
+        test.assert_eq(fw, 0);
+        test.assert_eq(bd, 1);
+    }
+    return 0;
+}
+
+fn test_a_stack_of_mixed_containers_closes_in_the_right_order() -> [] int {
+    good("[2,\"a\",\"B\",{\"a\":[{\"b\":[{\"c\":[]}]},[[{}]]],\"d\":{\"e\":[{}]}}]");
+    bad("[2,\"a\",\"B\",{\"a\":[{\"b\":[}]}]}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":[{\"b\":[{]]}]}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":[{\"b\":1}}]}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":[1]}}]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":[1]]]", r_json());
+    bad("[2,\"a\",\"B\",{\"a\":[{}]}", r_json());
+    return 0;
+}
+
+fn test_a_binary_message_is_refused_at_its_header() -> [] int {
+    region a {
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
+        let work = alloc_slice[a](512, byte_of(0));
+        let buf = alloc_slice[a](512, byte_of(0));
+        var dir = 0;
+        while dir < 2 {
+            var n = frame(buf, 0, 1, 2, dir == 0, 77, "[2,\"a\",\"B\",{}]");
+            verdict_everywhere(ws, work, buf[0..n], dir, r_binary(), 0);
+            n = frame(buf, 0, 1, 2, dir == 0, 77, "");
+            verdict_everywhere(ws, work, buf[0..n], dir, r_binary(), 0);
+            n = frame(buf, 0, 0, 2, dir == 0, 77, "[2,");
+            n = frame(buf, n, 1, 0, dir == 0, 78, "\"a\",\"B\",{}]");
+            verdict_everywhere(ws, work, buf[0..n], dir, r_binary(), 0);
+            // a valid text message first: forwarded, then the binary one refused
+            let g = frame(buf, 0, 1, 1, dir == 0, 5, "[3,\"a\",{}]");
+            n = frame(buf, g, 1, 2, dir == 0, 6, "x");
+            fresh(ws, true);
+            let (f, r, bd, h) = drive(ws, work, buf[0..n], dir, n, n);
+            test.assert_eq(r, r_binary());
+            test.assert_eq(f, g);
+            test.assert_eq(bd, 1);
+            dir = dir + 1;
+        }
+    }
+    return 0;
+}
+
+// A message cut into frames at `cut` (a ping between them), the client's direction.
+fn fragmented[&t, &w, &b, &m](ws: &!t [int], work: &!w [byte], buf: &!b [byte], msg: &m [byte], rule: int) -> [] int {
+    var cut = 0;
+    while cut <= len(msg) {
+        var n = frame(buf, 0, 0, 1, true, 11, msg[0..cut]);
+        n = frame(buf, n, 1, 9, true, 12, "p");
+        n = frame(buf, n, 1, 0, true, 13, msg[cut..len(msg)]);
+        fresh(ws, true);
+        let (f, r, bd, h) = drive(ws, work, buf[0..n], 0, n, n);
+        test.assert_eq(r, rule);
+        if rule == 0 {
+            test.assert_eq(f, n);
+        }
+        fresh(ws, true);
+        let (fb, rb) = bytewise(ws, work, buf[0..n], 0);
+        test.assert_eq(rb, rule);
+        cut = cut + 1;
+    }
+    return 0;
+}
+
+fn test_a_fragmented_message_is_one_message_with_a_ping_between_its_fragments() -> [] int {
+    region a {
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
+        let work = alloc_slice[a](1024, byte_of(0));
+        let buf = alloc_slice[a](1024, byte_of(0));
+        fragmented(ws, work, buf, "[2,\"19223201\",\"BootNotification\",{\"a\":[1,-2.5e3,true,\"x\\u00e9y\"],\"b\":{}}]", 0);
+        fragmented(ws, work, buf, "[3,\"7\",{}]", 0);
+        fragmented(ws, work, buf, "[4,\"7\",\"GenericError\",\"why\",{}]", 0);
+        fragmented(ws, work, buf, "[2,\"a\",\"B\",{\"a\":tru}]", r_json());
+        fragmented(ws, work, buf, "[2,\"a\",\"B\",[]]", r_payload());
+        fragmented(ws, work, buf, "[7,\"a\",\"B\",{}]", r_type());
+        fragmented(ws, work, buf, "[2,\"a\",\"B\",{}", r_json());
+        fragmented(ws, work, buf, "[2,\"a\",\"B\",{}] x", r_json());
+        fragmented(ws, work, buf, "[2,\"a\",\"B\"]", r_arity());
+        fragmented(ws, work, buf, "[2,\"1234567890123456789012345678901234567\",\"B\",{}]", r_id());
+    }
+    return 0;
+}
+
+fn test_an_empty_final_fragment_ends_the_message() -> [] int {
+    region a {
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
+        let work = alloc_slice[a](512, byte_of(0));
+        let buf = alloc_slice[a](512, byte_of(0));
+        var n = frame(buf, 0, 0, 1, true, 3, "[2,\"a\",\"B\",{}]");
+        n = frame(buf, n, 1, 0, true, 4, "");
+        verdict_everywhere(ws, work, buf[0..n], 0, 0, 0);
+        // the frames before the one that ends the message have gone on; the last has not
+        var lead = frame(buf, 0, 0, 1, true, 3, "[2,\"a\",\"B\",{}");
+        n = frame(buf, lead, 1, 0, true, 4, "");
+        verdict_everywhere(ws, work, buf[0..n], 0, r_json(), lead);
+        lead = frame(buf, 0, 0, 1, true, 3, "");
+        lead = frame(buf, lead, 0, 0, true, 4, "");
+        n = frame(buf, lead, 1, 0, true, 5, "");
+        verdict_everywhere(ws, work, buf[0..n], 0, r_json(), lead);
+    }
+    return 0;
+}
+
+fn test_each_message_of_a_stream_starts_afresh() -> [] int {
+    region a {
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
+        let work = alloc_slice[a](1024, byte_of(0));
+        let buf = alloc_slice[a](1024, byte_of(0));
+        // a CALL, a CALLRESULT, a CALLERROR with nesting and a ping between: the stack, the depth and the element counter are reset by each
+        var n = frame(buf, 0, 1, 1, true, 3, "[2,\"a\",\"B\",{\"k\":[[[1]]]}]");
+        n = frame(buf, n, 1, 9, true, 4, "");
+        n = frame(buf, n, 1, 1, true, 5, "[3,\"a\",{}]");
+        n = frame(buf, n, 1, 1, true, 6, "[4,\"a\",\"C\",\"d\",{\"z\":{}}]");
+        n = frame(buf, n, 0, 1, true, 7, "[2,\"b\",");
+        n = frame(buf, n, 1, 0, true, 8, "\"B\",{}]");
+        n = frame(buf, n, 1, 1, true, 9, "[3,\"c\",{}]");
+        verdict_everywhere(ws, work, buf[0..n], 0, 0, 0);
+        // the same, then a bad one: the earlier messages are forwarded
+        let g = n;
+        n = frame(buf, n, 1, 1, true, 10, "[3,\"c\",[]]");
+        fresh(ws, true);
+        let (f, r, bd, h) = drive(ws, work, buf[0..n], 0, n, n);
+        test.assert_eq(r, r_payload());
+        test.assert_eq(f, g);
+        test.assert_eq(bd, 1);
+    }
+    return 0;
+}
+
+fn test_the_directions_do_not_share_a_recogniser() -> [] int {
+    region a {
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
+        let work = alloc_slice[a](1024, byte_of(0));
+        let c = alloc_slice[a](256, byte_of(0));
+        let s = alloc_slice[a](256, byte_of(0));
+        // half a message in each direction, alternately, in pieces: neither disturbs the other
+        let m1 = "[2,\"a\",\"B\",{\"k\":[1,2,{\"j\":\"v\"}]}]";
+        let m2 = "[3,\"a\",{\"status\":\"Accepted\"}]";
+        let n1 = frame(c, 0, 1, 1, true, 21, m1);
+        let n2 = frame(s, 0, 1, 1, false, 0, m2);
+        fresh(ws, true);
+        var i = 0;
+        var fc = 0;
+        var fs = 0;
+        var hc = 0;
+        var hs = 0;
+        let wc = alloc_slice[a](512, byte_of(0));
+        let wsv = alloc_slice[a](512, byte_of(0));
+        while i < 40 {
+            if i < n1 {
+                wc[hc] = c[i];
+                hc = hc + 1;
+            }
+            if i < n2 {
+                wsv[hs] = s[i];
+                hs = hs + 1;
+            }
+            let a1 = wsframe.scan(ws, 0, wc[0..hc], 1048576, false, false);
+            test.assert_eq(ws[wsframe.dir_base(0) + 14], 0);
+            copy_into(wc[0..hc - a1], wc[a1..hc]);
+            hc = hc - a1;
+            fc = fc + a1;
+            let a2 = wsframe.scan(ws, 1, wsv[0..hs], 1048576, false, false);
+            test.assert_eq(ws[wsframe.dir_base(1) + 14], 0);
+            copy_into(wsv[0..hs - a2], wsv[a2..hs]);
+            hs = hs - a2;
+            fs = fs + a2;
+            i = i + 1;
+        }
+        test.assert_eq(fc, n1);
+        test.assert_eq(fs, n2);
+    }
+    return 0;
+}
+
+fn test_a_route_without_the_flag_forwards_what_slice_two_did() -> [] int {
+    region a {
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
+        let work = alloc_slice[a](512, byte_of(0));
+        let buf = alloc_slice[a](512, byte_of(0));
+        // text that is not OCPP-J, and a binary message: both pass with the flag off
+        var n = frame(buf, 0, 1, 1, true, 3, "hello, this is not json");
+        n = frame(buf, n, 1, 2, true, 4, "[2,");
+        n = frame(buf, n, 1, 1, true, 5, "[9,{");
+        fresh(ws, false);
+        let (f, r, bd, h) = drive(ws, work, buf[0..n], 0, n, n);
+        test.assert_eq(r, 0);
+        test.assert_eq(f, n);
+        fresh(ws, false);
+        let (fb, rb) = bytewise(ws, work, buf[0..n], 0);
+        test.assert_eq(rb, 0);
+        test.assert_eq(fb, n);
+    }
+    return 0;
+}
+
+fn test_invalid_utf8_is_still_the_utf8_rule_not_an_ocpp_one() -> [] int {
+    region a {
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
+        let work = alloc_slice[a](256, byte_of(0));
+        let buf = alloc_slice[a](256, byte_of(0));
+        let m = alloc_slice[a](96, byte_of(0));
+        var n = cat(m, 0, "[2,\"a\",\"B\",{\"k\":\"");
+        n = put(m, n, 195);
+        n = put(m, n, 40);
+        n = cat(m, n, "\"}]");
+        let f = frame(buf, 0, 1, 1, true, 9, m[0..n]);
+        fresh(ws, true);
+        let (fw, rw, bd, h) = drive(ws, work, buf[0..f], 0, f, f);
+        test.assert_eq(rw, 11);
+        // a non-ASCII byte outside a string is valid UTF-8 and is not JSON
+        n = cat(m, 0, "[2,\"a\",\"B\",{\"k\":");
+        n = put(m, n, 195);
+        n = put(m, n, 169);
+        n = cat(m, n, "}]");
+        bad(m[0..n], r_json());
+        // a byte order mark first is valid UTF-8 and not an array
+        n = put(m, 0, 239);
+        n = put(m, n, 187);
+        n = put(m, n, 191);
+        n = cat(m, n, "[2,\"a\",\"B\",{}]");
+        bad(m[0..n], r_json());
+    }
+    return 0;
+}
+
+// A small generator with a fixed seed: 31-bit values.
+fn next(seed: int) -> [] int {
+    return (seed * 1103515245 + 12345) % 2147483648;
+}
+
+// Random mutations of valid messages and random bytes: whatever the verdict, it is the same whole, in three pieces and byte by byte, never more is answered than given, and nothing traps.
+fn test_random_mutations_have_one_verdict_however_the_stream_is_cut() -> [] int {
+    region a {
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
+        let work = alloc_slice[a](1024, byte_of(0));
+        let buf = alloc_slice[a](1024, byte_of(0));
+        let m = alloc_slice[a](512, byte_of(0));
+        let base = alloc_slice[a](256, byte_of(0));
+        let b1 = cat(base, 0, "[2,\"19223201\",\"BootNotification\",{\"a\":[1,-2.5e3,true,null,\"x\\u00e9y\\n\"],\"b\":{\"c\":{}},\"d\":false}]");
+        let b2 = cat(m, 0, "[4,\"77\",\"GenericError\",\"why\",{\"k\":[{}]}]");
+        var seed = 20261012;
+        var round = 0;
+        var accepted = 0;
+        while round < 3000 {
+            seed = next(seed);
+            var n = 0;
+            let kind = seed / 65536 % 5;
+            if kind == 0 {
+                n = cat(m, 0, base[0..b1]);
+            } else if kind == 1 {
+                n = cat(m, 0, "[4,\"77\",\"GenericError\",\"why\",{\"k\":[{}]}]");
+            } else if kind == 2 {
+                n = cat(m, 0, "[3,\"7\",{\"s\":\"a b\",\"n\":0.5}]");
+            } else if kind == 3 {
+                n = cat(m, 0, base[0..b1]);
+            } else {
+                seed = next(seed);
+                let want = seed / 65536 % 40;
+                while n < want {
+                    seed = next(seed);
+                    var c = seed / 65536 % 128;
+                    if seed / 16 % 2 == 0 {
+                        const_pick(m, n, seed / 65536 % 17);
+                    } else {
+                        m[n] = byte_of(c);
+                    }
+                    n = n + 1;
+                }
+            }
+            // up to three edits: replace, insert or delete a byte
+            seed = next(seed);
+            var edits = seed / 65536 % 4;
+            while edits > 0 && n > 0 {
+                seed = next(seed);
+                let at = seed / 65536 % n;
+                seed = next(seed);
+                let how = seed / 65536 % 3;
+                seed = next(seed);
+                let v = seed / 65536 % 128;
+                if how == 0 {
+                    m[at] = byte_of(v);
+                } else if how == 1 && n < 500 {
+                    copy_into(m[at + 1..n + 1], m[at..n]);
+                    m[at] = byte_of(v);
+                    n = n + 1;
+                } else if n > 0 {
+                    copy_into(m[at..n - 1], m[at + 1..n]);
+                    n = n - 1;
+                }
+                edits = edits - 1;
+            }
+            let f = frame(buf, 0, 1, 1, true, 12345, m[0..n]);
+            fresh(ws, true);
+            let (fw, rw, bd, hw) = drive(ws, work, buf[0..f], 0, f, f);
+            test.assert(fw >= 0 && fw <= f);
+            test.assert(rw == 0 || rw >= 17 && rw <= 25 || rw == 11);
+            if rw == 0 {
+                test.assert_eq(fw, f);
+                accepted = accepted + 1;
+            } else {
+                test.assert_eq(fw, 0);
+            }
+            seed = next(seed);
+            let c1 = seed / 65536 % (f + 1);
+            seed = next(seed);
+            var c2 = c1;
+            if f > c1 {
+                c2 = c1 + seed / 65536 % (f - c1 + 1);
+            }
+            fresh(ws, true);
+            let (f2, r2, bd2, h2) = drive(ws, work, buf[0..f], 0, c1, c2);
+            test.assert_eq(r2, rw);
+            fresh(ws, true);
+            let (f3, r3) = bytewise(ws, work, buf[0..f], 0);
+            test.assert_eq(r3, rw);
+            round = round + 1;
+        }
+        // the unedited ones are among them: the generator did not only make garbage
+        test.assert(accepted > 100);
+        test.assert(b2 > 0);
+    }
+    return 0;
+}
+
+// A byte that is likely to matter in JSON.
+fn const_pick[&b](m: &!b [byte], at: int, k: int) -> [] int {
+    let pool = "[]{}\",:\\-+.eE0123456789tfnaulsr ";
+    m[at] = pool[k];
+    return 0;
+}

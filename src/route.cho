@@ -378,6 +378,13 @@ pub fn rate_xff_prefix(index: int) -> [] int {
     return number(bytes.field(blob[at..line_end(blob, at)], 9, 31));
 }
 
+// The OCPP-J versions whose frames route `index` validates (docs/ocpp.md): 0 none, 1 for 1.6, 2 for 2.0.1, 3 for both.
+pub fn ws_ocpp(index: int) -> [] int {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return number(bytes.field(blob[at..line_end(blob, at)], 9, 32));
+}
+
 // JWT acceptance of route `index` (docs/jwt.md section 8; `auth` above is 1 for API keys, 2 for JWTs, 3 for both): the public-key indices it allows (`*` for all, else comma-separated),
 // the audience and issuer a token must carry (empty: not checked) and the leeway in seconds.
 pub fn jwt_keys(index: int) -> [] &static [byte] {

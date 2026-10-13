@@ -117,7 +117,7 @@ fn valid[&t, &r, &w, &d](ws: &!t [int], refst: &!r [int], work: &!w [byte], data
             test.assert_eq(r, 0);
             test.assert_eq(h, 0);
             var k = 0;
-            while k < 56 {
+            while k < wsframe.state_len() {
                 if k != 15 + wsframe.dir_base(dir) && k != 14 + wsframe.dir_base(dir) {
                     test.assert_eq(ws[k], refst[k]);
                 }
@@ -168,8 +168,8 @@ fn bytewise[&t, &w, &d](ws: &!t [int], work: &!w [byte], data: &d [byte], dir: i
 
 fn test_valid_streams_are_forwarded_whole_at_every_split() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
-        let refst = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
+        let refst = alloc_slice[a](wsframe.state_len(), 0);
         let work = alloc_slice[a](2048, byte_of(0));
         let buf = alloc_slice[a](2048, byte_of(0));
         let big = alloc_slice[a](300, byte_of(66));
@@ -204,8 +204,8 @@ fn test_valid_streams_are_forwarded_whole_at_every_split() -> [] int {
 
 fn test_multibyte_text_is_carried_across_reads_and_fragments() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
-        let refst = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
+        let refst = alloc_slice[a](wsframe.state_len(), 0);
         let work = alloc_slice[a](2048, byte_of(0));
         let buf = alloc_slice[a](2048, byte_of(0));
         let p = alloc_slice[a](16, byte_of(0));
@@ -280,7 +280,7 @@ fn invalid[&t, &w, &d](ws: &!t [int], work: &!w [byte], data: &d [byte], dir: in
 
 fn test_rule_rsv_is_refused_at_every_split() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
         let work = alloc_slice[a](2048, byte_of(0));
         let buf = alloc_slice[a](2048, byte_of(0));
         // A good frame goes first in each stream: it is forwarded, the offending frame is not.
@@ -306,7 +306,7 @@ fn test_rule_rsv_is_refused_at_every_split() -> [] int {
 
 fn test_rule_reserved_opcodes_is_refused_at_every_split() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
         let work = alloc_slice[a](2048, byte_of(0));
         let buf = alloc_slice[a](2048, byte_of(0));
         // A good frame goes first in each stream: it is forwarded, the offending frame is not.
@@ -332,7 +332,7 @@ fn test_rule_reserved_opcodes_is_refused_at_every_split() -> [] int {
 
 fn test_rule_control_frames_is_refused_at_every_split() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
         let work = alloc_slice[a](2048, byte_of(0));
         let buf = alloc_slice[a](2048, byte_of(0));
         // A good frame goes first in each stream: it is forwarded, the offending frame is not.
@@ -364,7 +364,7 @@ fn test_rule_control_frames_is_refused_at_every_split() -> [] int {
 
 fn test_rule_close_of_one_byte_is_refused_at_every_split() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
         let work = alloc_slice[a](2048, byte_of(0));
         let buf = alloc_slice[a](2048, byte_of(0));
         // A good frame goes first in each stream: it is forwarded, the offending frame is not.
@@ -384,7 +384,7 @@ fn test_rule_close_of_one_byte_is_refused_at_every_split() -> [] int {
 
 fn test_rule_masking_is_refused_at_every_split() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
         let work = alloc_slice[a](2048, byte_of(0));
         let buf = alloc_slice[a](2048, byte_of(0));
         // A good frame goes first in each stream: it is forwarded, the offending frame is not.
@@ -414,7 +414,7 @@ fn test_rule_masking_is_refused_at_every_split() -> [] int {
 
 fn test_rule_non_minimal_lengths_is_refused_at_every_split() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
         let work = alloc_slice[a](2048, byte_of(0));
         let buf = alloc_slice[a](2048, byte_of(0));
         // A good frame goes first in each stream: it is forwarded, the offending frame is not.
@@ -470,7 +470,7 @@ fn test_rule_non_minimal_lengths_is_refused_at_every_split() -> [] int {
 
 fn test_rule_fragmentation_sequence_is_refused_at_every_split() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
         let work = alloc_slice[a](2048, byte_of(0));
         let buf = alloc_slice[a](2048, byte_of(0));
         // A good frame goes first in each stream: it is forwarded, the offending frame is not.
@@ -494,7 +494,7 @@ fn test_rule_fragmentation_sequence_is_refused_at_every_split() -> [] int {
 
 fn test_rule_frames_after_close_is_refused_at_every_split() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
         let work = alloc_slice[a](2048, byte_of(0));
         let buf = alloc_slice[a](2048, byte_of(0));
         // A good frame goes first in each stream: it is forwarded, the offending frame is not.
@@ -520,7 +520,7 @@ fn test_rule_frames_after_close_is_refused_at_every_split() -> [] int {
 
 fn test_the_message_limit_counts_fragments_and_is_judged_at_the_header() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
         let work = alloc_slice[a](2048, byte_of(0));
         let buf = alloc_slice[a](2048, byte_of(0));
         let sixty = alloc_slice[a](100, byte_of(65));
@@ -605,7 +605,7 @@ fn bad_utf8[&t, &w, &b, &q](ws: &!t [int], work: &!w [byte], buf: &!b [byte], p:
 
 fn test_invalid_utf8_is_refused_in_every_class() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
         let work = alloc_slice[a](2048, byte_of(0));
         let buf = alloc_slice[a](2048, byte_of(0));
         let p = alloc_slice[a](8, byte_of(0));
@@ -692,7 +692,7 @@ fn test_invalid_utf8_is_refused_in_every_class() -> [] int {
 
 fn test_a_utf8_error_in_a_payload_that_began_earlier_is_not_at_a_boundary() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
         let buf = alloc_slice[a](256, byte_of(0));
         let p = alloc_slice[a](8, byte_of(65));
         p[5] = byte_of(255);
@@ -703,20 +703,20 @@ fn test_a_utf8_error_in_a_payload_that_began_earlier_is_not_at_a_boundary() -> [
         test.assert_eq(first, 5);
         let second = wsframe.scan(ws, 1, buf[5..n], 1048576, false, false);
         test.assert_eq(second, 0);
-        test.assert_eq(ws[36 + 14], 1);
-        test.assert_eq(ws[36 + 15], 11);
-        test.assert_eq(ws[36 + 17], 0);
+        test.assert_eq(ws[wsframe.dir_base(1) + 14], 1);
+        test.assert_eq(ws[wsframe.dir_base(1) + 15], 11);
+        test.assert_eq(ws[wsframe.dir_base(1) + 17], 0);
         // in one call, it is at a boundary
         fresh(ws);
         test.assert_eq(wsframe.scan(ws, 1, buf[0..n], 1048576, false, false), 0);
-        test.assert_eq(ws[36 + 17], 1);
+        test.assert_eq(ws[wsframe.dir_base(1) + 17], 1);
     }
     return 0;
 }
 
 fn test_a_header_is_held_until_it_is_whole_and_a_violation_is_seen_early() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
         let buf = alloc_slice[a](64, byte_of(0));
         // text with a 16-bit length: one, two and three bytes of its header are not answered
         var n = put(buf, 0, 129);
@@ -752,7 +752,7 @@ fn test_a_header_is_held_until_it_is_whole_and_a_violation_is_seen_early() -> []
 
 fn test_stop_answers_the_bytes_up_to_the_next_boundary() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
         let buf = alloc_slice[a](512, byte_of(0));
         let big = alloc_slice[a](200, byte_of(70));
         var n = frame(buf, 0, 1, 2, false, 0, big[0..200]);
@@ -764,16 +764,16 @@ fn test_stop_answers_the_bytes_up_to_the_next_boundary() -> [] int {
         // inside the first frame (after 50 bytes of it) stop answers the rest of it and no more
         fresh(ws);
         test.assert_eq(wsframe.scan(ws, 1, buf[0..50], 1048576, false, false), 50);
-        test.assert_eq(ws[36], 1);
+        test.assert_eq(ws[wsframe.dir_base(1)], 1);
         test.assert_eq(wsframe.scan(ws, 1, buf[50..n], 1048576, true, false), one - 50);
-        test.assert_eq(ws[36], 0);
+        test.assert_eq(ws[wsframe.dir_base(1)], 0);
     }
     return 0;
 }
 
 fn test_the_gateways_own_pong_is_reported_and_no_other() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
         let buf = alloc_slice[a](128, byte_of(0));
         let pl = alloc_slice[a](8, byte_of(0));
         // the Ping's value: 0x0102030405060708
@@ -834,7 +834,7 @@ fn test_the_gateways_own_pong_is_reported_and_no_other() -> [] int {
 
 fn test_the_close_plan_and_the_gateways_frames() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
         let out = alloc_slice[a](16, byte_of(0));
         // a timer: 1001 to both, the first close is the client's
         fresh(ws);
@@ -861,7 +861,7 @@ fn test_the_close_plan_and_the_gateways_frames() -> [] int {
         test.assert_eq(ws[5], 2);
         // the upstream's violation: 1011 to the client, its own code to the upstream
         fresh(ws);
-        ws[36 + 17] = 1;
+        ws[wsframe.dir_base(1) + 17] = 1;
         wsframe.begin_close(ws, 10, 1, 0, 100);
         test.assert_eq(ws[2], 1011);
         test.assert_eq(ws[3], 1009);
@@ -914,7 +914,7 @@ fn next(seed: int) -> [] int {
 // is never more than the bytes given, and an answer short of the data has a reason.
 fn test_random_streams_never_trap_and_always_have_a_reason() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
         let work = alloc_slice[a](1024, byte_of(0));
         let buf = alloc_slice[a](1024, byte_of(0));
         var seed = 20261012;
@@ -1011,7 +1011,7 @@ fn test_random_streams_never_trap_and_always_have_a_reason() -> [] int {
 // a character), ping, pong and empty frames between fragments, every length class that fits. Cut at random into three pieces, each is forwarded whole and leaves nothing waiting.
 fn test_random_valid_streams_are_forwarded_whole() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
         let work = alloc_slice[a](8192, byte_of(0));
         let buf = alloc_slice[a](8192, byte_of(0));
         let text = alloc_slice[a](600, byte_of(0));
@@ -1119,7 +1119,7 @@ fn test_random_valid_streams_are_forwarded_whole() -> [] int {
 
 fn test_a_direction_that_has_carried_a_close_carries_no_second_one() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
         // the client's Close went by (direction 0), then the gateway has to close for a timer: none is placed toward the upstream, one toward the client
         fresh(ws);
         ws[16 + 13] = 1;
@@ -1128,23 +1128,23 @@ fn test_a_direction_that_has_carried_a_close_carries_no_second_one() -> [] int {
         test.assert_eq(ws[4], 0);
         // the upstream's Close went by: the other way round
         fresh(ws);
-        ws[36 + 13] = 1;
+        ws[wsframe.dir_base(1) + 13] = 1;
         wsframe.begin_close(ws, 16, 0 - 1, 0, 100);
         test.assert_eq(ws[4], 2);
         test.assert_eq(ws[5], 0);
         // the offender is marked
         fresh(ws);
         wsframe.begin_close(ws, 5, 1, 0, 100);
-        test.assert_eq(ws[36 + 19], 1);
+        test.assert_eq(ws[wsframe.dir_base(1) + 19], 1);
         test.assert_eq(ws[16 + 19], 0);
-        test.assert_eq(ws[36 + 18], 1);
+        test.assert_eq(ws[wsframe.dir_base(1) + 18], 1);
     }
     return 0;
 }
 
 fn test_a_close_frame_reports_its_code_whole_and_split() -> [] int {
     region a {
-        let ws = alloc_slice[a](56, 0);
+        let ws = alloc_slice[a](wsframe.state_len(), 0);
         let work = alloc_slice[a](128, byte_of(0));
         let buf = alloc_slice[a](128, byte_of(0));
         let pl = alloc_slice[a](5, byte_of(98));
@@ -1169,7 +1169,7 @@ fn test_a_close_frame_reports_its_code_whole_and_split() -> [] int {
         n = frame(buf, 0, 1, 8, false, 0, "");
         fresh(ws);
         test.assert_eq(wsframe.scan(ws, dir, buf[0..n], 1048576, false, false), n);
-        test.assert_eq(ws[36 + 15], 1005);
+        test.assert_eq(ws[wsframe.dir_base(1) + 15], 1005);
     }
     return 0;
 }

@@ -379,6 +379,9 @@ fn test_the_frame_counters_and_the_close_codes_are_counted_and_shown_in_both_for
         metrics.ws_pinged(stats);
         metrics.ws_pinged(stats);
         metrics.ws_pong_timeout(stats);
+        metrics.ws_ocpp_violation(stats);
+        metrics.ws_ocpp_violation(stats);
+        metrics.ws_ocpp_violation(stats);
         metrics.ws_closed(stats, 1000);
         metrics.ws_closed(stats, 1000);
         metrics.ws_closed(stats, 1001);
@@ -394,11 +397,12 @@ fn test_the_frame_counters_and_the_close_codes_are_counted_and_shown_in_both_for
         test.assert(contains(out[0..n], "cancho_gateway_ws_messages_total 7\n"));
         test.assert(contains(out[0..n], "cancho_gateway_ws_pings_total 2\n"));
         test.assert(contains(out[0..n], "cancho_gateway_ws_pong_timeouts_total 1\n"));
+        test.assert(contains(out[0..n], "cancho_gateway_ws_ocpp_violations_total 3\n"));
         test.assert(contains(out[0..n], "cancho_gateway_ws_closes_total{code=\"1000\"} 2\n"));
         test.assert(contains(out[0..n], "cancho_gateway_ws_closes_total{code=\"1011\"} 1\n"));
         test.assert(contains(out[0..n], "cancho_gateway_ws_closes_total{code=\"other\"} 2\n"));
         let j = metrics.json(out, 0, stats, names, g);
-        test.assert(contains(out[0..j], "\"messages\":7,\"pings\":2,\"pong_timeouts\":1,\"closes\":{\"1000\":2,\"1001\":1,\"1002\":1,\"1007\":1,\"1008\":1,\"1009\":1,\"1011\":1,\"other\":2}}"));
+        test.assert(contains(out[0..j], "\"messages\":7,\"pings\":2,\"pong_timeouts\":1,\"ocpp_violations\":3,\"closes\":{\"1000\":2,\"1001\":1,\"1002\":1,\"1007\":1,\"1008\":1,\"1009\":1,\"1011\":1,\"other\":2}}"));
     }
     return 0;
 }

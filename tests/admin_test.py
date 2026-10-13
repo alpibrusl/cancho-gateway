@@ -124,7 +124,7 @@ class T:
         m = scrape(gw)
         assert list(m)[:3] == ["v", "uptime_ms", "sessions_active"] and m["v"] == 1, list(m)
         assert list(m) == ["v", "uptime_ms", "sessions_active", "le_ms", "routes", "upstreams", "refusals", "tls", "ws", "log"], list(m)
-        assert m["ws"] == {"tunnels_total": 0, "tunnels_active": 0, "messages": 0, "pings": 0, "pong_timeouts": 0,
+        assert m["ws"] == {"tunnels_total": 0, "tunnels_active": 0, "messages": 0, "pings": 0, "pong_timeouts": 0, "ocpp_violations": 0,
                            "closes": {"1000": 0, "1001": 0, "1002": 0, "1007": 0, "1008": 0, "1009": 0, "1011": 0, "other": 0}}, m["ws"]
         assert m["le_ms"] == BOUNDS
         assert [r["name"] for r in m["routes"]] == ["dead", "ka", "flap", "trusted", "main"], [r["name"] for r in m["routes"]]

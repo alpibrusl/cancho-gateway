@@ -158,6 +158,30 @@ REFUSALS = [
     ("config.websocket", 2, WS + 'ws_max_tunnels = 128\n' + WSR),
     ("config.websocket", 2, WS + 'ws_max_tunnels = -1\n' + WSR),
     ("config.websocket", 2, WS + 'ws_max_tunnels = "64"\n' + WSR),
+    # --- OCPP-J validation (docs/ocpp.md section 7): the key needs the websocket flag, a version or a list of distinct versions, and exactly the matching subprotocols
+    ("config.websocket", 8, UP + R + 'path_prefix = "/"\nws_ocpp = "1.6"\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = false\nws_ocpp = "1.6"\n'),
+    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = 1.6\n'),
+    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = true\n'),
+    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = 16\n'),
+    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = ""\n'),
+    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = []\n'),
+    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = "1.5"\n'),
+    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp2.1"]\nws_ocpp = "2.1"\n'),
+    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = "ocpp1.6"\n'),
+    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = " 1.6"\n'),
+    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = ["1.6", "1.6"]\n'),
+    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = ["1.6", "2.0.1", "1.6"]\n'),
+    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = [1.6]\n'),
+    ("config.websocket", 10, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = {a = 1}\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nws_ocpp = "1.6"\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nws_ocpp = ["1.6", "2.0.1"]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nws_ocpp = []\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp2.0.1"]\nws_ocpp = "1.6"\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6", "ocpp2.0.1"]\nws_ocpp = "1.6"\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6", "other"]\nws_ocpp = "1.6"\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = ["1.6", "2.0.1"]\n'),
+    ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nsubprotocols = ["other"]\nws_ocpp = "2.0.1"\n'),
     # --- WebSocket frames (docs/websocket-frames.md section 10): the message limit per route, and the keepalive and close keys
     ("config.websocket", 8, UP + R + 'path_prefix = "/"\nws_max_message_bytes = 65536\n'),
     ("config.websocket", 9, UP + R + 'path_prefix = "/"\nwebsocket = true\nws_max_message_bytes = 1023\n'),
@@ -322,6 +346,12 @@ ACCEPTED = [
     WS + 'ws_ping_ms = 1000\nws_pong_ms = 100\nws_close_ms = 100\n' + WSR,
     WS + 'ws_ping_ms = 86400000\nws_pong_ms = 600000\nws_close_ms = 60000\n' + WSR,
     WS + 'ws_close_ms = 5000\n' + WSR,
+    # OCPP-J validation: each version, both, in either order, with the message limit
+    UP + R + 'path_prefix = "/ocpp"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = "1.6"\n',
+    UP + R + 'path_prefix = "/ocpp"\nwebsocket = true\nsubprotocols = ["ocpp2.0.1"]\nws_ocpp = "2.0.1"\n',
+    UP + R + 'path_prefix = "/ocpp"\nwebsocket = true\nsubprotocols = ["ocpp1.6", "ocpp2.0.1"]\nws_ocpp = ["1.6", "2.0.1"]\n',
+    UP + R + 'path_prefix = "/ocpp"\nwebsocket = true\nsubprotocols = ["ocpp2.0.1", "ocpp1.6"]\nws_ocpp = ["1.6", "2.0.1"]\n',
+    UP + R + 'path_prefix = "/ocpp"\nwebsocket = true\nsubprotocols = ["ocpp1.6"]\nws_ocpp = ["1.6"]\nws_max_message_bytes = 65536\n',
     # rate limiting: the shortest form, every unit, every bound, every key
     UP + R + 'path_prefix = "/"\nrate_limit = "1/s"\n',
     UP + R + 'path_prefix = "/"\nrate_limit = "10/m"\nrate_burst = 2\n',
@@ -600,10 +630,10 @@ def jwt_compiled(run, failures):
         table = (pathlib.Path(tmp) / "routes.cho").read_text()
         explained = run(text).stdout
     wants = ["pub fn jwt_key_count() -> [] int {\n    return 2;", 'return "ka\\t%s\\nkb\\t%s\\n";' % (PKA, PKB),
-             '\\t2\\tauthorization\\t0\\t\\tBearer realm=\\"cancho-gateway\\"\\t1\\tapi\\thttps://i.example\\t7\\t1048576\\t0\\t0\\t0\\t0\\t0\\n',
-             '\\t3\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t*\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\n',
-             '\\t1\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\n',
-             '\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\n']
+             '\\t2\\tauthorization\\t0\\t\\tBearer realm=\\"cancho-gateway\\"\\t1\\tapi\\thttps://i.example\\t7\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n',
+             '\\t3\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t*\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n',
+             '\\t1\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n',
+             '\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n']
     for want in wants:
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
@@ -701,7 +731,7 @@ def frames_compiled(run, failures):
         table = (pathlib.Path(tmp) / "routes.cho").read_text()
         deploy = (pathlib.Path(tmp) / "deploy.cho").read_text()
         explained = run(text).stdout
-    for want in ("\\t65536\\t0\\t0\\t0\\t0\\t0\\n", "\\t1048576\\t0\\t0\\t0\\t0\\t0\\n"):
+    for want in ("\\t65536\\t0\\t0\\t0\\t0\\t0\\t0\\n", "\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n"):
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
             failures += 1
@@ -731,6 +761,34 @@ def frames_compiled(run, failures):
     return failures
 
 
+def ocpp_compiled(run, failures):
+    """What `ws_ocpp` compiles (docs/ocpp.md section 7): the route's version mask in the table (1 for 1.6, 2 for 2.0.1, 3 for both, 0 for none), and what --explain says."""
+    def route(path, protocols, extra):
+        return '[[route]]\nupstream = "a"\npath_prefix = "%s"\nwebsocket = true\nsubprotocols = [%s]\n%s' % (path, ", ".join('"%s"' % p for p in protocols), extra)
+    text = (WS + '[[upstream]]\nname = "a"\naddr = "10.0.0.1:1"\n' + route("/a", ["ocpp1.6"], 'ws_ocpp = "1.6"\nws_max_message_bytes = 1111\n') +
+            route("/b", ["ocpp2.0.1"], 'ws_ocpp = "2.0.1"\nws_max_message_bytes = 2222\n') +
+            route("/c", ["ocpp2.0.1", "ocpp1.6"], 'ws_ocpp = ["1.6", "2.0.1"]\nws_max_message_bytes = 3333\n') +
+            route("/d", ["ocpp1.6"], 'ws_max_message_bytes = 4444\n') + '[[route]]\nupstream = "a"\npath_prefix = "/e"\n')
+    with tempfile.TemporaryDirectory() as tmp:
+        f = pathlib.Path(tmp) / "d.toml"
+        f.write_text(text)
+        subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(f), "--out", tmp], check=True)
+        table = (pathlib.Path(tmp) / "routes.cho").read_text()
+        explained = run(text).stdout
+    for want in ("\\t1111\\t0\\t0\\t0\\t0\\t0\\t1\\n", "\\t2222\\t0\\t0\\t0\\t0\\t0\\t2\\n", "\\t3333\\t0\\t0\\t0\\t0\\t0\\t3\\n", "\\t4444\\t0\\t0\\t0\\t0\\t0\\t0\\n"):
+        if want not in table:
+            print("FAIL the routes table must contain %r" % want)
+            failures += 1
+    for want in ("messages up to 1111 bytes; validates OCPP-J frames (1.6)", "messages up to 2222 bytes; validates OCPP-J frames (2.0.1)", "messages up to 3333 bytes; validates OCPP-J frames (1.6, 2.0.1)"):
+        if want not in explained:
+            print("FAIL --explain must say %r: %r" % (want, explained[:800]))
+            failures += 1
+    if "4444 bytes; validates" in explained:
+        print("FAIL --explain must not say a route without ws_ocpp validates: %r" % explained[:800])
+        failures += 1
+    return failures
+
+
 def auth_compiled(run, failures):
     """What authentication compiles (docs/auth.md sections 4.1 and 6): the key table, the route's record, and what --explain says."""
     text = (TOP + ONE + K1 + K2 + AR + 'auth_header = "X-Api-Key"\nauth_keys = ["bob"]\n' + '[[route]]\nupstream = "a"\npath_prefix = "/b"\nauth = "api-key"\nrate_limit = "5/s"\nrate_key = "auth"\nrate_buckets = 8\n' +
@@ -743,9 +801,9 @@ def auth_compiled(run, failures):
         explained = run(text).stdout
     keys = '"alice\\t%s\\nbob\\t%s\\n"' % (D1, D2)
     wants = ["pub fn key_count() -> [] int {\n    return 2;", "return " + keys + ";",
-             '\\t1\\tx-api-key\\t0\\t1\\tApiKey realm=\\"cancho-gateway\\", header=\\"x-api-key\\"\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\n',
-             '\\ta\\t8\\t0\\t1\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\n',
-             '\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\n']
+             '\\t1\\tx-api-key\\t0\\t1\\tApiKey realm=\\"cancho-gateway\\", header=\\"x-api-key\\"\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n',
+             '\\ta\\t8\\t0\\t1\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n',
+             '\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n']
     for want in wants:
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
@@ -875,9 +933,9 @@ def main():
         subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(f), "--out", tmp], check=True)
         table = (pathlib.Path(tmp) / "routes.cho").read_text()
         explained = run(limited).stdout
-    for want in ("\\t10\\t60000\\t3\\th:x-api-key\\t64\\t0\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\n", "\\t0\\t0\\t0\\t\\t0\\t64\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\n", "\\t7\\t1000\\t7\\tx:l\\t1024\\t64\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t64\\n", "\\t2\\t3600000\\t2\\tr\\t1\\t1088\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\n",
+    for want in ("\\t10\\t60000\\t3\\th:x-api-key\\t64\\t0\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n", "\\t0\\t0\\t0\\t\\t0\\t64\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n", "\\t7\\t1000\\t7\\tx:l\\t1024\\t64\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t64\\t0\\n", "\\t2\\t3600000\\t2\\tr\\t1\\t1088\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n",
                  # a ceiling of 30 a minute with room for 7, in the bucket after the route's 8 (1089 + 8), and a prefix of 56
-                 "\\t3\\t1000\\t3\\tx:f\\t8\\t1089\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t30\\t60000\\t7\\t1097\\t56\\n",
+                 "\\t3\\t1000\\t3\\tx:f\\t8\\t1089\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t30\\t60000\\t7\\t1097\\t56\\t0\\n",
                  "pub fn rate_buckets_total() -> [] int {\n    return 1098;"):
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
@@ -889,6 +947,7 @@ def main():
         print("FAIL --explain must say what a route's limit is: %r" % explained[-300:])
         failures += 1
     failures = frames_compiled(run, failures)
+    failures = ocpp_compiled(run, failures)
     failures = auth_compiled(run, failures)
     failures = mkkey_checks(failures)
     failures = jwt_compiled(run, failures)

@@ -1,0 +1,470 @@
+edition 5;
+
+module gateway.ocppframe;
+
+// The OCPP-J recogniser (docs/ocpp.md). Sans-io and pure: no effect, no allocation, no buffer. It is a state machine over the bytes of a text message, stepped one byte at a time by
+// `wsframe.scan` (after the UTF-8 automaton has accepted the byte), and it answers whether the byte can be part of a message of the grammar of section 3, or the rule it breaks.
+//
+// The state is eight ints at offset `o` of the caller's block (`o` is the direction's base plus 20):
+//
+//     o+0 position   o+1 nesting stack (one bit a level, 1 an object)   o+2 depth   o+3 counter (characters of a restricted string, or hex digits still due)
+//     o+4 message type (0 not read yet)   o+5 index of the element in hand   o+6 1 if the string in hand is a member's name   o+7 1 if the direction is validated at all
+//
+// The positions:
+//
+//      0 before the `[`            1 an element is due         2 the type digit was read       3 between elements (`,` or `]`)        4 after the `]`
+//      5 inside an id, an action or an error code (restricted: plain ASCII, no escape)
+//      6 a value is due            7 just after `[` (a value or `]`)       8 just after `{` (a name or `}`)       9 a name is due        10 a `:` is due     11 between items (`,` or the close)
+//     12 inside a string           13 after a backslash                    14 inside the four hex digits of a `\u`
+//     15 after `-`    16 after a leading 0    17 in the integer part    18 after `.`    19 in the fraction    20 after `e`    21 after the exponent's sign    22 in the exponent
+//     23 to 25 inside `true`       26 to 29 inside `false`                 30 to 32 inside `null`
+//
+// The rules it answers are `wsframe`'s numbers 17 to 25: 17 binary (judged at the frame header, not here), 18 json, 19 type, 20 arity, 21 id, 22 action, 23 payload, 24 code, 25 depth.
+
+// Ready for a new message: everything but the enabled flag.
+pub fn reset[&t](ws: &!t [int], o: int) -> [] int {
+    var i = 0;
+    while i < 7 {
+        ws[o + i] = 0;
+        i = i + 1;
+    }
+    return 0;
+}
+
+// Has the message that has gone by ended where the grammar ends (after the closing `]`, white space allowed)?
+pub fn complete[&t](ws: &t [int], o: int) -> [] bool {
+    return ws[o] == 4;
+}
+
+fn space(c: int) -> [] bool {
+    return c == 32 || c == 9 || c == 10 || c == 13;
+}
+
+fn digit(c: int) -> [] bool {
+    return c >= 48 && c <= 57;
+}
+
+// Where a value that has just ended leaves the machine: between elements at the top level, between items inside a container.
+fn done[&t](ws: &t [int], o: int) -> [] int {
+    if ws[o + 2] == 0 {
+        return 3;
+    }
+    return 11;
+}
+
+// The rule for an element that is a string of the restricted grammar and is not one: the id, the action of a CALL, or the code of a CALLERROR.
+fn string_rule[&t](ws: &t [int], o: int) -> [] int {
+    if ws[o + 5] == 1 {
+        return 21;
+    }
+    if ws[o + 4] == 2 {
+        return 22;
+    }
+    return 24;
+}
+
+// The rule for an element that must be an object and is not.
+fn object_rule() -> [] int {
+    return 23;
+}
+
+// Open a container (`c` is `{` or `[`); 25 if the nesting would pass the bound.
+fn open[&t](ws: &!t [int], o: int, c: int) -> [] int {
+    if ws[o + 2] >= 32 {
+        return 25;
+    }
+    ws[o + 2] = ws[o + 2] + 1;
+    if c == 123 {
+        ws[o + 1] = ws[o + 1] * 2 + 1;
+        ws[o] = 8;
+    } else {
+        ws[o + 1] = ws[o + 1] * 2;
+        ws[o] = 7;
+    }
+    return 0;
+}
+
+// Close the container in hand (the caller has checked that it is the kind `c` closes).
+fn close[&t](ws: &!t [int], o: int) -> [] int {
+    ws[o + 1] = ws[o + 1] / 2;
+    ws[o + 2] = ws[o + 2] - 1;
+    ws[o] = done(ws, o);
+    return 0;
+}
+
+// A value begins with `c` inside a payload.
+fn value[&t](ws: &!t [int], o: int, c: int) -> [] int {
+    if c == 123 || c == 91 {
+        return open(ws, o, c);
+    }
+    if c == 34 {
+        ws[o + 6] = 0;
+        ws[o] = 12;
+        return 0;
+    }
+    if c == 45 {
+        ws[o] = 15;
+        return 0;
+    }
+    if c == 48 {
+        ws[o] = 16;
+        return 0;
+    }
+    if c >= 49 && c <= 57 {
+        ws[o] = 17;
+        return 0;
+    }
+    if c == 116 {
+        ws[o] = 23;
+        return 0;
+    }
+    if c == 102 {
+        ws[o] = 26;
+        return 0;
+    }
+    if c == 110 {
+        ws[o] = 30;
+        return 0;
+    }
+    return 18;
+}
+
+// Between the items of a container, or at its end: white space, a `,`, or the close that matches the container in hand.
+fn between[&t](ws: &!t [int], o: int, c: int) -> [] int {
+    if space(c) {
+        return 0;
+    }
+    let obj = ws[o + 1] % 2;
+    if c == 44 {
+        if obj == 1 {
+            ws[o] = 9;
+        } else {
+            ws[o] = 6;
+        }
+        return 0;
+    }
+    if c == 125 && obj == 1 || c == 93 && obj == 0 {
+        return close(ws, o);
+    }
+    return 18;
+}
+
+// The first byte of the element in hand (`ws[o+5]`) of a message of type `ws[o+4]`.
+fn element[&t](ws: &!t [int], o: int, c: int) -> [] int {
+    let idx = ws[o + 5];
+    let ty = ws[o + 4];
+    if idx == 0 {
+        if c == 50 || c == 51 || c == 52 {
+            ws[o + 4] = c - 48;
+            ws[o] = 2;
+            return 0;
+        }
+        return 19;
+    }
+    if c == 93 {
+        return 20;
+    }
+    if idx == 1 || idx == 2 && ty != 3 {
+        if c == 34 {
+            ws[o + 3] = 0;
+            ws[o] = 5;
+            return 0;
+        }
+        return string_rule(ws, o);
+    }
+    if idx == 3 && ty == 4 {
+        if c == 34 {
+            ws[o + 6] = 0;
+            ws[o] = 12;
+            return 0;
+        }
+        return 24;
+    }
+    // The payload of a CALL (3) or CALLRESULT (2), the details of a CALLERROR (4): an object.
+    if c == 123 {
+        return open(ws, o, c);
+    }
+    return object_rule();
+}
+
+// A byte of a number has ended it: the byte is the one after a value.
+fn number_end[&t](ws: &!t [int], o: int, c: int) -> [] int {
+    ws[o] = 11;
+    return between(ws, o, c);
+}
+
+// Step the machine at offset `o` of `ws` by the byte `c` (0 to 255). Answers 0, or the rule the byte breaks (the state after a refusal is not meaningful).
+pub fn step[&t](ws: &!t [int], o: int, c: int) -> [] int {
+    let p = ws[o];
+    if p == 12 {
+        // The commonest position: inside a string of a payload.
+        if c == 34 {
+            if ws[o + 6] == 1 {
+                ws[o + 6] = 0;
+                ws[o] = 10;
+            } else {
+                ws[o] = done(ws, o);
+            }
+            return 0;
+        }
+        if c == 92 {
+            ws[o] = 13;
+            return 0;
+        }
+        if c < 32 {
+            return 18;
+        }
+        return 0;
+    }
+    if p == 5 {
+        if c == 34 {
+            if ws[o + 3] == 0 {
+                return string_rule(ws, o);
+            }
+            ws[o] = 3;
+            return 0;
+        }
+        if c < 32 || c > 126 || c == 92 {
+            return string_rule(ws, o);
+        }
+        if ws[o + 5] != 1 && !(c >= 48 && c <= 57 || c >= 65 && c <= 90 || c >= 97 && c <= 122) {
+            return string_rule(ws, o);
+        }
+        ws[o + 3] = ws[o + 3] + 1;
+        if ws[o + 5] == 1 && ws[o + 3] > 36 || ws[o + 5] != 1 && ws[o + 3] > 64 {
+            return string_rule(ws, o);
+        }
+        return 0;
+    }
+    if p == 0 {
+        if space(c) {
+            return 0;
+        }
+        if c == 91 {
+            ws[o] = 1;
+            ws[o + 5] = 0;
+            return 0;
+        }
+        return 18;
+    }
+    if p == 1 {
+        if space(c) {
+            return 0;
+        }
+        return element(ws, o, c);
+    }
+    if p == 2 {
+        if space(c) {
+            return 0;
+        }
+        if c == 44 {
+            ws[o + 5] = 1;
+            ws[o] = 1;
+            return 0;
+        }
+        if c == 93 {
+            return 20;
+        }
+        return 19;
+    }
+    if p == 3 {
+        if space(c) {
+            return 0;
+        }
+        var last = 3;
+        if ws[o + 4] == 2 {
+            last = 3;
+        } else if ws[o + 4] == 3 {
+            last = 2;
+        } else {
+            last = 4;
+        }
+        if c == 44 {
+            if ws[o + 5] >= last {
+                return 20;
+            }
+            ws[o + 5] = ws[o + 5] + 1;
+            ws[o] = 1;
+            return 0;
+        }
+        if c == 93 {
+            if ws[o + 5] < last {
+                return 20;
+            }
+            ws[o] = 4;
+            return 0;
+        }
+        return 18;
+    }
+    if p == 4 {
+        if space(c) {
+            return 0;
+        }
+        return 18;
+    }
+    if p == 6 {
+        if space(c) {
+            return 0;
+        }
+        return value(ws, o, c);
+    }
+    if p == 7 {
+        if space(c) {
+            return 0;
+        }
+        if c == 93 {
+            return close(ws, o);
+        }
+        return value(ws, o, c);
+    }
+    if p == 8 {
+        if space(c) {
+            return 0;
+        }
+        if c == 125 {
+            return close(ws, o);
+        }
+        if c == 34 {
+            ws[o + 6] = 1;
+            ws[o] = 12;
+            return 0;
+        }
+        return 18;
+    }
+    if p == 9 {
+        if space(c) {
+            return 0;
+        }
+        if c == 34 {
+            ws[o + 6] = 1;
+            ws[o] = 12;
+            return 0;
+        }
+        return 18;
+    }
+    if p == 10 {
+        if space(c) {
+            return 0;
+        }
+        if c == 58 {
+            ws[o] = 6;
+            return 0;
+        }
+        return 18;
+    }
+    if p == 11 {
+        return between(ws, o, c);
+    }
+    if p == 13 {
+        if c == 34 || c == 92 || c == 47 || c == 98 || c == 102 || c == 110 || c == 114 || c == 116 {
+            ws[o] = 12;
+            return 0;
+        }
+        if c == 117 {
+            ws[o + 3] = 4;
+            ws[o] = 14;
+            return 0;
+        }
+        return 18;
+    }
+    if p == 14 {
+        if digit(c) || c >= 65 && c <= 70 || c >= 97 && c <= 102 {
+            ws[o + 3] = ws[o + 3] - 1;
+            if ws[o + 3] == 0 {
+                ws[o] = 12;
+            }
+            return 0;
+        }
+        return 18;
+    }
+    if p == 15 {
+        if c == 48 {
+            ws[o] = 16;
+            return 0;
+        }
+        if c >= 49 && c <= 57 {
+            ws[o] = 17;
+            return 0;
+        }
+        return 18;
+    }
+    if p == 16 {
+        if c == 46 {
+            ws[o] = 18;
+            return 0;
+        }
+        if c == 101 || c == 69 {
+            ws[o] = 20;
+            return 0;
+        }
+        if digit(c) {
+            return 18;
+        }
+        return number_end(ws, o, c);
+    }
+    if p == 17 {
+        if digit(c) {
+            return 0;
+        }
+        if c == 46 {
+            ws[o] = 18;
+            return 0;
+        }
+        if c == 101 || c == 69 {
+            ws[o] = 20;
+            return 0;
+        }
+        return number_end(ws, o, c);
+    }
+    if p == 18 {
+        if digit(c) {
+            ws[o] = 19;
+            return 0;
+        }
+        return 18;
+    }
+    if p == 19 {
+        if digit(c) {
+            return 0;
+        }
+        if c == 101 || c == 69 {
+            ws[o] = 20;
+            return 0;
+        }
+        return number_end(ws, o, c);
+    }
+    if p == 20 {
+        if c == 43 || c == 45 {
+            ws[o] = 21;
+            return 0;
+        }
+        if digit(c) {
+            ws[o] = 22;
+            return 0;
+        }
+        return 18;
+    }
+    if p == 21 {
+        if digit(c) {
+            ws[o] = 22;
+            return 0;
+        }
+        return 18;
+    }
+    if p == 22 {
+        if digit(c) {
+            return 0;
+        }
+        return number_end(ws, o, c);
+    }
+    // The letters of `true`, `false` and `null`.
+    if p == 23 && c == 114 || p == 24 && c == 117 || p == 26 && c == 97 || p == 27 && c == 108 || p == 28 && c == 115 || p == 30 && c == 117 || p == 31 && c == 108 {
+        ws[o] = p + 1;
+        return 0;
+    }
+    if p == 25 && c == 101 || p == 29 && c == 101 || p == 32 && c == 108 {
+        ws[o] = done(ws, o);
+        return 0;
+    }
+    return 18;
+}

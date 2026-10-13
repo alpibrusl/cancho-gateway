@@ -460,6 +460,10 @@ fn upgrade_answered[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, u: int,
     copy_into(bf[ub..ub + st[pu + 4] - r], bf[ub + r..ub + st[pu + 4]]);
     st[pu + 4] = st[pu + 4] - r;
     wsframe.init(contents(core.wsf)[ws_at(client)..ws_at(client) + wsframe.state_len()], now);
+    if route.ws_ocpp(st[pc + 31] - 1) > 0 {
+        // The route validates OCPP-J frames (docs/ocpp.md): both directions' recognisers are switched on.
+        wsframe.enable_ocpp(contents(core.wsf)[ws_at(client)..ws_at(client) + wsframe.state_len()]);
+    }
     metrics.ws_opened(contents(core.stats));
     return tunnel_down(tab, core, u, now);
 }
@@ -487,6 +491,9 @@ fn tunnel_mark[&c](core: &!c shared.Core, client: int, cause: int, offender: int
     not_ok(core, shared.stride() * client);
     if cause == wsframe.rule_pong_timeout() {
         metrics.ws_pong_timeout(contents(core.stats));
+    }
+    if wsframe.is_ocpp(cause) {
+        metrics.ws_ocpp_violation(contents(core.stats));
     }
     return 0;
 }

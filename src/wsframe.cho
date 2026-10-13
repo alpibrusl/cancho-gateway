@@ -3,11 +3,12 @@ edition 5;
 module gateway.wsframe;
 
 import std.bytes;
+import gateway.ocppframe;
 
 // The frame parser of a WebSocket tunnel (task #15, slice 2, docs/websocket-frames.md). Sans-io and pure: no effect, no allocation. The caller owns the bytes and a block of
 // `state_len()` ints per tunnel and calls `scan` on the bytes it is about to move; `scan` answers how many of them may go on.
 //
-// The block: ints 0 to 15 are the tunnel's (`t_*`), 16 to 35 are the client-to-upstream direction's (direction 0: frames must be masked), 36 to 55 the upstream-to-client
+// The block: ints 0 to 15 are the tunnel's (`t_*`), 16 to 43 are the client-to-upstream direction's (direction 0: frames must be masked), 44 to 71 the upstream-to-client
 // direction's (direction 1: frames must not be masked). Per direction (offsets from `dir_base(dir)`):
 //
 //     0 mode (0 at a frame boundary, 1 inside a payload)   1 payload bytes still to come   2 opcode of the frame in hand   3 its FIN bit   4 its mask key (32 bits)
@@ -16,16 +17,17 @@ import std.bytes;
 //     13 1 once a Close frame has gone by   14 the event the last `scan` reported (0 none, 1 violation, 2 a Close frame went by, 3 the gateway's own Pong, 4 a header or Pong is
 //     incomplete)   15 its number (the rule, the Close code, or the bytes to drop)   16 1 if the frame in hand is validated as UTF-8   17 for a violation: 1 if the bytes
 //     `scan` answered end at a frame boundary   18 1 once the direction is junk (a violation was seen: everything from it is discarded)   19 1 if the direction's frames are the cause of the close
+//     20 to 27 the OCPP-J recogniser (`gateway.ocppframe`, docs/ocpp.md section 4); 27 is 1 if the direction's text messages are validated
 //
 // What `scan` does to its answer: it never answers more than the bytes it was given; a header is not answered (so not forwarded) until it is whole and has been judged; a frame that
 // violates a rule is not answered, and neither is anything after it. See the document for the rules (section 3) and for why a violation in the middle of a payload cannot be undone.
 
 pub fn state_len() -> [] int {
-    return 56;
+    return 72;
 }
 
 pub fn dir_base(dir: int) -> [] int {
-    return 16 + 20 * dir;
+    return 16 + 28 * dir;
 }
 
 // The tunnel's own ints.
@@ -170,7 +172,19 @@ pub fn rule_lifetime() -> [] int {
 }
 
 pub fn rule_count() -> [] int {
-    return 16;
+    return 25;
+}
+
+// The rules of docs/ocpp.md: 17 binary on an OCPP route, 18 to 24 a message that is not a well-formed OCPP-J frame, 25 nesting past the gateway's bound.
+pub fn is_ocpp(rule: int) -> [] bool {
+    return rule >= 17 && rule <= 25;
+}
+
+// Validate the text messages of both directions of this tunnel as OCPP-J (the route has `ws_ocpp`).
+pub fn enable_ocpp[&t](ws: &!t [int]) -> [] int {
+    ws[dir_base(0) + 27] = 1;
+    ws[dir_base(1) + 27] = 1;
+    return 0;
 }
 
 pub fn tag(rule: int) -> [] &static [byte] {
@@ -222,6 +236,33 @@ pub fn tag(rule: int) -> [] &static [byte] {
     if rule == 16 {
         return "ws.lifetime";
     }
+    if rule == 17 {
+        return "ws.ocpp-binary";
+    }
+    if rule == 18 {
+        return "ws.ocpp-json";
+    }
+    if rule == 19 {
+        return "ws.ocpp-type";
+    }
+    if rule == 20 {
+        return "ws.ocpp-arity";
+    }
+    if rule == 21 {
+        return "ws.ocpp-id";
+    }
+    if rule == 22 {
+        return "ws.ocpp-action";
+    }
+    if rule == 23 {
+        return "ws.ocpp-payload";
+    }
+    if rule == 24 {
+        return "ws.ocpp-code";
+    }
+    if rule == 25 {
+        return "ws.ocpp-depth";
+    }
     return "";
 }
 
@@ -233,6 +274,12 @@ pub fn own_code(rule: int) -> [] int {
     if rule == 11 {
         return 1007;
     }
+    if rule == 17 || rule == 25 {
+        return 1008;
+    }
+    if rule >= 18 && rule <= 24 {
+        return 1007;
+    }
     if rule == 13 || rule == 15 || rule == 16 {
         return 1001;
     }
@@ -241,7 +288,7 @@ pub fn own_code(rule: int) -> [] int {
 
 pub fn init[&t](ws: &!t [int], now: int) -> [] int {
     var i = 0;
-    while i < 56 {
+    while i < 72 {
         ws[i] = 0;
         i = i + 1;
     }
@@ -382,7 +429,7 @@ fn viol[&t](ws: &!t [int], b: int, rule: int, n: int, at_boundary: int) -> [] in
 // The answer is less than `len(data)` only for a reason: a header that is not yet whole (the bytes stay), a Pong that cannot yet be told from another (event 4), `stop`, a
 // violation (event 1, its rule in `d_number`: the bytes of the frame that broke it are not answered), or a Close frame that went by (event 2, the answer ends with it).
 pub fn scan[&t, &s](ws: &!t [int], dir: int, data: &s [byte], maxmsg: int, stop: bool, pongs: bool) -> [] int {
-    let b = 16 + 20 * dir;
+    let b = 16 + 28 * dir;
     ws[b + 14] = 0;
     ws[b + 15] = 0;
     var at = 0;
@@ -398,6 +445,10 @@ pub fn scan[&t, &s](ws: &!t [int], dir: int, data: &s [byte], maxmsg: int, stop:
             }
             let op = ws[b + 2];
             let uon = ws[b + 16];
+            var oon = 0;
+            if uon == 1 {
+                oon = ws[b + 27];
+            }
             if take > 0 && (uon == 1 || op == 8) {
                 var need = ws[b + 8];
                 var lo = ws[b + 9];
@@ -460,6 +511,12 @@ pub fn scan[&t, &s](ws: &!t [int], dir: int, data: &s [byte], maxmsg: int, stop:
                             hi = 191;
                         }
                     }
+                    if oon == 1 {
+                        let orule = ocppframe.step(ws, b + 20, c);
+                        if orule != 0 {
+                            return viol(ws, b, orule, fstart_or_zero(fstart), boundary_flag(fstart));
+                        }
+                    }
                     if op == 8 && done_before + i < 2 {
                         ws[b + 11] = ws[b + 11] * 256 + c;
                     }
@@ -476,6 +533,10 @@ pub fn scan[&t, &s](ws: &!t [int], dir: int, data: &s [byte], maxmsg: int, stop:
                 if uon == 1 && ws[b + 3] == 1 && ws[b + 8] != 0 {
                     // The message ends inside a character.
                     return viol(ws, b, 11, fstart_or_zero(fstart), boundary_flag(fstart));
+                }
+                if oon == 1 && ws[b + 3] == 1 && !ocppframe.complete(ws, b + 20) {
+                    // The message ends before the grammar does (or never began).
+                    return viol(ws, b, 18, fstart_or_zero(fstart), boundary_flag(fstart));
                 }
                 ws[b] = 0;
                 if op == 8 {
@@ -604,6 +665,9 @@ pub fn scan[&t, &s](ws: &!t [int], dir: int, data: &s [byte], maxmsg: int, stop:
                 if ws[b + 13] == 1 {
                     return viol(ws, b, 9, at, 1);
                 }
+                if op == 2 && ws[b + 27] == 1 {
+                    return viol(ws, b, 17, at, 1);
+                }
                 if op < 8 && length > maxmsg - ws[b + 7] {
                     return viol(ws, b, 10, at, 1);
                 }
@@ -614,6 +678,7 @@ pub fn scan[&t, &s](ws: &!t [int], dir: int, data: &s [byte], maxmsg: int, stop:
                 var uon = 0;
                 if op == 1 {
                     uon = 1;
+                    ocppframe.reset(ws, b + 20);
                     ws[b + 8] = 0;
                     ws[b + 9] = 128;
                     ws[b + 10] = 191;
