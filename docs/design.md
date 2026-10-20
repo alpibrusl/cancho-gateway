@@ -97,11 +97,13 @@ Everything is sized at start from the config; nothing is allocated afterwards (t
 | request head | 16 KiB (`std.http.max_head` is 64 KiB: the gateway's is lower) | `limit.head` | 431, close |
 | headers per request | 64 | `limit.headers` | 431, close |
 | request body (per route) | per route | `limit.body` | 413, close |
-| upstream connections per upstream | 64 | `limit.pool` | 503 |
+| idle upstream connections kept per upstream | 4 (`pool_idle_max`, 0 to 64) | none: a connection over the bound is closed, not refused | n/a |
 | route table entries | 256 | `config.routes` | startup |
 | rate-limit keys | 65,536 (a route's ceiling is one of them) | `limit.rate`, `limit.rate-table`, `limit.rate-route` (`docs/ratelimit.md`) | 429 |
 | WebSocket message (per route, over its fragments) | 1 MiB, 1 KiB to 256 MiB | `ws.message-too-big` (`docs/websocket-frames.md`) | Close 1009, tunnel closed |
 | WebSocket frame state (per tunnel, no allocation) | 56 ints, 112 KiB for the 256 slots | `ws.frame-*` | Close 1002 / 1007 |
+
+*(Corrected 2026-10-20: this row said 64 upstream connections per upstream, refused as `limit.pool` with 503. No code emits `limit.pool`; the pool bounds idle connections only, and `docs/pool.md` is the source.)*
 
 Per-connection buffers are slabs from one arena; the arena size is `connections * (head + buffer)` plus pool buffers, printed
 by `check` (§8). Defaults are starting points, fixed by the first measurement in #5, not claims.
