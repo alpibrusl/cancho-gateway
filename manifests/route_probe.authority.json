@@ -17,6 +17,14 @@
       "bounded": true
     }
   ],
+  "never_touches": [
+    "the filesystem",
+    "the network",
+    "the heap",
+    "signals",
+    "other programs",
+    "foreign code"
+  ],
   "foreign_symbols": [],
   "pure": [
     "blob",
