@@ -1,12 +1,12 @@
 [package]
 name = "cancho-gateway"
-cancho = "f4ead824f33b291a0ad7620a34a0c1346a7abe4f"   # the compiler these sources were written for; CI builds this commit
+cancho = "471b8e9334e021123286db4b1cb9feaeba2677c5"   # the compiler these sources were written for; CI builds this commit
 
 # The TLS 1.3 server (cancho's packages/tls, and the x509 package it requires, fetched with it): a full commit hash, never a name. The store
 # is inside cancho's repository at that commit; `cancho build` and `cancho test` fetch it, re-typecheck and re-hash every declaration (docs/tls.md).
 [dependencies.tls]
 git = "https://github.com/alpibrusl/cancho"
-rev = "f4ead824f33b291a0ad7620a34a0c1346a7abe4f"
+rev = "471b8e9334e021123286db4b1cb9feaeba2677c5"
 path = "packages/tls/.cancho-vcs/tls"
 
 # One program, one authority row (docs/design.md section 3). The deployment
