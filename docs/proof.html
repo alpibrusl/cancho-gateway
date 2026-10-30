@@ -176,7 +176,7 @@ $ <span class="c"># the same line the gateway wrote to stdout:</span>
 <section id="what">
   <h2>What an authority report is</h2>
   <p class="sub">The compiler does not only build the binary; it writes down what that binary can do. Not what it promises. Not what its documentation says. What its instructions can reach.</p>
-  <p>A capability can be released before the program starts &mdash; cancho&rsquo;s model is that the binary simply does not have it. The gateway&rsquo;s report is <strong>bounded</strong>: the compiler says so, and CI re-derives it on every push and fails if a change widens it past the ceiling in <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/authority.toml"><code>authority.toml</code></a>. To give the gateway a new capability is to write a diff a person must review.</p>
+  <p>A capability can be released before the program starts &mdash; cancho&rsquo;s model is that the binary simply does not have it. The gateway&rsquo;s report is bounded in everything but its network: it listens and connects where its deployment says, so the compiler marks <code>net_in</code> and <code>net_out</code> <strong>UNBOUNDED</strong> (the upstream set is enforced by the gateway&rsquo;s own egress rule, not by the compiler), and the ceiling names exactly those two. CI re-derives the report on every push and fails if a change widens it past the ceiling in <a href="https://github.com/alpibrusl/cancho-gateway/blob/main/authority.toml"><code>authority.toml</code></a>. To give the gateway a new capability is to write a diff a person must review.</p>
   <div class="three">
     <div><h3>Derived, not declared</h3><p>The report is what the compiler derives from the source. The committed file must equal it, byte for byte, or CI fails.</p></div>
     <div><h3>Ceiling-checked</h3><p><code>authority.toml</code> is what a person reviews: a ceiling the derived set may be smaller than, never larger.</p></div>
@@ -198,7 +198,7 @@ $ <span class="c"># the same line the gateway wrote to stdout:</span>
   <div class="stats">
 <div><b>0</b><span>files written, ever: <code>fs_write</code>, <code>file_write</code>, <code>dir_write</code> are not capabilities the binary has</span></div>
 <div><b>0</b><span>foreign calls: <code>ffi</code> is released at start; no C, no <code>unsafe</code></span></div>
-<div><b>1,139</b><span>pure functions the compiler counted in the gateway, of every function it has</span></div>
+<div><b>1,411</b><span>pure functions the compiler counted in the gateway, of every function it has</span></div>
 <div><b>2</b><span>paths the TLS build reads: <code>/dev/urandom</code> and the certificate directory; the build without <code>tls_listen</code> reads none</span></div>
   </div>
   <div class="fitwrap"><table class="fit">
@@ -214,8 +214,8 @@ $ <span class="c"># the same line the gateway wrote to stdout:</span>
       <tr><th><code>file_read</code></th><td>reading a file through a directory handle</td><td class="good">bounded</td></tr>
       <tr><th><code>heap</code></th><td>the heap: every slab is sized at start</td><td class="good">bounded</td></tr>
       <tr><th><code>io_write</code></th><td>standard output: the access log (and standard error)</td><td class="good">bounded</td></tr>
-      <tr><th><code>net_in(&quot;&quot;)</code></th><td>listening: the network bound is shared with connecting and <strong>not narrowed</strong></td><td class="good">bounded</td></tr>
-      <tr><th><code>net_out(&quot;&quot;)</code></th><td>connecting: the upstream set is enforced in code and tested, not proved by the compiler</td><td class="good">bounded</td></tr>
+      <tr><th><code>net_in(&quot;&quot;)</code></th><td>listening: the network bound is shared with connecting and <strong>not narrowed</strong></td><td class="bad">UNBOUNDED</td></tr>
+      <tr><th><code>net_out(&quot;&quot;)</code></th><td>connecting: the upstream set is enforced in code and tested, not proved by the compiler</td><td class="bad">UNBOUNDED</td></tr>
       <tr><th><code>poll</code></th><td>the poller: one thread, one loop</td><td class="good">bounded</td></tr>
       <tr><th><code>signals(&quot;HUP,INT,TERM&quot;)</code></th><td>claiming exactly three signals: SIGHUP reloads the TLS certificates, SIGINT and SIGTERM stop the gateway</td><td class="good">bounded</td></tr>
       <tr><th><code>signals_read</code></th><td>reading those three signals from the poller</td><td class="good">bounded</td></tr>
@@ -237,8 +237,8 @@ $ <span class="c"># the same line the gateway wrote to stdout:</span>
       <tr><th><code>fs_read(&quot;/etc/cancho-gateway/tls&quot;)</code></th><td>the certificate directory compiled into the binary, exactly this path</td><td class="good">bounded</td></tr>
       <tr><th><code>heap</code></th><td>the heap: every slab is sized at start</td><td class="good">bounded</td></tr>
       <tr><th><code>io_write</code></th><td>standard output: the access log (and standard error)</td><td class="good">bounded</td></tr>
-      <tr><th><code>net_in(&quot;&quot;)</code></th><td>listening: the network bound is shared with connecting and <strong>not narrowed</strong></td><td class="good">bounded</td></tr>
-      <tr><th><code>net_out(&quot;&quot;)</code></th><td>connecting: the upstream set is enforced in code and tested, not proved by the compiler</td><td class="good">bounded</td></tr>
+      <tr><th><code>net_in(&quot;&quot;)</code></th><td>listening: the network bound is shared with connecting and <strong>not narrowed</strong></td><td class="bad">UNBOUNDED</td></tr>
+      <tr><th><code>net_out(&quot;&quot;)</code></th><td>connecting: the upstream set is enforced in code and tested, not proved by the compiler</td><td class="bad">UNBOUNDED</td></tr>
       <tr><th><code>poll</code></th><td>the poller: one thread, one loop</td><td class="good">bounded</td></tr>
       <tr><th><code>signals(&quot;HUP,INT,TERM&quot;)</code></th><td>claiming exactly three signals: SIGHUP reloads the TLS certificates, SIGINT and SIGTERM stop the gateway</td><td class="good">bounded</td></tr>
       <tr><th><code>signals_read</code></th><td>reading those three signals from the poller</td><td class="good">bounded</td></tr>

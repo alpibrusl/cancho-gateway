@@ -4,7 +4,7 @@
     python3 scripts/authority.py            # regenerate manifests/gateway.authority.json, then check
     python3 scripts/authority.py --check    # change nothing; exit 1 on drift or a breach
 
-A derived label must be in authority.toml; `bounded` must be true; no foreign symbol; and no label
+A derived label must be in authority.toml; the report may be unbounded only by what the ceiling names; no foreign symbol; and no label
 named in FORBIDDEN, whatever the ceiling says. The compiler is $CANCHO, or `cancho` on PATH.
 """
 
@@ -49,8 +49,14 @@ def label_text(label):
 
 def problems_for(name, report, allowed):
     problems = []
-    if not report.get("bounded", False):
-        problems.append("%s: bounded is false" % name)
+    # `bounded` is false while a network is held without a literal narrowing (the compiler's report since net-bounds): the gateway listens and
+    # connects where its deployment says, so `net_in("")` and `net_out("")` are in the ceiling (docs/design.md section 2.1). What may make the
+    # report unbounded is exactly what the ceiling names.
+    for item in report.get("unbounded_by", []):
+        if item not in allowed:
+            problems.append("%s: unbounded by %s, which the ceiling does not allow" % (name, item))
+    if not report.get("bounded", False) and not report.get("unbounded_by"):
+        problems.append("%s: bounded is false and nothing says why" % name)
     if report.get("foreign_symbols"):
         problems.append("%s: foreign symbols %s" % (name, report["foreign_symbols"]))
     for label in report["labels"]:

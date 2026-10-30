@@ -63,7 +63,7 @@ file compiled in by `scripts/generate.py` (task #11): `generated/deploy.cho` hol
 still computes `intended_egress_prefix` (longest common prefix cut at a delimiter, empty if none) and prints it, so the day
 cancho has separate bounds the literal is already derived and tested.
 
-What is proved, and by what: the compiler proves **no ffi, no file writes, bounded, the network and the clock, and (since TLS, `docs/tls.md`) reading exactly two named paths: `/dev/urandom` and the certificate directory** (the ceiling gate,
+What is proved, and by what: the compiler proves **no ffi, no file writes, a report unbounded only by the open network (`net_in("")`, `net_out("")`: the compiler at f4ead824 marks a network held without a literal narrowing unbounded, and the ceiling names exactly those two), the network and the clock, and (since TLS, `docs/tls.md`) reading exactly two named paths: `/dev/urandom` and the certificate directory** (the ceiling gate,
 `authority.toml`). The tests prove the upstream set (`tests/egress_test.cho`, the generator's tests, and the mutants listed in
 section 9). Nothing proves the set *to the compiler*, and the README says so.
 

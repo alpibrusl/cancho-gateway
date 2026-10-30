@@ -66,8 +66,10 @@ def row(label):
 
 def table(name, title, note):
     report = load(name)
-    if not report.get("bounded", False):
-        sys.exit("proof.py: %s is not bounded; the page refuses to show it" % name)
+    # Unbounded only by an open network the ceiling names (authority.toml): the table says UNBOUNDED beside that label, which is true.
+    shown = {label_text(l) for l in report["labels"]}
+    if any(item not in shown for item in report.get("unbounded_by", [])) or (not report.get("bounded", False) and not report.get("unbounded_by")):
+        sys.exit("proof.py: %s is unbounded by something the page does not show; the page refuses to show it" % name)
     if report.get("foreign_symbols"):
         sys.exit("proof.py: %s derives foreign symbols; the page refuses to show it" % name)
     labels = report["labels"]

@@ -17,6 +17,14 @@
       "bounded": true
     }
   ],
+  "never_touches": [
+    "the filesystem",
+    "the network",
+    "the heap",
+    "signals",
+    "other programs",
+    "foreign code"
+  ],
   "foreign_symbols": [],
   "pure": [
     "body_bytes",
@@ -88,7 +96,5 @@
     "version",
     "well_formed_version"
   ],
-  "folded_operators": 16,
-  "folded_calls": 0,
   "functions": 75
 }
