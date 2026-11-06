@@ -93,7 +93,7 @@ KEYS = {
     "api_key": ["name", "sha256"],
     "jwt_key": ["name", "public_key"],
     "route": ["name", "host", "path_prefix", "methods", "upstream", "max_body", "trust_forwarded", "websocket", "subprotocols", "origins", "ws_max_message_bytes", "ws_ocpp",
-              "rate_limit", "rate_burst", "rate_key", "rate_buckets", "rate_route_limit", "rate_route_burst", "rate_xff_prefix", "auth", "auth_header", "auth_keys", "auth_forward",
+              "rate_limit", "rate_burst", "rate_key", "rate_buckets", "rate_route_limit", "rate_route_burst", "rate_xff_prefix", "auth", "auth_header", "auth_keys", "auth_forward", "auth_identity_header",
               "jwt_alg", "jwt_keys", "jwt_aud", "jwt_iss", "jwt_leeway"],
 }
 
@@ -268,9 +268,9 @@ def jwt_algorithm_message(alg):
 
 def auth_options(r, key_names, jwt_names, refuse, i):
     """The authentication keys of one route (docs/auth.md section 6, docs/jwt.md section 8), checked; answers the fields of its record. `refuse(rule, message, section, index, key)` raises."""
-    none = {"auth": 0, "auth_header": "", "auth_forward": 0, "auth_keys": "", "challenge": "", "jwt_keys": "", "jwt_aud": "", "jwt_iss": "", "jwt_leeway": 0}
+    none = {"auth": 0, "auth_header": "", "auth_forward": 0, "auth_identity": "", "auth_keys": "", "challenge": "", "jwt_keys": "", "jwt_aud": "", "jwt_iss": "", "jwt_leeway": 0}
     if "auth" not in r:
-        for key in ("auth_header", "auth_keys", "auth_forward", "jwt_alg", "jwt_keys", "jwt_aud", "jwt_iss", "jwt_leeway"):
+        for key in ("auth_header", "auth_keys", "auth_forward", "auth_identity_header", "jwt_alg", "jwt_keys", "jwt_aud", "jwt_iss", "jwt_leeway"):
             if key in r:
                 refuse("config.auth", "%s needs auth on the same route (docs/auth.md section 6)" % key, "route", i, key)
         return none
@@ -303,6 +303,12 @@ def auth_options(r, key_names, jwt_names, refuse, i):
     forward = r.get("auth_forward", False)
     if not isinstance(forward, bool):
         bad("auth_forward must be true or false (docs/auth.md section 3)", "auth_forward")
+    identity = r.get("auth_identity_header", "")
+    if "auth_identity_header" in r:
+        if not isinstance(identity, str) or not TOKEN.fullmatch(identity):
+            bad("auth_identity_header must be a header name: a token of 1 to 64 bytes (docs/auth.md section 3.1)", "auth_identity_header")
+        if identity.lower() in AUTH_REFUSED_HEADERS + ["via", "authorization", "cookie", "set-cookie"] or identity.lower() == header.lower():
+            bad("auth_identity_header names %s, which the gateway removes, owns or replaces, or which carries a credential: it cannot carry the caller's name (docs/auth.md section 3.1)" % identity, "auth_identity_header")
     jwt = {"jwt_keys": "", "jwt_aud": "", "jwt_iss": "", "jwt_leeway": 0}
     if has_jwt:
         if "jwt_alg" in r and r["jwt_alg"] != "EdDSA":
@@ -327,7 +333,7 @@ def auth_options(r, key_names, jwt_names, refuse, i):
         challenge = 'Bearer realm="cancho-gateway"'
     else:
         challenge = 'ApiKey realm="cancho-gateway", header="%s"' % lower
-    return {"auth": (1 if has_api else 0) + (2 if has_jwt else 0), "auth_header": lower, "auth_forward": 1 if forward else 0,
+    return {"auth": (1 if has_api else 0) + (2 if has_jwt else 0), "auth_header": lower, "auth_forward": 1 if forward else 0, "auth_identity": identity.lower(),
             "auth_keys": ("*" if allowed is None else ",".join(str(key_names.index(n)) for n in allowed)) if has_api else "", "challenge": challenge, **jwt}
 
 
@@ -759,12 +765,12 @@ def table_blob(routes):
     authenticates (1 API keys, 2 JWTs, 3 both), the lowercase header it reads, 1 if it forwards the credential, the allowed key indices (`*` for all, else comma-separated), and the
     `WWW-Authenticate` challenge; then the JWT fields (docs/jwt.md): the allowed JWT key indices, the required audience and issuer (empty: none) and the leeway in seconds;
     then the route's `ws_max_message_bytes` (docs/websocket-frames.md); then the route's ceiling (docs/ratelimit.md section 13.1): tokens per period (0: none), the period in ms, the burst, the
-    bucket it is (in the one table), and the IPv6 prefix of an xff key (0: not an xff key); then `ws_ocpp` (docs/ocpp.md: 1 for 1.6, 2 for 2.0.1, 4 for 2.1, the sum for several, 0 for none); tab-separated, in file order."""
-    return "".join("%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n" % (
+    bucket it is (in the one table), and the IPv6 prefix of an xff key (0: not an xff key); then `ws_ocpp` (docs/ocpp.md: 1 for 1.6, 2 for 2.0.1, 4 for 2.1, the sum for several, 0 for none); then the header that carries the authenticated caller's name to the upstream (docs/auth.md section 3.1; empty: none); tab-separated, in file order."""
+    return "".join("%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s\n" % (
         r["host"] or "*", r["prefix"], r["mask"], r["upstream"], r["max_body"], r["trust"], r["name"], r["ws"], ",".join(r["protocols"]), ",".join(r["origins"]),
         r["rate"], r["per_ms"], r["burst"], r["rate_key"], r["buckets"], r["base"],
         r["auth"], r["auth_header"], r["auth_forward"], r["auth_keys"], r["challenge"], r["jwt_keys"], r["jwt_aud"], r["jwt_iss"], r["jwt_leeway"], r["ws_message"],
-        r["c_rate"], r["c_per_ms"], r["c_burst"], r["c_at"], r["xff_prefix"], r["ws_ocpp"]) for r in routes)
+        r["c_rate"], r["c_per_ms"], r["c_burst"], r["c_at"], r["xff_prefix"], r["ws_ocpp"], r["auth_identity"]) for r in routes)
 
 
 def render_routes(routes, rate_total, api_keys, jwt_keys):
@@ -777,7 +783,7 @@ def render_routes(routes, rate_total, api_keys, jwt_keys):
         "// first bucket of the route's table, then authentication (docs/auth.md): 1 if the route authenticates, the header it reads, 1 if it forwards the credential, the",
         "// allowed key indices (`*`: all) and the WWW-Authenticate challenge, then the JWT fields (docs/jwt.md): the allowed public-key indices, the required audience and issuer",
         "// (empty: none) and the leeway in seconds, then the WebSocket message limit (docs/websocket-frames.md), then the route's ceiling (docs/ratelimit.md section 13.1: tokens per period,",
-        "// the period in ms, the burst, the bucket it is), the IPv6 prefix of an xff key (0: not one) and the OCPP-J versions whose frames are validated (docs/ocpp.md). Tab-separated, in file order; `gateway.route` reads it.", "",
+        "// the period in ms, the burst, the bucket it is), the IPv6 prefix of an xff key (0: not one) the OCPP-J versions whose frames are validated (docs/ocpp.md), and the header that carries the authenticated caller's name upstream (docs/auth.md section 3.1; empty: none). Tab-separated, in file order; `gateway.route` reads it.", "",
         "pub fn count() -> [] int {", "    return %d;" % len(routes), "}", "",
         "// The buckets of every route's rate-limit table, added up (docs/ratelimit.md section 6): what the table is sized to.",
         "pub fn rate_buckets_total() -> [] int {", "    return %d;" % rate_total, "}", "",

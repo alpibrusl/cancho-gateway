@@ -69,6 +69,35 @@ or its debugging output. `auth_forward = true` on a route keeps it, for an upstr
 Only the header the route reads is removed: a client's `Authorization` on a route that reads `X-Api-Key` is the upstream's business and is forwarded as before (`docs/headers.md` section 2). A header named by `Connection`
 is removed by the existing rule whatever its name.
 
+### 3.1 Telling the upstream who the caller is (`auth_identity_header`)
+
+The gateway now knows who a request is (the name of the `[[api_key]]` or `[[jwt_key]]` that verified it), and used to keep that to itself: the access log has it (`identity`), the upstream did not, so an application behind
+the gateway either re-checked the credential (`auth_forward = true`) or trusted nothing. A route may now name a header:
+
+    [[route]]
+    auth = "api-key"
+    auth_identity_header = "X-Auth-Identity"     # default: none
+
+and then, on that route (**choices**, each pinned by a test below):
+
+* every header of that name the client sent is **removed**, in any spelling and however many times, before anything else is decided. Nothing a client writes there reaches the upstream, **including on a route with `trust_forwarded = true`**: a trusted
+  front is believed about *where the request came from* (`docs/headers.md`), not about *who the caller is*. Only the gateway has verified a credential.
+* one header of that name is **added**, after `Via`, with the name of the key the request authenticated as, on a plain request and on a WebSocket upgrade alike. The name is what the access log calls `identity`: an API key's name, or a JWT key's `kid`
+  (the deployment makes the two kinds' names distinct). It is written `[a-z0-9._-]`, at most 32 bytes, by the generator's rule for key names, so it cannot carry a delimiter.
+* the header is written in **lower case** whatever the deployment spelled (the generator lowercases it, as it does `auth_header`); header names are case-insensitive.
+* a route **without** the key does not touch a client's header of that name: the policy is the route's. A deployment that sets it on some routes only should know the other routes forward what the client sent.
+
+The generator refuses (`config.auth`, the key and the line): the key on a route without `auth`; a value that is not a token of 1 to 64 bytes; a name the gateway removes or owns (the hop-by-hop ones, `Content-Length`, `Transfer-Encoding`, `Host`, the forwarding claims,
+`X-Request-Id`, `Via`); `Authorization`, `Cookie` and `Set-Cookie`, which carry credentials; and the route's own `auth_header` (it would overwrite the credential it just removed).
+
+**What this proves, and what it does not.** An upstream that reads the header and is reachable *only* through the gateway can rely on it: the client cannot forge it (removed, then set by the gateway, both measured below). An upstream that can be reached by another route, or directly,
+cannot: any caller there can write the header. That is a deployment property the gateway cannot see; it is the reason the header is opt-in. The header carries a *name*, not a proof: it is not signed, and an upstream that must prove the caller to a third party needs
+the credential (`auth_forward = true`) or a signature this gateway does not produce.
+
+**Measured** (the pinned compiler): `tests/forward_test.cho` (the head is rewritten as above, in any case and number of client claims, with and without `trust_forwarded`, an unknown caller, an upgrade, a route without the key); `tests/auth_test.py`
+`identity_header_carries_the_authenticated_name_and_nothing_a_client_sent` and the WebSocket case in `a_websocket_upgrade_is_authenticated_and_a_refused_one_takes_no_tunnel_place`; `tests/jwt_test.py` (a JWT key's `kid`);
+`tests/generate_test.py` (every refusal above, the lower-case column, and that only the route that asked carries it). The mutants `i01` to `i17` of `tests/auth_mutants.py` (section 12.4) break each of those.
+
 ## 4. The key table and the comparison
 
 ### 4.1 What is compiled in
@@ -130,6 +159,7 @@ which `ps` shows) and prints the same table. Nothing is logged by the script.
     auth_header = "Authorization"        # default; any other token (<= 64 bytes) is read as the whole header value
     auth_keys = ["alice", "bob"]         # default: every [[api_key]]
     auth_forward = false                 # default: the credential header is removed before the upstream sees the request
+    auth_identity_header = "X-Auth-Identity"   # default: none; the upstream is told who the caller is (section 3.1)
     rate_limit = "100/s"
     rate_key = "auth"                    # one bucket per identity
 
@@ -143,7 +173,7 @@ Refusals, all `config.auth` with the key and the line of the file, each with one
 | 4 | two keys with the same `sha256` (one credential, two identities: ambiguous) |
 | 5 | more than 64 `[[api_key]]` |
 | 6 | `auth` is anything but `"api-key"` |
-| 7 | `auth_header`, `auth_keys` or `auth_forward` on a route without `auth` |
+| 7 | `auth_header`, `auth_keys`, `auth_forward` or `auth_identity_header` on a route without `auth` |
 | 8 | `auth_header` is not a token of 1 to 64 bytes, or names a header the gateway removes or owns (the hop-by-hop ones, `Content-Length`, `Transfer-Encoding`, `Host`) or a forwarding claim (`Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `X-Request-Id`), which are removed or replaced and so could never carry a key |
 | 9 | `auth_keys` is not a non-empty list of distinct declared key names |
 | 10 | `auth_forward` is not a boolean |
@@ -438,6 +468,23 @@ The three that survive, and why no test can or should kill them:
 | p16 | every caller spends its neighbour's bucket | survives | argued: every caller spends the bucket of the next key's name (the last, the empty key's): a relabelling of buckets, one per caller, that nothing outside the table can tell from the right one |
 | p17 | an unknown key is admitted as no one | killed | `e2e each_bad_credential_is_refused_with_its_status_its_rule_and_its_challenge` |
 | p18 | a forbidden key is a 401 | killed | `e2e a_valid_key_the_route_does_not_allow_is_a_403` |
+| i01 | a client's own claim of who it is reaches the upstream | killed | `cancho test` (`forward`): the removal tests |
+| i02 | a claim in another spelling of the header name reaches the upstream | killed | `cancho test` (`forward`): the removal tests |
+| i03 | the upstream is never told who the caller is | killed | `cancho test` (`forward`) |
+| i04 | an unknown caller is sent as an empty name | killed | `cancho test` (`forward`) |
+| i05 | a route that trusts its front is not told who the caller is | killed | `cancho test` (`forward`) |
+| i06 | a trusted front's claim of who the caller is is believed | killed | `cancho test` (`forward`) |
+| i07 | the route's header is not applied | killed | `e2e identity_header_carries_the_authenticated_name_and_nothing_a_client_sent` |
+| i08 | the name sent is empty | killed | the same |
+| i09 | the upstream is told the neighbour's name | killed | the same |
+| i10 | a tunnel's upstream is not told who opened it | killed | `e2e a_websocket_upgrade_is_authenticated_and_a_refused_one_takes_no_tunnel_place` |
+| i11 | a route without authentication is given a name | survives | argued: the generator refuses `auth_identity_header` on a route without `auth`, so the column is empty there and `auth.identity` is not consulted for it; the condition is defence in depth for a route table this generator did not write |
+| i12 | the header is read from the wrong column | killed | the same e2e as i07 |
+| i13 | the header name is not lowercased | killed | generate_test: the compiled routes table |
+| i14 | any value is a header name | killed | generate_test: the refusal cases |
+| i15 | a credential header may carry the caller's name | killed | generate_test: the refusal cases |
+| i16 | the caller's name may overwrite the credential header | killed | generate_test: the refusal case |
+| i17 | an identity header on a route without auth is accepted | killed | generate_test: the refusal case |
 | q01 | a 403 carries a challenge | killed | `test_a_401_carries_the_routes_challenge_and_no_other_response_does` |
 | q02 | an unknown key is told its credential was not asked for | killed | `test_a_401_carries_the_routes_challenge_and_no_other_response_does` |
 | q03 | a malformed credential is told it was missing | killed | `test_a_401_carries_the_routes_challenge_and_no_other_response_does` |

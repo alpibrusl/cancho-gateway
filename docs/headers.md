@@ -31,6 +31,7 @@ itself on `tls_listen` (`docs/tls.md`); a client that did is forwarded as `https
 | `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Port`, `X-Real-IP` (request) | **removed**, whatever the client sent | passed through untouched |
 | `X-Forwarded-Host`, `X-Forwarded-Proto` (request) | inbound removed; `X-Forwarded-Host: <the Host header as received>` and `X-Forwarded-Proto: https` (the client spoke TLS on `tls_listen`) or `http` added | passed through untouched; none added |
 | `X-Request-Id` (request) | inbound removed; a generated one added | one inbound header whose value is 1 to 64 bytes of `[A-Za-z0-9._-]` is **kept**; any other (invalid value, empty, or more than one header) is removed and a generated one added |
+| the route's `auth_identity_header` (request; only where the route sets it, docs/auth.md section 3.1) | removed, in any case and any number | removed, in any case and any number (a trusted front is believed about the client's address, not about who the caller is) |
 | `Via` (request) | inbound kept (an intermediary appends, RFC 9110 7.6.3); `Via: 1.1 cancho-gateway` appended | the same |
 | `Via` (response) | upstream's kept; `Via: 1.1 cancho-gateway` appended | the same |
 | hop-by-hop, and headers named by `Connection` | removed, both directions (unchanged) | unchanged |
