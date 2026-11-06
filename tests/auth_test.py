@@ -50,6 +50,14 @@ upstream = "up"
 auth = "api-key"
 
 [[route]]
+name = "who"
+path_prefix = "/who"
+upstream = "up"
+auth = "api-key"
+auth_keys = ["alice", "bob"]
+auth_identity_header = "X-Auth-Identity"
+
+[[route]]
 name = "hdr"
 path_prefix = "/h"
 upstream = "up"
@@ -98,6 +106,7 @@ path_prefix = "/wsa"
 upstream = "ws"
 websocket = true
 auth = "api-key"
+auth_identity_header = "X-Auth-Identity"
 
 [[route]]
 name = "wso"
@@ -154,6 +163,30 @@ class Main:
         # A name in another case is the same header.
         s, *_ = get(gw, "/h/case", ["x-API-key: " + KEYS["alice"]])
         assert s == 200 and "x-api-key" not in head_of(up, "/h/case")[0]
+
+    def identity_header_carries_the_authenticated_name_and_nothing_a_client_sent(gw, up, ws):
+        # The upstream is told who the gateway authenticated, under the route's header, once, in lower case.
+        for name in ("alice", "bob"):
+            s, *_ = get(gw, "/who/%s" % name, [bearer(name)])
+            assert s == 200
+            heads, raw = head_of(up, "/who/%s" % name)
+            assert heads["x-auth-identity"] == [name], heads
+            assert "authorization" not in heads and KEYS[name].encode() not in raw, heads
+        # A client's own claim is removed whatever its spelling and however often it is repeated, and never reaches the upstream.
+        s, *_ = get(gw, "/who/forged", [bearer("alice"), "X-Auth-Identity: root", "x-auth-identity: bob", "X-AUTH-IDENTITY: admin"])
+        assert s == 200
+        heads, raw = head_of(up, "/who/forged")
+        assert heads["x-auth-identity"] == ["alice"] and b"root" not in raw and b"admin" not in raw, heads
+        # A request that is refused (no key, a wrong one, a key the route does not allow) reaches no upstream, so its claim cannot either.
+        n = len(up.heads) if hasattr(up, "heads") else None
+        for extra in ([], [bearer("alice")[:-1] + "X"], [bearer("carol")]):
+            s, *_ = get(gw, "/who/refused", extra + ["X-Auth-Identity: root"])
+            assert s in (401, 403), s
+        assert n is None or len(up.heads) == n
+        # A route without the key does not touch a client's header of that name: the policy is the route's, not a global one.
+        s, *_ = get(gw, "/b/other", [bearer("alice"), "X-Auth-Identity: kept"])
+        assert s == 200
+        assert head_of(up, "/b/other")[0]["x-auth-identity"] == ["kept"]
 
     def auth_forward_keeps_the_credential(gw, up, ws):
         s, *_ = get(gw, "/f/kept", [key_header("carol")])
@@ -297,7 +330,7 @@ class Main:
             head, _ = wt.read_head(s)
             got.append(wt.parse_head(head)[0])
         assert got == [401] * 6, got
-        a = wt.connect_ws(gw, "/wsa/a", protocols=(), extra=[bearer("alice")])
+        a = wt.connect_ws(gw, "/wsa/a", protocols=(), extra=[bearer("alice"), "X-Auth-Identity: root"])
         b = wt.connect_ws(gw, "/wsa/b", protocols=(), extra=[bearer("bob")])
         a.text("hello")
         assert a.expect(1) == b"hello"
@@ -310,6 +343,9 @@ class Main:
         with ws.lock:
             heads = [h for h in ws.heads if h.split(b" ")[1].startswith(b"/wsa/")]
         assert len(heads) == 2 and all(b"authorization" not in h.lower() and KEYS["alice"].encode() not in h for h in heads), heads
+        # The upstream of a tunnel is told who opened it, and not what the client claimed.
+        by_path = {h.split(b" ")[1]: pt.heads_of(h) for h in heads}
+        assert by_path[b"/wsa/a"]["x-auth-identity"] == ["alice"] and by_path[b"/wsa/b"]["x-auth-identity"] == ["bob"], by_path
         e = gw.find(n0, path="/wsa/a", wait=8)
         assert e["status"] == 101 and e["upgrade"] == "websocket" and e["identity"] == "alice" and list(e)[-1] == "identity", e
         e = gw.find(n0, path="/wsa/r0")
@@ -363,7 +399,7 @@ class Main:
         lines = gw.lines()
         kinds = {"auth.missing": "missing", "auth.malformed": "malformed", "auth.invalid": "invalid", "auth.forbidden": "forbidden"}
         total = {k: 0 for k in kinds}
-        for name in ("open", "bearer", "hdr", "fwd", "subset", "lim", "hdrlim", "wsa", "wso"):
+        for name in ("open", "bearer", "who", "hdr", "fwd", "subset", "lim", "hdrlim", "wsa", "wso"):
             m = gw.route_metrics(name)
             for rule, kind in kinds.items():
                 mine = [l for l in lines if l.get("route") == name and l.get("rule") == rule]

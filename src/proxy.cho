@@ -547,10 +547,17 @@ fn attach[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, slot: int
         if st[p + 31] > 0 && route.auth(st[p + 31] - 1) > 0 && route.auth_forward(st[p + 31] - 1) == 0 {
             strip = route.auth_header(st[p + 31] - 1);
         }
+        // The caller's name for the upstream (docs/auth.md section 3.1): the route's header, and the name of the key this request authenticated as.
+        var ident = "";
+        var who = "";
+        if st[p + 31] > 0 && route.auth(st[p + 31] - 1) > 0 {
+            ident = route.auth_identity_header(st[p + 31] - 1);
+            who = auth.identity(st[p + shared.auth_slot()]);
+        }
         if st[p + shared.ws_mode()] == 1 {
-            m = forward.rewrite_upgrade_auth(view, tb, pd[slot * shared.pend_size()..slot * shared.pend_size() + shared.pend_size()], st[p + 23] % 2 == 1, st[p + tlsio.f_mode()] != 0, shared.meta_get(core, k, 4, 0), strip);
+            m = forward.rewrite_upgrade_auth(view, tb, pd[slot * shared.pend_size()..slot * shared.pend_size() + shared.pend_size()], st[p + 23] % 2 == 1, st[p + tlsio.f_mode()] != 0, shared.meta_get(core, k, 4, 0), strip, ident, who);
         } else {
-            m = forward.rewrite_auth(view, tb, pd[slot * shared.pend_size()..slot * shared.pend_size() + shared.pend_size()], shared.pool_max() > 0, st[p + 23] % 2 == 1, st[p + tlsio.f_mode()] != 0, shared.meta_get(core, k, 4, 0), strip);
+            m = forward.rewrite_auth(view, tb, pd[slot * shared.pend_size()..slot * shared.pend_size() + shared.pend_size()], shared.pool_max() > 0, st[p + 23] % 2 == 1, st[p + tlsio.f_mode()] != 0, shared.meta_get(core, k, 4, 0), strip, ident, who);
         }
         if m < 0 {
             failed = 0 - m + 1;

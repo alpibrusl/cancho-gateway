@@ -75,6 +75,7 @@ upstream = "up"
 auth = "jwt"
 jwt_aud = "api"
 jwt_iss = "https://iss.example"
+auth_identity_header = "X-Auth-Identity"
 
 [[route]]
 name = "solo"
@@ -260,10 +261,12 @@ class Main:
         n0 = len(gw.lines())
         for i, (kid, seed) in enumerate((("k1", SEED1), ("k2", SEED2))):
             t = tok(h=header(kid=kid), seed=seed)
-            s, h, b, _ = get(gw, "/j/ok%d" % i, [auth(t)])
+            s, h, b, _ = get(gw, "/j/ok%d" % i, [auth(t), "X-Auth-Identity: root"])
             assert s == 200 and b == b"ok", (kid, s, b)
             heads, raw = head_of(up, "/j/ok%d" % i)
             assert "authorization" not in heads and t.encode() not in raw and heads["via"] == ["1.1 cancho-gateway"], heads
+            # The upstream is told the name of the key that verified the token, once, whatever the client claimed (docs/auth.md section 3.1).
+            assert heads["x-auth-identity"] == [kid], heads
             e = gw.find(n0, path="/j/ok%d" % i)
             assert e["status"] == 200 and e["identity"] == kid and list(e)[-1] == "identity" and e["route"] == "jwt", e
         # A token with no kid on a route that has exactly one key (the key is not a choice), the typ in another case, an audience array, whitespace in the payload.

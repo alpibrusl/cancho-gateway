@@ -142,6 +142,7 @@
     "auth_challenge",
     "auth_forward",
     "auth_header",
+    "auth_identity_header",
     "auth_keys",
     "auth_kind",
     "auth_slot",
@@ -1250,5 +1251,5 @@
   ],
   "folded_operators": 231,
   "folded_calls": 347,
-  "functions": 1666
+  "functions": 1667
 }

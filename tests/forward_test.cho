@@ -275,9 +275,9 @@ fn strips_to(req: &static [byte], strip: &static [byte], upgrade: bool, want: &s
         if http.parse(req, table) > 0 {
             var n = 0;
             if upgrade {
-                n = forward.rewrite_upgrade_auth(req, table, out, false, false, "1a-1f90-0000002a", strip);
+                n = forward.rewrite_upgrade_auth(req, table, out, false, false, "1a-1f90-0000002a", strip, "", "");
             } else {
-                n = forward.rewrite_auth(req, table, out, false, false, false, "1a-1f90-0000002a", strip);
+                n = forward.rewrite_auth(req, table, out, false, false, false, "1a-1f90-0000002a", strip, "", "");
             }
             ok = n == len(want) && bytes.equal(out[0..n], want);
         }
@@ -301,5 +301,53 @@ fn test_the_credential_header_the_route_read_is_not_forwarded() -> [] int {
 
 fn test_a_credential_header_is_stripped_from_an_upgrade_too() -> [] int {
     test.assert(strips_to("GET /ws HTTP/1.1\r\nHost: a\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nAuthorization: Bearer ck_alpha\r\nSec-WebSocket-Key: k\r\n\r\n", "authorization", true, "GET /ws HTTP/1.1\r\nHost: a\r\nSec-WebSocket-Key: k\r\nVia: 1.1 cancho-gateway\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"));
+    return 0;
+}
+
+// ---- the caller's name (docs/auth.md section 3.1) ----
+
+fn names_to(req: &static [byte], strip: &static [byte], ident: &static [byte], who: &static [byte], upgrade: bool, trust: bool, want: &static [byte]) -> [] bool {
+    var ok = false;
+    region a {
+        let table = alloc_slice[a](http.slots(32), 0);
+        let out = alloc_slice[a](2048, byte_of(0));
+        if http.parse(req, table) > 0 {
+            var n = 0;
+            if upgrade {
+                n = forward.rewrite_upgrade_auth(req, table, out, trust, false, "1a-1f90-0000002a", strip, ident, who);
+            } else {
+                n = forward.rewrite_auth(req, table, out, false, trust, false, "1a-1f90-0000002a", strip, ident, who);
+            }
+            ok = n == len(want) && bytes.equal(out[0..n], want);
+        }
+    }
+    return ok;
+}
+
+fn test_the_callers_name_is_sent_in_the_routes_header() -> [] int {
+    let tail = "X-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: close\r\n\r\n";
+    test.assert(names_to("GET / HTTP/1.1\r\nHost: a\r\nAuthorization: Bearer k\r\n\r\n", "authorization", "x-auth-identity", "alice", false, false, "GET / HTTP/1.1\r\nHost: a\r\nVia: 1.1 cancho-gateway\r\nx-auth-identity: alice\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: close\r\n\r\n"));
+    return 0;
+}
+
+fn test_a_name_the_client_sent_is_removed_in_any_case_and_any_number() -> [] int {
+    test.assert(names_to("GET / HTTP/1.1\r\nHost: a\r\nX-Auth-Identity: root\r\nx-auth-identity: admin\r\nX-AUTH-IDENTITY: x\r\nX-Keep: 1\r\n\r\n", "", "x-auth-identity", "alice", false, false, "GET / HTTP/1.1\r\nHost: a\r\nX-Keep: 1\r\nVia: 1.1 cancho-gateway\r\nx-auth-identity: alice\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: close\r\n\r\n"));
+    // A route that trusts the party in front still does not believe a name from it: only the gateway says who the caller is.
+    test.assert(names_to("GET / HTTP/1.1\r\nHost: a\r\nX-Auth-Identity: root\r\n\r\n", "", "x-auth-identity", "alice", false, true, "GET / HTTP/1.1\r\nHost: a\r\nVia: 1.1 cancho-gateway\r\nx-auth-identity: alice\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: close\r\n\r\n"));
+    return 0;
+}
+
+fn test_a_route_without_the_header_leaves_a_clients_alone() -> [] int {
+    test.assert(names_to("GET / HTTP/1.1\r\nHost: a\r\nX-Auth-Identity: root\r\n\r\n", "", "", "alice", false, false, "GET / HTTP/1.1\r\nHost: a\r\nX-Auth-Identity: root\r\nVia: 1.1 cancho-gateway\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: close\r\n\r\n"));
+    return 0;
+}
+
+fn test_a_name_that_is_not_known_sends_nothing_but_still_removes_the_clients() -> [] int {
+    test.assert(names_to("GET / HTTP/1.1\r\nHost: a\r\nX-Auth-Identity: root\r\n\r\n", "", "x-auth-identity", "", false, false, "GET / HTTP/1.1\r\nHost: a\r\nVia: 1.1 cancho-gateway\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: close\r\n\r\n"));
+    return 0;
+}
+
+fn test_the_name_is_sent_on_an_upgrade_too() -> [] int {
+    test.assert(names_to("GET /ws HTTP/1.1\r\nHost: a\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nX-Auth-Identity: root\r\n\r\n", "", "x-auth-identity", "alice", true, false, "GET /ws HTTP/1.1\r\nHost: a\r\nVia: 1.1 cancho-gateway\r\nx-auth-identity: alice\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"));
     return 0;
 }

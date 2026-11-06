@@ -66,7 +66,7 @@ m("c12", A, "        if n == index {\n            return bytes.field", "        
 # ---- equivalent to the eye of a functional test: they change timing, never an answer (docs/auth.md section 4.3)
 m("e01", A, "    while i < hex_len() {\n        diff =", "    while i < hex_len() && diff == 0 {\n        diff =", "unit", "a digest comparison stops at its first difference")
 m("e02", A, "        while at < len(blob) {\n            let end = line_end(blob, at);\n            // The digest follows", "        while at < len(blob) && found == 0 {\n            let end = line_end(blob, at);\n            // The digest follows", "unit", "the keys after a match are not compared")
-EQUIVALENT |= {"e01", "e02", "p16"}
+EQUIVALENT |= {"e01", "e02", "p16", "i11"}
 m("k01", A, "        return true;\n    }\n    var v = 0;", "        return false;\n    }\n    var v = 0;", "unit", "a route that allows every key allows none")
 m("k02", A, "            if any && v == index {", "            if any && v == index + 1 {", "unit", "a route's list is shifted by one")
 m("k03", A, "        } else if bytes.is_digit(int_of(keys[i])) && v < 1000 {", "        } else if bytes.is_digit(int_of(keys[i])) {", "unit", "a huge number in a list overflows")
@@ -110,6 +110,24 @@ m("p15", P, "auth.identity(st[p + shared.auth_slot()]), route.rate(sel)", 'auth.
 m("p16", P, "auth.identity(st[p + shared.auth_slot()]), route.rate(sel)", "auth.identity(st[p + shared.auth_slot()] + 1), route.rate(sel)", ["authentication_comes_before_the_rate_limiter_and_the_identity_is_its_key"], "every caller spends its neighbour's bucket")
 m("p17", P, "            if found == 0 {\n                rule = 3;", "            if found < 0 {\n                rule = 3;", ["each_bad_credential_is_refused_with_its_status_its_rule_and_its_challenge"], "an unknown key is admitted as no one")
 m("p18", P, "    slots.refuse(tab, core, k, auth.status(rule), auth.tag(rule), now);", "    slots.refuse(tab, core, k, 401, auth.tag(rule), now);", ["a_valid_key_the_route_does_not_allow_is_a_403"], "a forbidden key is a 401")
+# ---- the caller's name for the upstream (docs/auth.md section 3.1)
+m("i01", F, "        if copy && len(ident) > 0 && is(name, ident) {", "        if false {", "unit", "a client's own claim of who it is reaches the upstream")
+m("i02", F, "        if copy && len(ident) > 0 && is(name, ident) {", "        if copy && len(ident) > 0 && bytes.equal(name, ident) {", "unit", "a claim in another spelling of the header name reaches the upstream")
+m("i03", F, "    if len(ident) > 0 && len(who) > 0 {", "    if false {", "unit", "the upstream is never told who the caller is")
+m("i04", F, "    if len(ident) > 0 && len(who) > 0 {", "    if len(ident) > 0 {", "unit", "an unknown caller is sent as an empty name")
+m("i05", F, "    if len(ident) > 0 && len(who) > 0 {", "    if !trust && len(ident) > 0 && len(who) > 0 {", "unit", "a route that trusts its front is not told who the caller is")
+m("i06", F, "        if copy && len(ident) > 0 && is(name, ident) {", "        if copy && len(ident) > 0 && !trust && is(name, ident) {", "unit", "a trusted front's claim of who the caller is is believed")
+m("i07", P, "            ident = route.auth_identity_header(st[p + 31] - 1);", '            ident = "";', ["identity_header_carries_the_authenticated_name_and_nothing_a_client_sent"], "the route's header is not applied")
+m("i08", P, "            who = auth.identity(st[p + shared.auth_slot()]);", '            who = "";', ["identity_header_carries_the_authenticated_name_and_nothing_a_client_sent"], "the name sent is empty")
+m("i09", P, "            who = auth.identity(st[p + shared.auth_slot()]);", "            who = auth.identity(st[p + shared.auth_slot()] + 1);", ["identity_header_carries_the_authenticated_name_and_nothing_a_client_sent"], "the upstream is told the neighbour's name")
+m("i10", P, "st[p + tlsio.f_mode()] != 0, shared.meta_get(core, k, 4, 0), strip, ident, who);\n        } else {", 'st[p + tlsio.f_mode()] != 0, shared.meta_get(core, k, 4, 0), strip, "", "");\n        } else {', ["a_websocket_upgrade_is_authenticated_and_a_refused_one_takes_no_tunnel_place"], "a tunnel's upstream is not told who opened it")
+m("i11", P, "        if st[p + 31] > 0 && route.auth(st[p + 31] - 1) > 0 {\n            ident", "        if st[p + 31] > 0 {\n            ident", ["identity_header_carries_the_authenticated_name_and_nothing_a_client_sent"], "a route without authentication is given a name")
+m("i12", "src/route.cho", "bytes.field(blob[at..line_end(blob, at)], 9, 33);", "bytes.field(blob[at..line_end(blob, at)], 9, 32);", ["identity_header_carries_the_authenticated_name_and_nothing_a_client_sent"], "the header is read from the wrong column")
+m("i13", "scripts/generate.py", '"auth_identity": identity.lower(),', '"auth_identity": identity,', "gen", "the header name is not lowercased")
+m("i14", "scripts/generate.py", '        if not isinstance(identity, str) or not TOKEN.fullmatch(identity):', "        if False:", "gen", "any value is a header name")
+m("i15", "scripts/generate.py", '["via", "authorization", "cookie", "set-cookie"]', '["via"]', "gen", "a credential header may carry the caller's name")
+m("i16", "scripts/generate.py", " or identity.lower() == header.lower():", ":", "gen", "the caller's name may overwrite the credential header")
+m("i17", "scripts/generate.py", '        for key in ("auth_header", "auth_keys", "auth_forward", "auth_identity_header",', '        for key in ("auth_header", "auth_keys", "auth_forward",', "gen", "an identity header on a route without auth is accepted")
 # ---- the generator
 G = "scripts/generate.py"
 m("g01", G, 'KEY_DIGEST = re.compile(r"[0-9a-f]{64}")', 'KEY_DIGEST = re.compile(r"[0-9a-fA-F]{64}")', "gen", "an uppercase digest is accepted")

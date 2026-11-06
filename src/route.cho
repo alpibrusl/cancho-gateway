@@ -385,6 +385,13 @@ pub fn ws_ocpp(index: int) -> [] int {
     return number(bytes.field(blob[at..line_end(blob, at)], 9, 32));
 }
 
+// The header that carries the name of the key route `index` authenticated the caller as, to the upstream (docs/auth.md section 3.1); empty if the route has none.
+pub fn auth_identity_header(index: int) -> [] &static [byte] {
+    let blob = routes_table.blob();
+    let at = line_start(blob, index);
+    return bytes.field(blob[at..line_end(blob, at)], 9, 33);
+}
+
 // JWT acceptance of route `index` (docs/jwt.md section 8; `auth` above is 1 for API keys, 2 for JWTs, 3 for both): the public-key indices it allows (`*` for all, else comma-separated),
 // the audience and issuer a token must carry (empty: not checked) and the leeway in seconds.
 pub fn jwt_keys(index: int) -> [] &static [byte] {

@@ -449,6 +449,13 @@ def auth_cases():
     # 10: forwarding the credential
     for value in ('"yes"', "1", '"true"'):
         out.append(auth_refusal("config.auth", "auth_forward", TOP + ONE + K1 + AR + "auth_forward = %s\n" % value))
+    # 10b: the header that carries the caller's name upstream (docs/auth.md section 3.1)
+    out.append(auth_refusal("config.auth", "auth_identity_header", TOP + ONE + '[[route]]\nupstream = "a"\npath_prefix = "/"\nauth_identity_header = "X-Auth-Identity"\n'))
+    for header in ("Host", "Connection", "Content-Length", "Transfer-Encoding", "Proxy-Authorization", "Upgrade", "TE", "X-Forwarded-For", "Forwarded", "X-Real-IP", "X-Request-Id", "Via",
+                   "Authorization", "authorization", "Cookie", "Set-Cookie", "X Id", "", "x" * 65, "Bad:Name", "naïve"):
+        out.append(auth_refusal("config.auth", "auth_identity_header", TOP + ONE + K1 + AR + 'auth_identity_header = "%s"\n' % header))
+    out.append(auth_refusal("config.auth", "auth_identity_header", TOP + ONE + K1 + AR + "auth_identity_header = 5\n"))
+    out.append(auth_refusal("config.auth", "auth_identity_header", TOP + ONE + K1 + AR + 'auth_header = "X-Api-Key"\nauth_identity_header = "x-API-key"\n'))
     # 11: auth and no key at all
     out.append(auth_refusal("config.auth", "auth = ", TOP + ONE + AR))
     # 12: keys and no route that authenticates
@@ -482,6 +489,8 @@ def auth_accepted():
         TOP + ONE + K1 + K2 + AR + 'auth_header = "X-Api-Key"\nauth_keys = ["bob"]\nauth_forward = true\n',
         TOP + ONE + K1 + K2 + AR + 'auth_header = "authorization"\nauth_keys = ["bob", "alice"]\nauth_forward = false\nrate_limit = "5/s"\nrate_key = "auth"\nrate_buckets = 4\n',
         TOP + ONE + K1 + K2 + AR + 'auth_header = "X-Custom_Key.1"\n',
+        TOP + ONE + K1 + K2 + AR + 'auth_identity_header = "X-Auth-Identity"\n',
+        TOP + ONE + K1 + K2 + AR + 'auth_header = "X-Api-Key"\nauth_identity_header = "X-Auth-User"\nauth_forward = true\n',
         TOP + ONE + sixty_four + AR,
         TOP + ONE + K1 + AR + '[[route]]\nupstream = "a"\npath_prefix = "/open"\n',
         # an identity as the rate key: four keys fit a table of four, a route that admits four of five fits one too, and 64 keys fit a table of 4,096
@@ -650,10 +659,10 @@ def jwt_compiled(run, failures):
         table = (pathlib.Path(tmp) / "routes.cho").read_text()
         explained = run(text).stdout
     wants = ["pub fn jwt_key_count() -> [] int {\n    return 2;", 'return "ka\\t%s\\nkb\\t%s\\n";' % (PKA, PKB),
-             '\\t2\\tauthorization\\t0\\t\\tBearer realm=\\"cancho-gateway\\"\\t1\\tapi\\thttps://i.example\\t7\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n',
-             '\\t3\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t*\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n',
-             '\\t1\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n',
-             '\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n']
+             '\\t2\\tauthorization\\t0\\t\\tBearer realm=\\"cancho-gateway\\"\\t1\\tapi\\thttps://i.example\\t7\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\t\\n',
+             '\\t3\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t*\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\t\\n',
+             '\\t1\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\t\\n',
+             '\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\t\\n']
     for want in wants:
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
@@ -751,7 +760,7 @@ def frames_compiled(run, failures):
         table = (pathlib.Path(tmp) / "routes.cho").read_text()
         deploy = (pathlib.Path(tmp) / "deploy.cho").read_text()
         explained = run(text).stdout
-    for want in ("\\t65536\\t0\\t0\\t0\\t0\\t0\\t0\\n", "\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n"):
+    for want in ("\\t65536\\t0\\t0\\t0\\t0\\t0\\t0\\t\\n", "\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\t\\n"):
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
             failures += 1
@@ -797,7 +806,7 @@ def ocpp_compiled(run, failures):
         subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(f), "--out", tmp], check=True)
         table = (pathlib.Path(tmp) / "routes.cho").read_text()
         explained = run(text).stdout
-    for want in ("\\t1111\\t0\\t0\\t0\\t0\\t0\\t1\\n", "\\t2222\\t0\\t0\\t0\\t0\\t0\\t2\\n", "\\t3333\\t0\\t0\\t0\\t0\\t0\\t3\\n", "\\t4444\\t0\\t0\\t0\\t0\\t0\\t0\\n", "\\t5555\\t0\\t0\\t0\\t0\\t0\\t4\\n", "\\t6666\\t0\\t0\\t0\\t0\\t0\\t5\\n", "\\t7777\\t0\\t0\\t0\\t0\\t0\\t7\\n"):
+    for want in ("\\t1111\\t0\\t0\\t0\\t0\\t0\\t1\\t\\n", "\\t2222\\t0\\t0\\t0\\t0\\t0\\t2\\t\\n", "\\t3333\\t0\\t0\\t0\\t0\\t0\\t3\\t\\n", "\\t4444\\t0\\t0\\t0\\t0\\t0\\t0\\t\\n", "\\t5555\\t0\\t0\\t0\\t0\\t0\\t4\\t\\n", "\\t6666\\t0\\t0\\t0\\t0\\t0\\t5\\t\\n", "\\t7777\\t0\\t0\\t0\\t0\\t0\\t7\\t\\n"):
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
             failures += 1
@@ -815,18 +824,22 @@ def ocpp_compiled(run, failures):
 def auth_compiled(run, failures):
     """What authentication compiles (docs/auth.md sections 4.1 and 6): the key table, the route's record, and what --explain says."""
     text = (TOP + ONE + K1 + K2 + AR + 'auth_header = "X-Api-Key"\nauth_keys = ["bob"]\n' + '[[route]]\nupstream = "a"\npath_prefix = "/b"\nauth = "api-key"\nrate_limit = "5/s"\nrate_key = "auth"\nrate_buckets = 8\n' +
-            '[[route]]\nupstream = "a"\npath_prefix = "/c"\n')
+            '[[route]]\nupstream = "a"\npath_prefix = "/c"\n' + '[[route]]\nupstream = "a"\npath_prefix = "/d"\nauth = "api-key"\nauth_identity_header = "X-Auth-Identity"\n')
     with tempfile.TemporaryDirectory() as tmp:
         f = pathlib.Path(tmp) / "d.toml"
         f.write_text(text)
         subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(f), "--out", tmp], check=True)
         table = (pathlib.Path(tmp) / "routes.cho").read_text()
         explained = run(text).stdout
+    # The caller's header is the last column, in lower case, on the route that asked and on no other (docs/auth.md section 3.1).
+    if table.count("\\tx-auth-identity\\n") != 1 or table.count("\\t\\n") != 3:
+        print("FAIL only the route that asked for it carries the identity header, in lower case: %r" % table[-900:])
+        failures += 1
     keys = '"alice\\t%s\\nbob\\t%s\\n"' % (D1, D2)
     wants = ["pub fn key_count() -> [] int {\n    return 2;", "return " + keys + ";",
-             '\\t1\\tx-api-key\\t0\\t1\\tApiKey realm=\\"cancho-gateway\\", header=\\"x-api-key\\"\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n',
-             '\\ta\\t8\\t0\\t1\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n',
-             '\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n']
+             '\\t1\\tx-api-key\\t0\\t1\\tApiKey realm=\\"cancho-gateway\\", header=\\"x-api-key\\"\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\t\\n',
+             '\\ta\\t8\\t0\\t1\\tauthorization\\t0\\t*\\tBearer realm=\\"cancho-gateway\\"\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\t\\n',
+             '\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\t\\n']
     for want in wants:
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
@@ -956,9 +969,9 @@ def main():
         subprocess.run([sys.executable, str(ROOT / "scripts" / "generate.py"), str(f), "--out", tmp], check=True)
         table = (pathlib.Path(tmp) / "routes.cho").read_text()
         explained = run(limited).stdout
-    for want in ("\\t10\\t60000\\t3\\th:x-api-key\\t64\\t0\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n", "\\t0\\t0\\t0\\t\\t0\\t64\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n", "\\t7\\t1000\\t7\\tx:l\\t1024\\t64\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t64\\t0\\n", "\\t2\\t3600000\\t2\\tr\\t1\\t1088\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\n",
+    for want in ("\\t10\\t60000\\t3\\th:x-api-key\\t64\\t0\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\t\\n", "\\t0\\t0\\t0\\t\\t0\\t64\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\t\\n", "\\t7\\t1000\\t7\\tx:l\\t1024\\t64\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t64\\t0\\t\\n", "\\t2\\t3600000\\t2\\tr\\t1\\t1088\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t0\\t0\\t0\\t0\\t0\\t0\\t\\n",
                  # a ceiling of 30 a minute with room for 7, in the bucket after the route's 8 (1089 + 8), and a prefix of 56
-                 "\\t3\\t1000\\t3\\tx:f\\t8\\t1089\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t30\\t60000\\t7\\t1097\\t56\\t0\\n",
+                 "\\t3\\t1000\\t3\\tx:f\\t8\\t1089\\t0\\t\\t0\\t\\t\\t\\t\\t\\t0\\t1048576\\t30\\t60000\\t7\\t1097\\t56\\t0\\t\\n",
                  "pub fn rate_buckets_total() -> [] int {\n    return 1098;"):
         if want not in table:
             print("FAIL the routes table must contain %r" % want)
