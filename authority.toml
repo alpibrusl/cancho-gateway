@@ -20,10 +20,18 @@
 # and it is exactly those three signals: the compiler refuses a claim of any other name, and the report prints the set. `err_write` (the reload's log
 # line on standard error) was already within the ceiling and is now derived.
 
+# `unbounded_by` (since compiler 0.1.1, cancho #551): the labels the compiler says make the report unbounded, held exactly by scripts/authority.py.
+# The gateway holds the network unnarrowed both ways, as the paragraph above says and as it always did; the compiler used to call that report
+# bounded and now says `"bounded": false, "unbounded_by": ["net_in(\"\")", "net_out(\"\")"]`. Nothing the program may do changed: the report
+# is more truthful. A program with no `unbounded_by` here must be bounded. Narrowing the two labels is its own issue (the ports and the upstream
+# set come from the deployment file, so the generator would have to write the bounds).
+
 [gateway]
+unbounded_by = ["net_in(\"\")", "net_out(\"\")"]
 allow = ["args", "clock", "conn_accept", "conn_read", "conn_write", "dir_read", "file_read", "heap", "io_write", "err_write", "net_in(\"\")", "net_out(\"\")", "poll", "signals(\"HUP,INT,TERM\")", "signals_read"]
 
 [gateway-tls]
+unbounded_by = ["net_in(\"\")", "net_out(\"\")"]
 allow = ["args", "clock", "conn_accept", "conn_read", "conn_write", "dir_read", "file_read", "fs_read(\"/dev/urandom\")", "fs_read(\"/etc/cancho-gateway/tls\")", "heap", "io_write", "err_write", "net_in(\"\")", "net_out(\"\")", "poll", "signals(\"HUP,INT,TERM\")", "signals_read"]
 
 # A test tool: reads its input from argv, answers on standard output. No network, no files.

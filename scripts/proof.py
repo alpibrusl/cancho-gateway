@@ -13,6 +13,7 @@ import html
 import json
 import pathlib
 import sys
+import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PAGE = ROOT / "docs" / "proof.html"
@@ -66,8 +67,12 @@ def row(label):
 
 def table(name, title, note):
     report = load(name)
-    if not report.get("bounded", False):
-        sys.exit("proof.py: %s is not bounded; the page refuses to show it" % name)
+    # What the report is unbounded by must be what authority.toml says for this program (scripts/authority.py holds the same list): since compiler
+    # 0.1.1 the gateway's unnarrowed network is reported `bounded: false`, and the page shows those rows as UNBOUNDED instead of refusing to be built.
+    with open(MANIFESTS.parent / "authority.toml", "rb") as f:
+        pinned = sorted(tomllib.load(f)[name].get("unbounded_by", []))
+    if sorted(report.get("unbounded_by", [])) != pinned:
+        sys.exit("proof.py: %s is unbounded by %s and authority.toml says %s; the page refuses to show it" % (name, report.get("unbounded_by"), pinned))
     if report.get("foreign_symbols"):
         sys.exit("proof.py: %s derives foreign symbols; the page refuses to show it" % name)
     labels = report["labels"]

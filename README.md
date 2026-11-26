@@ -2,7 +2,9 @@
 
 An HTTP/1.1 reverse proxy written in [cancho](https://github.com/alpibrusl/cancho): no `Ffi`, no `unsafe`, and a
 checkable authority report. **The gateway you can audit, with an honest limit:** `cancho authority` proves it touches no
-files and no foreign code and is bounded (CI-gated against `authority.toml`). It does **not** prove which upstreams it
+files and no foreign code (CI-gated against `authority.toml`). *(Corrected 2026-11-26: this said "and is bounded". Since compiler 0.1.1 a
+program that holds the network unnarrowed is reported `bounded: false`, with `unbounded_by: net_in(""), net_out("")`; the gateway always held it
+so, and the gate now holds that list exactly.)* It does **not** prove which upstreams it
 reaches: a cancho program has one network bound shared by listening and connecting, so a proxy's report is `net_in("")`
 and `net_out("")` (measured, `docs/design.md` section 2). The upstream set is compiled in from a deployment file and
 enforced by exact match before every connect, and tested; the compiler does not vouch for it. Strict, bounded request

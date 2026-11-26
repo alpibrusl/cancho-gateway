@@ -346,11 +346,10 @@ trust_forwarded = true  # a TLS front is in front</code></pre>
 <section id="start">
   <h2>Try it</h2>
   <p class="sub">Quickest: <a href="examples.html#download">download the demo binary</a> from the latest release. To point it at your own upstreams, build it from source:</p>
-  <pre class="code" tabindex="0"><code>git clone https://github.com/alpibrusl/cancho &amp;&amp; git clone https://github.com/alpibrusl/cancho-gateway
+  <pre class="code" tabindex="0"><code>git clone https://github.com/alpibrusl/cancho-gateway
 cd cancho-gateway
-git -C ../cancho checkout "$(sed -n 's/^cancho *= *"\([0-9a-f]*\)".*/\1/p' cancho.toml)"
-(cd ../cancho &amp;&amp; cargo build --release -p cancho)
-export PATH="$PWD/../cancho/target/release:$PATH"
+curl -fsSL https://raw.githubusercontent.com/alpibrusl/cancho/main/scripts/install.sh | sh -s "$(sed -n 's/^cancho *= *"\([0-9a-f.]*\)".*/\1/p' cancho.toml)"
+export PATH="$HOME/.local/bin:$PATH"
 
 cp deploy/example.toml my.toml            # edit listen, upstreams, routes
 python3 scripts/generate.py my.toml       # checks it, writes generated/
