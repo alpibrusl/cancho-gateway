@@ -4,8 +4,9 @@
     python3 scripts/authority.py            # regenerate manifests/gateway.authority.json, then check
     python3 scripts/authority.py --check    # change nothing; exit 1 on drift or a breach
 
-A derived label must be in authority.toml; `bounded` must be true; no foreign symbol; and no label
-named in FORBIDDEN, whatever the ceiling says. The compiler is $CANCHO, or `cancho` on PATH.
+A derived label must be in authority.toml; what the compiler says the report is unbounded by must be exactly the
+ceiling's `unbounded_by` list (none for a program that has no such entry, so `bounded` is then true); no foreign symbol;
+and no label named in FORBIDDEN, whatever the ceiling says. The compiler is $CANCHO, or `cancho` on PATH.
 """
 
 import json
@@ -47,10 +48,16 @@ def label_text(label):
     return '%s("%s")' % (label["name"], label["argument"])
 
 
-def problems_for(name, report, allowed):
+def problems_for(name, report, allowed, unbounded=()):
+    """`unbounded`: the labels the ceiling says this program holds unnarrowed (authority.toml `unbounded_by`). Since compiler 0.1.1 a program
+    that holds the network unnarrowed is reported `bounded: false` with the labels that make it so; the list is held exactly, so a report that
+    becomes unbounded by one more label fails, and so does a ceiling that still names a label the program has since narrowed."""
     problems = []
-    if not report.get("bounded", False):
-        problems.append("%s: bounded is false" % name)
+    found = sorted(report.get("unbounded_by", []))
+    if found != sorted(unbounded):
+        problems.append("%s: the report is unbounded by %s, and authority.toml says %s" % (name, found, sorted(unbounded)))
+    if report.get("bounded", False) != (not found):
+        problems.append("%s: bounded is %s with unbounded_by %s" % (name, report.get("bounded"), found))
     if report.get("foreign_symbols"):
         problems.append("%s: foreign symbols %s" % (name, report["foreign_symbols"]))
     for label in report["labels"]:
@@ -86,7 +93,7 @@ def main():
             record.parent.mkdir(exist_ok=True)
             record.write_text(text)
         derive_cached[name] = report
-        failures.extend(problems_for(name, report, set(ceilings[name].get("allow", []))))
+        failures.extend(problems_for(name, report, set(ceilings[name].get("allow", [])), ceilings[name].get("unbounded_by", [])))
         print("%-8s %s" % (name, ", ".join(label_text(l) for l in report["labels"])))
     bins = {e["name"]: e for e in project.get("bin", [])}
     for name, base, deployment in PROFILES:
@@ -104,7 +111,7 @@ def main():
                 failures.append("%s: %s is not the compiler's report" % (name, record.relative_to(ROOT)))
         else:
             record.write_text(text)
-        failures.extend(problems_for(name, report, set(ceilings[name].get("allow", []))))
+        failures.extend(problems_for(name, report, set(ceilings[name].get("allow", [])), ceilings[name].get("unbounded_by", [])))
         reads = sorted(label_text(l) for l in report["labels"] if l["name"] == "fs_read")
         if len(reads) != 2 or any(r == 'fs_read("")' for r in reads):
             failures.append("%s: the filesystem authority must be exactly two named paths, found %s" % (name, reads))

@@ -36,16 +36,26 @@ def report(tmp, mutate=None, source=None):
 
 def main():
     with open(ROOT / "authority.toml", "rb") as fh:
-        allow = set(tomllib.load(fh)["gateway-tls"]["allow"])
+        ceiling = tomllib.load(fh)["gateway-tls"]
+    allow = set(ceiling["allow"])
+    unbounded = ceiling["unbounded_by"]
     failures = 0
     with tempfile.TemporaryDirectory() as tmp:
-        true = authority.problems_for("gateway-tls", report(tmp), allow)
+        true = authority.problems_for("gateway-tls", report(tmp), allow, unbounded)
         print("%-4s the true TLS build is within its ceiling %s" % ("ok" if not true else "FAIL", true))
         failures += bool(true)
     with tempfile.TemporaryDirectory() as tmp:
-        wide = authority.problems_for("gateway-tls", report(tmp, lambda t: t.replace('"/etc/cancho-gateway/tls"', '"/etc"')), allow)
+        wide = authority.problems_for("gateway-tls", report(tmp, lambda t: t.replace('"/etc/cancho-gateway/tls"', '"/etc"')), allow, unbounded)
         print("%-4s a widened directory is refused: %s" % ("ok" if wide else "FAIL", wide))
         failures += not wide
+    with tempfile.TemporaryDirectory() as tmp:
+        # What the report is unbounded by is held exactly: a ceiling that names less (here nothing, as before 0.1.1) or more refuses the true build.
+        r = report(tmp)
+        less = authority.problems_for("gateway-tls", r, allow, [])
+        more_named = authority.problems_for("gateway-tls", r, allow, unbounded + ['fs_read("")'])
+        ok = any("unbounded by" in m for m in less) and any("unbounded by" in m for m in more_named)
+        print("%-4s the unbounded labels are held exactly: %s" % ("ok" if ok else "FAIL", (less, more_named)))
+        failures += not ok
     with tempfile.TemporaryDirectory() as tmp:
         labels = sorted(authority.label_text(l) for l in report(tmp)["labels"] if l["name"].startswith("signals"))
         ok = labels == ['signals("HUP,INT,TERM")', "signals_read"]
@@ -53,7 +63,7 @@ def main():
         failures += not ok
     with tempfile.TemporaryDirectory() as tmp:
         # A claim of one more signal (USR1) in the program: the compiler's report prints it and the ceiling refuses it.
-        more = authority.problems_for("gateway-tls", report(tmp, source=("src/gateway.cho", lambda t: t.replace('"HUP,INT,TERM"', '"HUP,INT,TERM,USR1"').replace('Signals("HUP,INT,TERM")', 'Signals("HUP,INT,TERM,USR1")'))), allow)
+        more = authority.problems_for("gateway-tls", report(tmp, source=("src/gateway.cho", lambda t: t.replace('"HUP,INT,TERM"', '"HUP,INT,TERM,USR1"').replace('Signals("HUP,INT,TERM")', 'Signals("HUP,INT,TERM,USR1")'))), allow, unbounded)
         refused = any("signals" in m for m in more)
         print("%-4s claiming another signal is refused: %s" % ("ok" if refused else "FAIL", more))
         failures += not refused

@@ -17,6 +17,14 @@
       "bounded": true
     }
   ],
+  "never_touches": [
+    "the filesystem",
+    "the network",
+    "the heap",
+    "signals",
+    "other programs",
+    "foreign code"
+  ],
   "foreign_symbols": [],
   "pure": [
     "blob",
@@ -45,7 +53,5 @@
     "trust_forwarded",
     "upstream"
   ],
-  "folded_operators": 9,
-  "folded_calls": 0,
   "functions": 29
 }
