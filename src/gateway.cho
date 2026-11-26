@@ -46,7 +46,7 @@ fn tls_listening[&n](net: &n Net("")) -> [net_in("")] Listening {
 
 // The claim on `SIGHUP`, `SIGINT` and `SIGTERM`: reload the certificates, and stop. Made before anything is served and before any thread
 // (cancho's rule; the gateway has none).
-fn claim_signals[&s](claim: &s Signals("HUP,INT,TERM")) -> [signals("HUP,INT,TERM")] Watching {
+fn claim_signals[&s](claim: &s Signals("HUP,INT,TERM")) -> [] Watching {
     return signals_watch(claim);
 }
 
