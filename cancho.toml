@@ -6,7 +6,7 @@ cancho = "0.1.1"   # the compiler release these sources were written for; CI ins
 # is inside cancho's repository at that commit; `cancho build` and `cancho test` fetch it, re-typecheck and re-hash every declaration (docs/tls.md).
 [dependencies.tls]
 git = "https://github.com/alpibrusl/cancho"
-rev = "2fcf4cde156dbc118d2545dae84d6e054c4118e4"
+rev = "d44389e2badad0cff5cb3b25b027f01e296b5f38"   # the commit of compiler release 0.1.1: the package as that compiler's own gate ran it
 path = "packages/tls/.cancho-vcs/tls"
 
 # One program, one authority row (docs/design.md section 3). The deployment
