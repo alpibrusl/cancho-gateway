@@ -128,3 +128,27 @@ fn test_the_route_ceilings_429_is_the_same_response_with_its_own_rule() -> [] in
     }
     return 0;
 }
+
+fn test_a_426_names_the_upgrade_it_requires() -> [] int {
+    region a {
+        let buf = alloc_slice[a](512, byte_of(0));
+        let n = problem.response(buf, 426, "ws.version", "1a-1f90-0000002a");
+        test.assert(n > 0);
+        test.assert(bytes.find(buf[0..n], "\r\nUpgrade: websocket\r\n") > 0);
+        test.assert(bytes.find(buf[0..n], "\r\nSec-WebSocket-Version: 13\r\n") > 0);
+    }
+    return 0;
+}
+
+fn test_a_405_from_the_admin_listener_names_the_allowed_method() -> [] int {
+    region a {
+        let buf = alloc_slice[a](512, byte_of(0));
+        let n = problem.response(buf, 405, "admin.method", "admin");
+        test.assert(n > 0);
+        test.assert(bytes.find(buf[0..n], "\r\nAllow: GET\r\n") > 0);
+        // A route's 405 names its methods from the routes, not here: it carries no Allow of this kind.
+        let r = problem.response(buf, 405, "route.method", "admin");
+        test.assert(bytes.find(buf[0..r], "Allow:") < 0);
+    }
+    return 0;
+}

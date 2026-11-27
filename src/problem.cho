@@ -119,8 +119,13 @@ pub fn response_challenge[&o, &t, &d, &c](out: &!o [byte], status: int, rule: &t
         }
     }
     if status == 426 {
-        // RFC 6455 4.4: the versions the server speaks (docs/websocket.md section 4, row 7).
+        // RFC 9110 15.5.22: a 426 names the protocol required in an Upgrade field; RFC 6455 4.4: the versions the server speaks (docs/websocket.md section 4, row 7).
+        k = out.put(out, k, "\r\nUpgrade: websocket");
         k = out.put(out, k, "\r\nSec-WebSocket-Version: 13");
+    }
+    if status == 405 && bytes.equal(rule, "admin.method") {
+        // RFC 9110 15.5.6: a 405 MUST carry Allow. The admin listener serves GET only, so the value is fixed.
+        k = out.put(out, k, "\r\nAllow: GET");
     }
     k = out.put(out, k, "\r\nX-Request-Id: ");
     k = out.put(out, k, id);
