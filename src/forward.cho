@@ -305,6 +305,11 @@ fn rewrite_with[&s, &t, &o, &d, &x, &i, &w](src: &s [byte], table: &t [int], out
 // client's connection closes after the response in this slice). `src` and `table` are a head `response.parse` accepted. Answers the
 // length, or `0 - 1` if it does not fit.
 pub fn rewrite_response[&s, &t, &o, &d](src: &s [byte], table: &t [int], out: &!o [byte], id: &d [byte]) -> [] int {
+    // A `Connection` header may not name a header that frames the body: the body is relayed as the upstream framed it, so dropping
+    // its framing header would hand the client a head that does not describe the bytes after it.
+    if connection_lists(src, table, table[2], "transfer-encoding") || connection_lists(src, table, table[2], "content-length") {
+        return 0 - 1;
+    }
     var k = out.put(out, 0, src[0..first_line_end(src)]);
     k = copy_headers(src, table, table[2], out, k);
     k = out.put(out, k, "Via: 1.1 cancho-gateway\r\nX-Request-Id: ");

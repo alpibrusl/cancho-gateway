@@ -351,3 +351,17 @@ fn test_the_name_is_sent_on_an_upgrade_too() -> [] int {
     test.assert(names_to("GET /ws HTTP/1.1\r\nHost: a\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nX-Auth-Identity: root\r\n\r\n", "", "x-auth-identity", "alice", true, false, "GET /ws HTTP/1.1\r\nHost: a\r\nVia: 1.1 cancho-gateway\r\nx-auth-identity: alice\r\nX-Forwarded-Host: a\r\nX-Forwarded-Proto: http\r\nX-Request-Id: 1a-1f90-0000002a\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"));
     return 0;
 }
+
+fn test_a_connection_header_cannot_strip_the_framing_headers_of_a_response() -> [] int {
+    region a {
+        let table = alloc_slice[a](response.slots(16), 0);
+        let out = alloc_slice[a](1024, byte_of(0));
+        let chunked = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: Transfer-Encoding\r\n\r\n";
+        test.assert(response.parse(chunked, table) > 0);
+        test.assert(forward.rewrite_response(chunked, table, out, "i-7") < 0);
+        let sized = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close, content-length\r\n\r\nhello";
+        test.assert(response.parse(sized, table) > 0);
+        test.assert(forward.rewrite_response(sized, table, out, "i-7") < 0);
+    }
+    return 0;
+}
