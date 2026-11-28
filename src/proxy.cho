@@ -435,6 +435,10 @@ fn head_ready[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, now: 
     // The head is good: keep what the access log will say about it (the head's buffer is reused as the request goes on).
     shared.meta_put(core, k, 108, 16, 2, http.method(view, tb));
     shared.meta_put(core, k, 124, 128, 3, http.path(view, tb));
+    // The path is kept in 128 bytes; a longer one is marked, so the access log can say it was cut (docs/observability.md section 2).
+    if len(http.path(view, tb)) > 128 {
+        shared.flag_set(core, k, 8);
+    }
     let sel = route.select(http.header(view, tb, "host"), http.method(view, tb), http.path(view, tb));
     if sel < 0 {
         slots.refuse(tab, core, k, route.status(0 - sel), route.tag(0 - sel), now);

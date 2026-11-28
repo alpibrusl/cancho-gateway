@@ -62,6 +62,10 @@ jobs:
         working-directory: gateway
         run: python3 tests/proxy_test.py
 
+      - name: End-to-end scripts of single defects (tests/e2e), each against the built gateway
+        working-directory: gateway
+        run: for t in tests/e2e/*_test.py; do echo "== $t"; python3 "$t" || exit 1; done
+
       - name: The admin listener and the metrics against an independent count made from the access log
         working-directory: gateway
         run: python3 tests/admin_test.py
