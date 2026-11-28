@@ -301,6 +301,8 @@ pub fn log_end[&c](core: &!c Core, k: int) -> [] int {
     } else if flag_has(st[p + 30], 2) {
         outcome = 0;
     }
+    // The path was longer than the 128 bytes kept for it (`gateway.proxy` sets bit 8 of the flags when it stores the path).
+    let path_cut = flag_has(st[p + 30], 8);
     var upstream_ms = 0;
     if st[p + 26] > 0 && st[p + 25] > 0 {
         upstream_ms = st[p + 26] - st[p + 25];
@@ -344,7 +346,7 @@ pub fn log_end[&c](core: &!c Core, k: int) -> [] int {
     }
     var n = 0 - 1;
     if logq_size() - at >= accesslog.max_line() {
-        n = accesslog.line_full(q[at..at + accesslog.max_line()], ids[2] + st[p + 24], meta_get(core, k, 4, 0), meta_get(core, k, 108, 2), meta_get(core, k, 124, 3), route_name, upstream_name, st[p + 29], meta_get(core, k, 68, 1), outcome, now - st[p + 24], upstream_ms, st[p + 28], st[p + 27], st[p + tlsio.f_mode()] != 0, st[p + ws_mode()] == 2, identity, ws_close);
+        n = accesslog.line_full(q[at..at + accesslog.max_line()], ids[2] + st[p + 24], meta_get(core, k, 4, 0), meta_get(core, k, 108, 2), meta_get(core, k, 124, 3), route_name, upstream_name, st[p + 29], meta_get(core, k, 68, 1), outcome, now - st[p + 24], upstream_ms, st[p + 28], st[p + 27], st[p + tlsio.f_mode()] != 0, st[p + ws_mode()] == 2, identity, ws_close, path_cut);
     }
     if n < 0 {
         ids[5] = ids[5] + 1;
